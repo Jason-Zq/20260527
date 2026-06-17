@@ -1,0 +1,17 @@
+pdfplumber>=0.10.0
+paddlepaddle==2.6.2
+paddleocr>=2.7.0,<3
+pypdfium2>=5.0.0
+pypdf>=4.0.0
+Pillow>=10.0.0
+openai>=1.0.0
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.29.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.0
+python-docx>=1.1.0
+docxtpl>=0.16.7
+docx2pdf>=0.1.8
+pywin32>=306; sys_platform == 'win32'
+mammoth>=1.7.0
+beautifulsoup4>=4.12.0
