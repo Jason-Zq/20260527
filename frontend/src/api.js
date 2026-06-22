@@ -225,6 +225,61 @@ export async function deleteSummary(summaryId) {
   return r.data
 }
 
+// ==================== 文件留底检测（archive-detect） ====================
+
+/**
+ * 上传多个文件 + 用户判定提示词，提交一个检测批次。
+ * @param {File[]} files
+ * @param {string} userPrompt 用户多行提示词
+ * @returns {Promise<{batch_id: string, total_files: number}>}
+ */
+export async function submitArchiveDetectUpload(files, userPrompt) {
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f)
+  fd.append('user_prompt', userPrompt)
+  const r = await axios.post(`${API_BASE}/archive-detect/upload`, fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+  return r.data
+}
+
+/**
+ * URL 列表 + 提示词模式提交。
+ * @param {string[]} urls
+ * @param {string} userPrompt
+ */
+export async function submitArchiveDetectUrls(urls, userPrompt) {
+  const r = await axios.post(`${API_BASE}/archive-detect/urls`,
+    { urls, user_prompt: userPrompt },
+    { timeout: 60000 })
+  return r.data
+}
+
+/**
+ * 轮询批次状态（含每文件状态与脱敏后结果）。
+ */
+export async function pollArchiveDetect(batchId) {
+  const r = await axios.get(`${API_BASE}/archive-detect/${batchId}`)
+  return r.data
+}
+
+/**
+ * 历史 batch 列表（不含 files）。
+ */
+export async function listArchiveDetectHistory(limit = 200) {
+  const r = await axios.get(`${API_BASE}/archive-detect/history`, { params: { limit } })
+  return r.data
+}
+
+/**
+ * 删除一条历史。
+ */
+export async function deleteArchiveDetect(batchId) {
+  const r = await axios.delete(`${API_BASE}/archive-detect/${batchId}`)
+  return r.data
+}
+
 // ==================== Word 模板 相关接口 (v2: anchor-based) ====================
 
 /**

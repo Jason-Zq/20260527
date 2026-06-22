@@ -9,9 +9,9 @@
       <p class="home-sub">移民客户档案 · AI 解析 · 模板填写 · PDF 拆分</p>
     </header>
 
-    <!-- 横向三栏卡片 -->
+    <!-- 横向四栏卡片 -->
     <main class="home-entries">
-      <article class="entry-card" @click="emit('parse')" tabindex="0" @keydown.enter="emit('parse')">
+      <article class="entry-card" @click="go('/parse')" tabindex="0" @keydown.enter="go('/parse')">
         <div class="card-glow icon-magic"></div>
         <div class="entry-icon icon-magic">
           <el-icon :size="30"><MagicStick /></el-icon>
@@ -29,7 +29,7 @@
         </div>
       </article>
 
-      <article class="entry-card" @click="emit('template')" tabindex="0" @keydown.enter="emit('template')">
+      <article class="entry-card" @click="go('/template')" tabindex="0" @keydown.enter="go('/template')">
         <div class="card-glow icon-doc"></div>
         <div class="entry-icon icon-doc">
           <el-icon :size="30"><Document /></el-icon>
@@ -47,7 +47,7 @@
         </div>
       </article>
 
-      <article class="entry-card" @click="emit('split')" tabindex="0" @keydown.enter="emit('split')">
+      <article class="entry-card" @click="go('/split')" tabindex="0" @keydown.enter="go('/split')">
         <div class="card-glow icon-split"></div>
         <div class="entry-icon icon-split">
           <el-icon :size="30"><Files /></el-icon>
@@ -65,17 +65,17 @@
         </div>
       </article>
 
-      <article class="entry-card" @click="emit('summary')" tabindex="0" @keydown.enter="emit('summary')">
+      <article class="entry-card" @click="go('/archive-detect')" tabindex="0" @keydown.enter="go('/archive-detect')">
         <div class="card-glow icon-summary"></div>
         <div class="entry-icon icon-summary">
           <el-icon :size="30"><Reading /></el-icon>
         </div>
-        <h3 class="entry-title">文件解析</h3>
-        <p class="entry-desc">输入文件 URL，AI 下载并 OCR 识别，输出文件内容摘要与关键要点</p>
+        <h3 class="entry-title">文件留底检测</h3>
+        <p class="entry-desc">上传或粘贴文件 URL，AI 检测是否符合留底标准，敏感信息自动脱敏</p>
         <ul class="entry-bullets">
-          <li><el-icon size="12"><Check /></el-icon> 支持 PDF / 图片 / Word</li>
-          <li><el-icon size="12"><Check /></el-icon> 一句话定性 + 摘要</li>
-          <li><el-icon size="12"><Check /></el-icon> 历史记录可复查</li>
+          <li><el-icon size="12"><Check /></el-icon> 多文件并发处理（≤20）</li>
+          <li><el-icon size="12"><Check /></el-icon> 用户自定义判定标准</li>
+          <li><el-icon size="12"><Check /></el-icon> 金额/电话/身份证自动脱敏</li>
         </ul>
         <div class="entry-cta">
           开始使用
@@ -92,9 +92,13 @@
 </template>
 
 <script setup>
+import { useRouter } from 'vue-router'
 import { MagicStick, Document, Files, Reading, ArrowRight, Check } from '@element-plus/icons-vue'
 
-const emit = defineEmits(['parse', 'template', 'split', 'summary'])
+const router = useRouter()
+function go(path) {
+  router.push(path)
+}
 </script>
 
 <style scoped>

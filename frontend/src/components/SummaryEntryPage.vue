@@ -234,8 +234,12 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { summarizeFile, listSummaries, getSummary, deleteSummary } from '../api.js'
+import { useRouter } from 'vue-router'
 
-const emit = defineEmits(['back'])
+const router = useRouter()
+function emit(evt) {
+  if (evt === 'back') router.push('/')
+}
 
 const url = ref('')
 const progressName = ref('')

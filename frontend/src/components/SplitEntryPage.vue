@@ -271,8 +271,12 @@ import {
   listSplitHistory,
   deleteSplitHistory,
 } from '../api.js'
+import { useRouter } from 'vue-router'
 
-const emit = defineEmits(['back'])
+const router = useRouter()
+function emit(evt) {
+  if (evt === 'back') router.push('/')
+}
 
 const processing = ref(false)
 const result = ref(null)

@@ -217,8 +217,12 @@ import ClientListPage from './ClientListPage.vue'
 import ClientDetailPage from './ClientDetailPage.vue'
 import ArchiveReviewPanel from './ArchiveReviewPanel.vue'
 import { uploadFile, pollResult, listClients, createClient, saveReview } from '../api.js'
+import { useRouter } from 'vue-router'
 
-const emit = defineEmits(['back'])
+const router = useRouter()
+function emit(evt) {
+  if (evt === 'back') router.push('/')
+}
 
 const result = ref(null)            // 当前选中预览的 task 完整结果
 const activeTaskId = ref(null)      // 队列中当前选中的 taskId

@@ -101,3 +101,6 @@ oa_check.json
 # Claude 计划文件（如果项目里有的话）
 .claude/
 plans/
+
+# 部署打包产物（zip 文件）
+release/

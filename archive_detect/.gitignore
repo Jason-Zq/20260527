@@ -1,0 +1,19 @@
+# 依赖
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/.venv/
+
+# 配置（含密钥）
+config.json
+
+# 临时文件
+temp/
+output/
+logs/
+
+# 构建产物
+**/dist/
+
+# 离线 wheels（300MB，单独传给同事即可，不入版本库）
+offline_wheels/

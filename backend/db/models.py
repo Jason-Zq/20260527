@@ -367,3 +367,88 @@ class Summary(Base):
 
     def __repr__(self):
         return f"<Summary(id={self.id}, progress='{self.progress_name}', filename='{self.filename}')>"
+
+
+class ArchiveDetectBatch(Base):
+    """文件留底检测：批次表。
+
+    一次提交对应一条 batch 记录；batch 下挂 N 个 file（多文件并发处理）。
+    user_prompt 为用户输入的判定标准（多行），会被拼接进 LLM prompt。
+    source_kind 区分上传文件 vs URL 列表两种来源。
+    """
+    __tablename__ = "archive_detect_batches"
+
+    batch_id = Column(String(40), primary_key=True, comment="任务批次ID")
+    user_prompt = Column(Text, nullable=False, comment="用户输入的留底判定标准（多行）")
+    source_kind = Column(String(10), nullable=False, comment="upload | url")
+    total_files = Column(Integer, nullable=False, comment="文件总数（1-20）")
+    done_files = Column(Integer, default=0, nullable=False, comment="已完成（含成功+失败）")
+    status = Column(String(20), default="running", nullable=False, comment="running|done|error")
+    error = Column(Text, nullable=True, comment="batch 级错误（极少触发）")
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+    files = relationship(
+        "ArchiveDetectFile",
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="ArchiveDetectFile.idx",
+    )
+
+    __table_args__ = (
+        Index("ix_archive_detect_batches_created_at", "created_at"),
+    )
+
+    def __repr__(self):
+        return f"<ArchiveDetectBatch(batch_id='{self.batch_id}', status='{self.status}', total={self.total_files})>"
+
+
+class ArchiveDetectFile(Base):
+    """文件留底检测：单文件结果。
+
+    OCR 原文不持久化（敏感信息最小留存）；reason / key_points 写库前已脱敏。
+    """
+    __tablename__ = "archive_detect_files"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    batch_id = Column(
+        String(40),
+        ForeignKey("archive_detect_batches.batch_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    idx = Column(Integer, nullable=False, comment="文件在 batch 中的顺序（0-based）")
+
+    # 文件来源
+    source_url = Column(Text, nullable=True, comment="URL 模式下的原始 URL")
+    filename = Column(String(500), nullable=True)
+    mime_type = Column(String(100), nullable=True)
+
+    # 抽取产物（不存全文）
+    page_count = Column(Integer, nullable=True)
+    char_count = Column(Integer, nullable=True)
+
+    # LLM 判定结果（已脱敏后才写）
+    is_archival = Column(Boolean, nullable=True)
+    confidence = Column(Integer, nullable=True, comment="0-100")
+    reason = Column(Text, nullable=True, comment="判定依据（已脱敏）")
+    key_points = Column(JSONB, nullable=True, comment="要点列表（已脱敏）")
+    doc_category = Column(String(50), nullable=True)
+
+    # 状态机
+    status = Column(String(20), default="pending", nullable=False,
+                    comment="pending|fetching|ocr|llm|done|error")
+    error_msg = Column(Text, nullable=True)
+    elapsed_sec = Column(Numeric(8, 2), nullable=True)
+
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+    batch = relationship("ArchiveDetectBatch", back_populates="files")
+
+    __table_args__ = (
+        Index("ix_archive_detect_files_batch_id", "batch_id"),
+        Index("ux_archive_detect_files_batch_idx", "batch_id", "idx", unique=True),
+    )
+
+    def __repr__(self):
+        return f"<ArchiveDetectFile(batch='{self.batch_id}', idx={self.idx}, status='{self.status}')>"

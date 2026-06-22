@@ -1,38 +1,27 @@
 <template>
   <div class="app-container">
-    <!-- 顶部标题栏 -->
     <header class="app-header">
       <div class="header-left">
         <div class="header-logo"></div>
-        <h1 class="app-title">智能文档审核工作台</h1>
+        <h1 class="app-title">文件留底检测</h1>
       </div>
     </header>
-
-    <!-- 路由出口：每个页面通过 router-view 渲染 -->
-    <router-view class="full-view" />
+    <ArchiveDetectEntryPage class="full-view" />
   </div>
 </template>
 
 <script setup>
-// 路由配置在 src/router.js；App 仅承担布局壳
+import ArchiveDetectEntryPage from './components/ArchiveDetectEntryPage.vue'
 </script>
 
 <style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
+* { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
   height: 100%;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: #f0f2f8;
 }
-
-#app {
-  height: 100%;
-}
+#app { height: 100%; }
 </style>
 
 <style scoped>
@@ -55,7 +44,6 @@ html, body {
   position: relative;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
-
 .app-header::after {
   content: '';
   position: absolute;
@@ -63,7 +51,7 @@ html, body {
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+  background: linear-gradient(90deg, #fb923c, #f59e0b);
 }
 
 .header-left {
@@ -71,18 +59,16 @@ html, body {
   align-items: center;
   gap: 12px;
 }
-
 .header-logo {
   width: 32px;
   height: 32px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: linear-gradient(135deg, #fb923c, #f59e0b);
   border-radius: 8px;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-
 .header-logo::after {
   content: 'AI';
   color: #fff;
@@ -90,24 +76,19 @@ html, body {
   font-weight: 700;
   letter-spacing: 0.5px;
 }
-
 .app-title {
   font-size: 17px;
   font-weight: 700;
   margin: 0;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: linear-gradient(135deg, #fb923c, #f59e0b);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
   letter-spacing: 0.5px;
 }
 
-.full-view {
-  flex: 1;
-  overflow: hidden;
-}
+.full-view { flex: 1; overflow: hidden; }
 
-/* 滚动条 */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }

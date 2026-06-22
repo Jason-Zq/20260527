@@ -30,6 +30,8 @@ from db import summary_crud
 
 import file_fetcher
 import text_extractor
+import archive_detect_service
+from db import archive_detect_crud
 
 app = FastAPI(title="智能文档审核工作台", version="1.0.0")
 
@@ -1914,6 +1916,134 @@ async def delete_summary(summary_id: int):
     ok = await summary_crud.delete(summary_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"摘要 {summary_id} 不存在")
+    return {"deleted": True}
+
+
+# ==================== 文件留底检测 ====================
+
+class ArchiveDetectUrlsPayload(BaseModel):
+    """URL 列表模式提交体。"""
+    user_prompt: str
+    urls: list[str]
+
+
+@app.post("/api/archive-detect/upload")
+async def archive_detect_upload(
+    files: list[UploadFile] = File(...),
+    user_prompt: str = Form(...),
+):
+    """上传文件模式：multipart 提交多文件 + 判定提示词。
+
+    返回 {batch_id, total_files}。前端用 batch_id 轮询 GET /api/archive-detect/{batch_id}。
+    """
+    user_prompt = (user_prompt or "").strip()
+    if not user_prompt:
+        raise HTTPException(status_code=400, detail="判定标准（提示词）不能为空")
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个文件")
+    if len(files) > archive_detect_service.MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多 {archive_detect_service.MAX_FILES_PER_BATCH} 个文件，收到 {len(files)} 个",
+        )
+
+    # 把每个 UploadFile 落到 temp/archive_detect/，构造 items
+    items: list[dict] = []
+    upload_dir = archive_detect_service._upload_temp_dir()
+    for i, f in enumerate(files):
+        if not f.filename:
+            raise HTTPException(status_code=400, detail=f"第 {i+1} 个文件没有文件名")
+        if not file_fetcher.is_supported_extension(f.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的文件类型：{f.filename}（支持 {', '.join(file_fetcher.get_supported_extensions())}）",
+            )
+        # 文件名含中文 / 空格也安全
+        safe_name = os.path.basename(f.filename)
+        token = datetime.now().strftime("%y%m%d%H%M%S") + f"_{i}_"
+        local_path = os.path.join(upload_dir, token + safe_name)
+        content = await f.read()
+        with open(local_path, "wb") as out:
+            out.write(content)
+        items.append({
+            "local_path": local_path,
+            "filename": safe_name,
+            "mime_type": f.content_type or None,
+        })
+
+    try:
+        batch_id = await archive_detect_service.submit_batch(
+            user_prompt=user_prompt,
+            source_kind="upload",
+            items=items,
+        )
+    except ValueError as e:
+        # 提交失败（如校验错误）→ 清理已落盘的临时文件
+        for it in items:
+            try:
+                if it.get("local_path") and os.path.exists(it["local_path"]):
+                    os.remove(it["local_path"])
+            except OSError:
+                pass
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"batch_id": batch_id, "total_files": len(items)}
+
+
+@app.post("/api/archive-detect/urls")
+async def archive_detect_urls(payload: ArchiveDetectUrlsPayload):
+    """URL 列表模式：JSON 提交一组 URL + 判定提示词。"""
+    user_prompt = (payload.user_prompt or "").strip()
+    urls = [u.strip() for u in (payload.urls or []) if u and u.strip()]
+    if not user_prompt:
+        raise HTTPException(status_code=400, detail="判定标准（提示词）不能为空")
+    if not urls:
+        raise HTTPException(status_code=400, detail="请至少输入一个 URL")
+    if len(urls) > archive_detect_service.MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多 {archive_detect_service.MAX_FILES_PER_BATCH} 个 URL，收到 {len(urls)} 个",
+        )
+    for u in urls:
+        if not u.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail=f"非法 URL（仅支持 http/https）: {u}")
+
+    items = [{"source_url": u} for u in urls]
+    try:
+        batch_id = await archive_detect_service.submit_batch(
+            user_prompt=user_prompt,
+            source_kind="url",
+            items=items,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"batch_id": batch_id, "total_files": len(items)}
+
+
+# 注意：history 必须在 /{batch_id} 之前注册，避免路径参数吞掉 "history"
+@app.get("/api/archive-detect/history")
+async def archive_detect_history(limit: int = Query(200, ge=1, le=500)):
+    """历史 batch 列表（不含 files 详情）。"""
+    items = await archive_detect_service.list_history(limit=limit)
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/archive-detect/{batch_id}")
+async def archive_detect_get(batch_id: str):
+    """轮询 batch + 每文件状态。优先内存态，缺失时从 DB 读。"""
+    data = await archive_detect_service.get_batch(batch_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
+    return data
+
+
+@app.delete("/api/archive-detect/{batch_id}")
+async def archive_detect_delete(batch_id: str):
+    """删除一条历史记录（DB 级联清理 files）。"""
+    ok = await archive_detect_service.delete_batch(batch_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
     return {"deleted": True}
 
 

@@ -482,3 +482,103 @@ def summarize_text(text: str, progress_name: str | None = None) -> dict:
 
     return out
 
+
+# ==================== 文件留底检测 ====================
+
+ARCHIVE_DETECT_INPUT_LIMIT_CHARS = 30000
+
+
+def _build_archive_detect_prompt(text: str, user_prompt: str) -> str:
+    """把用户输入的多行判定标准拼接进 LLM prompt。"""
+    doc_types = CONFIG.get("document_types") or [
+        "身份证件", "学历证明", "婚姻证明", "财务证明", "工作证明",
+        "申请表单", "合同协议", "报告说明", "简历", "其他",
+    ]
+    cat_str = " / ".join(doc_types)
+
+    return (
+        "你是一个文档归档（留底）判定助手。下面是用户描述的判定标准（请严格按它判定，未提到的维度不要发挥）：\n"
+        "---用户判定标准开始---\n"
+        f"{user_prompt}\n"
+        "---用户判定标准结束---\n\n"
+        "请阅读以下文件内容，判定该文件是否符合上述判定标准，并输出：\n"
+        "1. is_archival: true / false\n"
+        "2. confidence: 0-100 整数（基于文本证据强度）\n"
+        "3. reason: 30-120 字判断依据，仅引用与判定标准直接相关的内容；"
+        "**不要泄露金额、电话、身份证号、银行卡号、账号等敏感信息，遇到这类内容请用 [金额]/[手机号]/[身份证]/[银行卡] 等占位词代替**\n"
+        "4. key_points: 3-6 条要点 bullets，遵循同样的脱敏要求\n"
+        f"5. doc_category: 从下列中选一个：{cat_str}\n\n"
+        "返回严格 JSON，不要 markdown 代码块、不要任何额外解释：\n"
+        '{"is_archival": true, "confidence": 0, "reason": "...", "key_points": ["..."], "doc_category": "..."}\n\n'
+        "文件内容：\n---\n"
+        f"{text}\n---\n"
+    )
+
+
+def detect_archival(text: str, user_prompt: str) -> dict:
+    """以用户提供的判定标准判断 text 是否符合留底要求。
+
+    入参：
+      text        - 已抽取的纯文本（OCR 或 docx 抽取）
+      user_prompt - 用户输入的多行判定标准（必填）
+
+    返回：
+      {
+        "is_archival": bool,
+        "confidence": int 0-100,
+        "reason": str (LLM 已被 prompt 要求脱敏；服务层还会再用 redactor 兜底),
+        "key_points": list[str] (同上),
+        "doc_category": str,
+      }
+
+    异常：
+      ValueError - 文本为空 / user_prompt 为空 / LLM 返回非 JSON
+    """
+    if not text or not text.strip():
+        raise ValueError("文件内容为空，无法判定")
+    if not user_prompt or not user_prompt.strip():
+        raise ValueError("判定标准 user_prompt 不能为空")
+
+    src = text.strip()
+    if len(src) > ARCHIVE_DETECT_INPUT_LIMIT_CHARS:
+        head_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS // 2
+        tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
+        src = (
+            src[:head_n]
+            + f"\n\n...[省略 {len(text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n"
+            + src[-tail_n:]
+        )
+
+    prompt = _build_archive_detect_prompt(src, user_prompt.strip())
+    raw = _call_llm(prompt)
+
+    # 解析 JSON（容错）
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            data = json.loads(raw[start:end + 1])
+        else:
+            data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM 返回非合法 JSON：{raw[:200]}") from e
+
+    # 字段兜底
+    is_archival = data.get("is_archival")
+    if isinstance(is_archival, str):
+        is_archival = is_archival.strip().lower() in ("true", "1", "yes", "是")
+    is_archival = bool(is_archival)
+
+    try:
+        confidence = int(data.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0
+    confidence = max(0, min(100, confidence))
+
+    return {
+        "is_archival": is_archival,
+        "confidence": confidence,
+        "reason": str(data.get("reason", "")).strip(),
+        "key_points": [str(x).strip() for x in (data.get("key_points") or []) if str(x).strip()],
+        "doc_category": str(data.get("doc_category", "其他")).strip() or "其他",
+    }

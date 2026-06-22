@@ -32,11 +32,15 @@
 
 <script setup>
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import TemplateListPage from './TemplateListPage.vue'
 import TemplateFillPage from './TemplateFillPage.vue'
 
-const emit = defineEmits(['back'])
+const router = useRouter()
+function emit(evt) {
+  if (evt === 'back') router.push('/')
+}
 
 const subView = ref('list')           // list | fill
 const currentTemplateId = ref(null)
