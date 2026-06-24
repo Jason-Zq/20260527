@@ -9,9 +9,8 @@
 # 包含：
 #   backend/db/             ORM + CRUD（不含 __pycache__）
 #   backend/*.py            后端源码
-#   backend/requirements.txt
+#   backend/requirements.txt  Python 后端依赖清单（权威）
 #   migrations/             数据库迁移脚本
-#   requirements.txt        Python 依赖清单
 #   alembic.ini             alembic 配置
 #   config.json.example     配置模板
 #   python部署 .txt          部署文档
@@ -87,7 +86,7 @@ Get-ChildItem -Path 'migrations\versions' -File -Filter '*.py' | ForEach-Object 
 
 # 3) 项目根的配置和文档文件
 Write-Host '  [3/6] 收集根目录配置 ...' -ForegroundColor Yellow
-foreach ($f in @('requirements.txt', 'alembic.ini', 'config.json.example', 'python部署 .txt')) {
+foreach ($f in @('alembic.ini', 'config.json.example', 'python部署 .txt')) {
     if (Test-Path $f) {
         Copy-Item $f $tempStaging
     } else {

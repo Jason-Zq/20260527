@@ -73,7 +73,7 @@ source .venv312/bin/activate
 ### 2. 安装后端依赖
 
 ```bash
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -r backend/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ### 3. 配置数据库与 LLM
@@ -165,11 +165,11 @@ npm run dev
 │   │       ├── SplitEntryPage.vue
 │   │       └── SummaryEntryPage.vue
 │   └── package.json
-├── migrations/versions/             alembic 迁移（001~007）
+├── migrations/versions/             alembic 迁移（001~010）
 ├── tests/                           单元测试 + 冒烟脚本
 ├── config.json.example              配置模板（克隆后复制为 config.json 并填值）
 ├── alembic.ini
-├── requirements.txt
+├── backend/requirements.txt         后端 Python 依赖清单
 ├── CLAUDE.md                        给 Claude Code 的项目说明
 └── README.md
 ```
