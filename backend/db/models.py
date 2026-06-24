@@ -369,22 +369,63 @@ class Summary(Base):
         return f"<Summary(id={self.id}, progress='{self.progress_name}', filename='{self.filename}')>"
 
 
+class ArchiveDetectProgress(Base):
+    """文件审核：进展包表（业务事件维度，稳定）。
+
+    9 个业务字段里 8 个在此（客户编码/姓名在 clients）。
+    一个进展包 = 一个客户的一个项目详情的一个进展。
+    (client_id, progress_oid) 组合唯一——同客户内 OID 不重，不同客户可重。
+    """
+    __tablename__ = "archive_detect_progress"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, comment="关联客户")
+    handler = Column(String(100), nullable=True, comment="办理人（进展包属性，只存名字）")
+    project_name = Column(String(200), nullable=True, comment="项目名称")
+    project_code = Column(String(100), nullable=True, comment="项目编码")
+    project_detail_name = Column(String(200), nullable=True, comment="项目详情名称")
+    project_detail_code = Column(String(100), nullable=True, comment="项目详情编码")
+    progress_oid = Column(String(100), nullable=False, comment="进展OID（业务方标识）")
+    progress_name = Column(String(200), nullable=True, comment="进展名称")
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+    batches = relationship("ArchiveDetectBatch", back_populates="progress")
+    files = relationship("ArchiveDetectFile", back_populates="progress")
+    summaries = relationship("ArchiveDetectFolderSummary", back_populates="progress",
+                             cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ux_archive_detect_progress_client_oid", "client_id", "progress_oid", unique=True),
+        Index("ix_archive_detect_progress_client", "client_id"),
+    )
+
+    def __repr__(self):
+        return f"<ArchiveDetectProgress(id={self.id}, client_id={self.client_id}, progress_oid='{self.progress_oid}')>"
+
+
 class ArchiveDetectBatch(Base):
-    """文件留底检测：批次表。
+    """文件留底检测/审核：批次表（一次提交动作）。
 
     一次提交对应一条 batch 记录；batch 下挂 N 个 file（多文件并发处理）。
-    user_prompt 为用户输入的判定标准（多行），会被拼接进 LLM prompt。
-    source_kind 区分上传文件 vs URL 列表两种来源。
+    user_prompt 为判定标准（多行），拼接进 LLM prompt。
+    source_kind: upload | url | batch（业务审核模式）。
+    progress_id/overall_* 仅业务审核模式有值（匿名 batch 为 NULL）。
+    overall_* = 当次总体判断快照；进展包维度滚动判断见 ArchiveDetectFolderSummary。
     """
     __tablename__ = "archive_detect_batches"
 
     batch_id = Column(String(40), primary_key=True, comment="任务批次ID")
     user_prompt = Column(Text, nullable=False, comment="用户输入的留底判定标准（多行）")
-    source_kind = Column(String(10), nullable=False, comment="upload | url")
+    source_kind = Column(String(10), nullable=False, comment="upload | url | batch")
     total_files = Column(Integer, nullable=False, comment="文件总数（1-20）")
     done_files = Column(Integer, default=0, nullable=False, comment="已完成（含成功+失败）")
     status = Column(String(20), default="running", nullable=False, comment="running|done|error")
     error = Column(Text, nullable=True, comment="batch 级错误（极少触发）")
+    progress_id = Column(Integer, ForeignKey("archive_detect_progress.id"), nullable=True, comment="关联进展包")
+    overall_verdict = Column(String(20), nullable=True, comment="当次总体判断 match|partial|mismatch")
+    overall_score = Column(Integer, nullable=True, comment="当次总体匹配度 0-100")
+    overall_reason = Column(Text, nullable=True, comment="当次总体判断依据（脱敏后）")
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
@@ -394,9 +435,11 @@ class ArchiveDetectBatch(Base):
         cascade="all, delete-orphan",
         order_by="ArchiveDetectFile.idx",
     )
+    progress = relationship("ArchiveDetectProgress", back_populates="batches")
 
     __table_args__ = (
         Index("ix_archive_detect_batches_created_at", "created_at"),
+        Index("ix_archive_detect_batches_progress", "progress_id"),
     )
 
     def __repr__(self):
@@ -404,9 +447,12 @@ class ArchiveDetectBatch(Base):
 
 
 class ArchiveDetectFile(Base):
-    """文件留底检测：单文件结果。
+    """文件留底检测/审核：单文件结果。
 
     OCR 原文不持久化（敏感信息最小留存）；reason / key_points 写库前已脱敏。
+    增量字段（progress_id/file_id/version/content_sha256/match_score/verdict/deleted）
+    仅业务审核模式有值；匿名 batch 这些列为 NULL。
+    file 同时属于一个 batch（当次）和一个 progress（历史演进）。
     """
     __tablename__ = "archive_detect_files"
 
@@ -418,6 +464,13 @@ class ArchiveDetectFile(Base):
     )
     idx = Column(Integer, nullable=False, comment="文件在 batch 中的顺序（0-based）")
 
+    # 进展包关联 + 增量去重
+    progress_id = Column(Integer, ForeignKey("archive_detect_progress.id"), nullable=True, comment="关联进展包")
+    file_id = Column(String(200), nullable=True, comment="调用方传的显式文件标识（增量 key）")
+    version = Column(Integer, nullable=True, default=1, comment="同 file_id 的检测版本号")
+    content_sha256 = Column(String(64), nullable=True, comment="文件内容哈希")
+    deleted = Column(Boolean, nullable=True, default=False, comment="软删标记")
+
     # 文件来源
     source_url = Column(Text, nullable=True, comment="URL 模式下的原始 URL")
     filename = Column(String(500), nullable=True)
@@ -426,10 +479,13 @@ class ArchiveDetectFile(Base):
     # 抽取产物（不存全文）
     page_count = Column(Integer, nullable=True)
     char_count = Column(Integer, nullable=True)
+    ocr_text = Column(Text, nullable=True, comment="OCR识别文字（已脱敏）")
 
     # LLM 判定结果（已脱敏后才写）
     is_archival = Column(Boolean, nullable=True)
-    confidence = Column(Integer, nullable=True, comment="0-100")
+    confidence = Column(Integer, nullable=True, comment="0-100（旧字段，= match_score 语义）")
+    match_score = Column(Integer, nullable=True, comment="匹配度 0-100")
+    verdict = Column(String(20), nullable=True, comment="match|partial|mismatch")
     reason = Column(Text, nullable=True, comment="判定依据（已脱敏）")
     key_points = Column(JSONB, nullable=True, comment="要点列表（已脱敏）")
     doc_category = Column(String(50), nullable=True)
@@ -444,11 +500,45 @@ class ArchiveDetectFile(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
     batch = relationship("ArchiveDetectBatch", back_populates="files")
+    progress = relationship("ArchiveDetectProgress", back_populates="files")
 
     __table_args__ = (
         Index("ix_archive_detect_files_batch_id", "batch_id"),
         Index("ux_archive_detect_files_batch_idx", "batch_id", "idx", unique=True),
+        Index("ix_archive_detect_files_progress", "progress_id"),
+        Index("ix_archive_detect_files_fileid_version", "progress_id", "file_id", "version"),
+        Index("ix_archive_detect_files_fileid_hash", "progress_id", "file_id", "content_sha256"),
+        Index("ix_archive_detect_files_deleted", "deleted"),
     )
 
     def __repr__(self):
         return f"<ArchiveDetectFile(batch='{self.batch_id}', idx={self.idx}, status='{self.status}')>"
+
+
+class ArchiveDetectFolderSummary(Base):
+    """文件审核：进展包维度滚动总体判断（多版本）。
+
+    随文件增删改查动态更新，每次更新新增一个 version，不覆盖旧版。
+    取最新 version = 该进展包当前总体状态。
+    summary JSONB: {match/partial/mismatch 统计 + LLM 概述 + 风险提示}。
+    """
+    __tablename__ = "archive_detect_folder_summaries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    progress_id = Column(Integer, ForeignKey("archive_detect_progress.id", ondelete="CASCADE"),
+                         nullable=False, comment="关联进展包")
+    version = Column(Integer, nullable=False, comment="汇总版本号")
+    criteria = Column(Text, nullable=True, comment="本次汇总用的审核标准")
+    summary = Column(JSONB, nullable=True, comment="汇总内容（统计+LLM概述）")
+    file_count = Column(Integer, nullable=True, comment="参与汇总的文件数")
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    progress = relationship("ArchiveDetectProgress", back_populates="summaries")
+
+    __table_args__ = (
+        Index("ux_archive_detect_summaries_progress_version", "progress_id", "version", unique=True),
+        Index("ix_archive_detect_summaries_progress_created", "progress_id", "created_at"),
+    )
+
+    def __repr__(self):
+        return f"<ArchiveDetectFolderSummary(progress={self.progress_id}, version={self.version})>"

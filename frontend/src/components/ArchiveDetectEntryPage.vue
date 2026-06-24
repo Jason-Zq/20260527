@@ -1,17 +1,31 @@
 <template>
   <div class="archive-detect-page">
-    <!-- 顶栏：仅标题 -->
+    <!-- 顶栏：标题 + tab 切换 + 历史记录按钮 -->
     <div class="entry-header">
       <div class="entry-title">
         <span class="title-indicator"></span>
         文件留底检测
       </div>
+      <el-radio-group v-model="tabKind" :disabled="busy" size="default" class="tab-switch">
+        <el-radio-button label="business">业务审核</el-radio-button>
+        <el-radio-button label="quick">快速检测</el-radio-button>
+      </el-radio-group>
+      <el-button class="history-btn" size="default" @click="openHistory">
+        <el-icon style="margin-right: 4px"><Clock /></el-icon>
+        历史记录
+      </el-button>
     </div>
 
     <!-- 主体 -->
     <div class="main-scroll">
-      <!-- 1. 提示词输入区 -->
-      <section class="card">
+      <!-- 隐私提醒条(仅快速检测模式) -->
+      <div v-if="tabKind === 'quick'" class="privacy-banner">
+        <el-icon><Lock /></el-icon>
+        <span>文件不入库、处理完即删，不会在本服务保存</span>
+      </div>
+
+      <!-- 判定提示词(快速模式专属位置:顶部) -->
+      <section v-if="tabKind === 'quick'" class="card">
         <div class="card-head">
           <el-icon><EditPen /></el-icon>
           <span>判定提示词（可编辑，将拼接到 AI 识别中）</span>
@@ -22,20 +36,21 @@
           :rows="3"
           :autosize="{ minRows: 3, maxRows: 8 }"
           placeholder="例：帮我检测文件是否是 XXX 客户 XXX 项目的 XXX 进展（留底）文件"
-          :disabled="submitting"
+          :disabled="busy"
+          @input="onCriteriaInput"
         />
         <div class="hint">
           请把模板中的 XXX 替换为客户、项目、进展的具体名称。AI 会按你的描述判定每个文件是否符合留底要求。
         </div>
       </section>
 
-      <!-- 2. 来源切换 -->
-      <section class="card">
+      <!-- 2. 来源切换(仅快速检测模式) -->
+      <section v-if="tabKind === 'quick'" class="card">
         <div class="card-head">
           <el-icon><Files /></el-icon>
           <span>文件来源</span>
         </div>
-        <el-radio-group v-model="sourceKind" :disabled="submitting" size="default">
+        <el-radio-group v-model="sourceKind" :disabled="busy" size="default">
           <el-radio-button label="upload">上传文件</el-radio-button>
           <el-radio-button label="url">输入文件地址</el-radio-button>
         </el-radio-group>
@@ -49,11 +64,12 @@
             :limit="MAX_FILES"
             accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.docx"
             :on-exceed="onExceedUpload"
+            :on-change="onUploadChange"
             drag
           >
             <el-icon class="upload-icon"><UploadFilled /></el-icon>
             <div class="upload-text">点击或拖拽文件到此处</div>
-            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 单文件 ≤50MB · 支持 PDF / 图片 / Word</div>
+            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 支持 PDF / 图片 / Word</div>
           </el-upload>
         </div>
 
@@ -70,14 +86,14 @@
               <el-input
                 v-model="row.value"
                 placeholder="https://...（仅支持 http/https）"
-                :disabled="submitting"
+                :disabled="busy"
                 clearable
                 @input="row.invalid = false"
                 @paste="(e) => onUrlPaste(e, i)"
               />
               <el-button
                 class="url-row-del"
-                :disabled="submitting || urlRows.length <= 1"
+                :disabled="busy || urlRows.length <= 1"
                 circle
                 size="small"
                 @click="removeUrlRow(i)"
@@ -89,7 +105,7 @@
           <div class="url-row-actions">
             <el-button
               size="small"
-              :disabled="submitting || urlRows.length >= MAX_FILES"
+              :disabled="busy || urlRows.length >= MAX_FILES"
               @click="addUrlRow()"
             >
               <el-icon style="margin-right: 4px"><Plus /></el-icon>
@@ -106,15 +122,195 @@
           <el-button
             type="primary"
             size="large"
-            :loading="submitting"
+            :loading="busy"
             :disabled="!canSubmit"
             @click="handleSubmit"
           >
-            <el-icon v-if="!submitting" style="margin-right: 4px"><MagicStick /></el-icon>
-            {{ submitting ? '提交中...' : '开始检测' }}
+            <el-icon v-if="!busy" style="margin-right: 4px"><MagicStick /></el-icon>
+            {{ submitButtonText }}
           </el-button>
         </div>
       </section>
+
+      <!-- 业务审核模式专属区块:客户 + 进展 + 业务文件行 -->
+      <template v-if="tabKind === 'business'">
+        <!-- 阶段选择 -->
+        <section class="card">
+          <div class="card-head">
+            <el-icon><Files /></el-icon>
+            <span>检测阶段</span>
+          </div>
+          <el-radio-group v-model="bizStage" :disabled="busy" size="default">
+            <el-radio-button label="post_submit">递交后</el-radio-button>
+            <el-radio-button label="pre_submit">递交前</el-radio-button>
+          </el-radio-group>
+          <div class="hint" style="margin-top: 6px">
+            当前阶段决定文件分类体系:递交前检测客户基础/个人/公司/其他备用/转款凭证 5 大类;递交后检测文案制作/获批/失败/其他/停滞 4 大类
+          </div>
+        </section>
+
+        <!-- 客户区块 -->
+        <section class="card">
+          <div class="card-head">
+            <el-icon><Files /></el-icon>
+            <span>客户信息</span>
+            <span class="card-sub">业务方传入,系统按 client_code 自动归档</span>
+          </div>
+          <div class="form-grid form-grid-2">
+            <div class="form-item">
+              <label class="form-label">客户编码 <span class="required">*</span></label>
+              <el-input v-model="bizClient.client_code" :disabled="busy" placeholder="如 C001" />
+            </div>
+            <div class="form-item">
+              <label class="form-label">客户姓名 <span class="required">*</span></label>
+              <el-input v-model="bizClient.name" :disabled="busy" placeholder="如 张三" />
+            </div>
+          </div>
+        </section>
+
+        <!-- 进展区块 -->
+        <section class="card">
+          <div class="card-head">
+            <el-icon><Files /></el-icon>
+            <span>进展信息</span>
+            <span class="card-sub">同 progress_oid 重复提交会复用历史检测结果</span>
+          </div>
+          <div class="form-grid form-grid-3">
+            <div class="form-item">
+              <label class="form-label">办理人</label>
+              <el-input v-model="bizProgress.handler" :disabled="busy" placeholder="如 李顾问" />
+            </div>
+            <div class="form-item">
+              <label class="form-label">进展名称</label>
+              <el-input v-model="bizProgress.progress_name" :disabled="busy" placeholder="如 递交后" />
+            </div>
+            <div class="form-item">
+              <label class="form-label">进展 OID</label>
+              <el-input v-model="bizProgress.progress_oid" :disabled="busy" placeholder="POID_xxx" />
+            </div>
+            <div class="form-item">
+              <label class="form-label">项目编码</label>
+              <el-input v-model="bizProgress.project_code" :disabled="busy" placeholder="如 P001" />
+            </div>
+            <div class="form-item">
+              <label class="form-label">项目名称</label>
+              <el-input v-model="bizProgress.project_name" :disabled="busy" placeholder="如 新加坡家办" />
+            </div>
+            <div class="form-item"></div>
+            <div class="form-item">
+              <label class="form-label">项目详情编码</label>
+              <el-input v-model="bizProgress.project_detail_code" :disabled="busy" placeholder="如 PD001" />
+            </div>
+            <div class="form-item">
+              <label class="form-label">项目详情名称</label>
+              <el-input v-model="bizProgress.project_detail_name" :disabled="busy" placeholder="如 架构设计" />
+            </div>
+          </div>
+        </section>
+
+        <!-- 判定提示词(业务模式专属位置:进展之后) -->
+        <section class="card">
+          <div class="card-head">
+            <el-icon><EditPen /></el-icon>
+            <span>判定提示词（可编辑，将拼接到 AI 识别中）</span>
+          </div>
+          <el-input
+            v-model="userPrompt"
+            type="textarea"
+            :rows="3"
+            :autosize="{ minRows: 3, maxRows: 8 }"
+            placeholder="进入业务审核 tab 时将自动预填..."
+            :disabled="busy"
+            @input="onCriteriaInput"
+          />
+          <div v-if="!criteriaDirty" class="hint">
+            已根据客户/项目/阶段自动生成。手动修改后将不再自动覆盖。
+          </div>
+          <div v-if="criteriaDirty" class="hint">
+            <el-link type="primary" :underline="false" @click="resetCriteria">重置为自动生成</el-link>
+          </div>
+        </section>
+
+        <!-- 文件区块:URL 或 上传 -->
+        <section class="card">
+          <div class="card-head">
+            <el-icon><Files /></el-icon>
+            <span>文件列表</span>
+            <span class="card-sub">每个文件必填 file_id(增量复用 key)</span>
+          </div>
+          <el-radio-group v-model="bizSourceKind" :disabled="busy" size="default" style="margin-bottom: 12px">
+            <el-radio-button label="url">OSS URL</el-radio-button>
+            <el-radio-button label="upload">上传文件</el-radio-button>
+          </el-radio-group>
+
+          <!-- URL 模式 -->
+          <div v-if="bizSourceKind === 'url'" class="biz-file-rows">
+            <div v-for="(row, i) in bizUrlRows" :key="row.id" class="biz-file-row">
+              <span class="biz-row-idx">{{ i + 1 }}</span>
+              <el-input v-model="row.file_id" placeholder="file_id *" :disabled="busy" class="biz-input-id" />
+              <el-input v-model="row.filename" placeholder="文件名(可选)" :disabled="busy" class="biz-input-name" />
+              <el-input v-model="row.url" placeholder="https://oss.../signed?..." :disabled="busy" class="biz-input-url" />
+              <el-button :disabled="busy || bizUrlRows.length <= 1" circle size="small" @click="bizRemoveUrlRow(i)">
+                <el-icon><Close /></el-icon>
+              </el-button>
+            </div>
+            <div class="biz-actions">
+              <el-button size="small" :disabled="busy || bizUrlRows.length >= MAX_FILES" @click="bizAddUrlRow">
+                <el-icon style="margin-right: 4px"><Plus /></el-icon>
+                添加文件行
+              </el-button>
+              <span class="hint">当前 <b>{{ bizUrlRows.length }}</b>/{{ MAX_FILES }}</span>
+            </div>
+          </div>
+
+          <!-- 上传模式 -->
+          <div v-else class="biz-file-rows">
+            <div v-for="(row, i) in bizUploadRows" :key="row.id" class="biz-file-row">
+              <span class="biz-row-idx">{{ i + 1 }}</span>
+              <el-input v-model="row.file_id" placeholder="file_id *" :disabled="busy" class="biz-input-id" />
+              <div class="biz-upload-cell">
+                <input
+                  type="file"
+                  :id="`biz-up-${row.id}`"
+                  style="display: none"
+                  :disabled="busy"
+                  accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.docx"
+                  @change="bizOnFileSelect($event, i)"
+                />
+                <label :for="`biz-up-${row.id}`" class="biz-upload-btn">
+                  {{ row.file ? row.file.name : '选择文件' }}
+                </label>
+                <span v-if="row.file" class="biz-file-size">
+                  ({{ (row.file.size / 1024 / 1024).toFixed(1) }} MB)
+                </span>
+              </div>
+              <el-button :disabled="busy || bizUploadRows.length <= 1" circle size="small" @click="bizRemoveUploadRow(i)">
+                <el-icon><Close /></el-icon>
+              </el-button>
+            </div>
+            <div class="biz-actions">
+              <el-button size="small" :disabled="busy || bizUploadRows.length >= MAX_FILES" @click="bizAddUploadRow">
+                <el-icon style="margin-right: 4px"><Plus /></el-icon>
+                添加文件行
+              </el-button>
+              <span class="hint">当前 <b>{{ bizUploadRows.length }}</b>/{{ MAX_FILES }}</span>
+            </div>
+          </div>
+
+          <div class="submit-row">
+            <el-button
+              type="primary"
+              size="large"
+              :loading="busy"
+              :disabled="!canSubmitBiz"
+              @click="handleSubmitBiz"
+            >
+              <el-icon v-if="!busy" style="margin-right: 4px"><MagicStick /></el-icon>
+              {{ bizSubmitButtonText }}
+            </el-button>
+          </div>
+        </section>
+      </template>
 
       <!-- 3. 结果列表（一文件一卡） -->
       <section v-if="batch" class="card">
@@ -130,6 +326,69 @@
           </el-tag>
         </div>
 
+        <!-- 业务字段回显条(仅业务审核模式) -->
+        <div v-if="batch.client || batch.progress" class="biz-context-bar">
+          <span v-if="batch.client" class="biz-ctx-item">
+            <span class="biz-ctx-label">客户</span>
+            {{ batch.client.name }}
+            <span class="dim">({{ batch.client.client_code }})</span>
+          </span>
+          <span v-if="batch.progress" class="biz-ctx-item">
+            <span class="biz-ctx-label">进展</span>
+            {{ batch.progress.progress_name || batch.progress.progress_oid }}
+            <span class="dim">({{ batch.progress.progress_oid }})</span>
+          </span>
+          <span v-if="batch.progress && batch.progress.handler" class="biz-ctx-item">
+            <span class="biz-ctx-label">办理人</span>
+            {{ batch.progress.handler }}
+          </span>
+          <span v-if="batch.progress && batch.progress.project_name" class="biz-ctx-item">
+            <span class="biz-ctx-label">项目</span>
+            {{ batch.progress.project_name }}
+          </span>
+        </div>
+
+        <!-- 总体判断条:始终显示骨架,done 时填入实际 verdict/score/reason -->
+        <div
+          class="overall-banner"
+          :class="batch.overall_verdict ? `overall-${batch.overall_verdict}` : 'overall-pending'"
+        >
+          <div class="overall-head">
+            <!-- 完成态:三态图标 -->
+            <el-icon v-if="batch.overall_verdict" :size="22">
+              <CircleCheck v-if="batch.overall_verdict === 'match'" />
+              <Warning v-else-if="batch.overall_verdict === 'partial'" />
+              <CircleClose v-else />
+            </el-icon>
+            <!-- 进行态:loading 图标 -->
+            <el-icon v-else :size="22" class="spin"><Loading /></el-icon>
+
+            <span class="overall-title">
+              {{ batch.overall_verdict ? overallVerdictLabel(batch.overall_verdict) : 'AI 正在汇总总体判断...' }}
+            </span>
+            <span v-if="batch.overall_score != null" class="overall-score">
+              综合匹配度 {{ batch.overall_score }}/100
+            </span>
+          </div>
+          <div class="overall-bar">
+            <div
+              class="overall-fill"
+              :class="{ 'overall-fill-pending': batch.overall_verdict == null }"
+              :style="{ width: batch.overall_verdict ? (batch.overall_score || 0) + '%' : '100%' }"
+            ></div>
+          </div>
+          <p v-if="batch.overall_reason" class="overall-reason">{{ batch.overall_reason }}</p>
+          <p v-else class="overall-reason overall-reason-pending">
+            待所有文件检测完成后,AI 将生成 80-200 字的整体留底判断说明。
+          </p>
+          <!-- 复用/新检测计数(仅业务模式) -->
+          <p v-if="batch.reused_count != null || batch.new_count != null" class="overall-counts">
+            本次共 {{ batch.total_files }} 个文件
+            <span v-if="batch.reused_count">（复用 {{ batch.reused_count }} 个）</span>
+            <span v-if="batch.new_count">（新检测 {{ batch.new_count }} 个）</span>
+          </p>
+        </div>
+
         <div class="result-grid">
           <div
             v-for="f in batch.files"
@@ -141,6 +400,7 @@
               <span class="fc-name" :title="f.filename || f.source_url">
                 {{ f.filename || f.source_url || '—' }}
               </span>
+              <el-tag v-if="f.is_reused" size="small" class="reused-tag" effect="dark">已复用</el-tag>
               <el-tag size="small" :type="statusTagType(f.status)">{{ statusLabel(f.status) }}</el-tag>
             </div>
 
@@ -150,19 +410,20 @@
               <span>{{ stageLabel(f.status) }}</span>
             </div>
 
-            <!-- 完成：展示判定结论 -->
+            <!-- 完成：展示判定结论(三态) -->
             <div v-else-if="f.status === 'done'" class="fc-body">
-              <div class="verdict" :class="f.is_archival ? 'pass' : 'fail'">
+              <div class="verdict" :class="`verdict-${fileVerdict(f)}`">
                 <el-icon>
-                  <CircleCheck v-if="f.is_archival" />
+                  <CircleCheck v-if="fileVerdict(f) === 'match'" />
+                  <Warning v-else-if="fileVerdict(f) === 'partial'" />
                   <CircleClose v-else />
                 </el-icon>
-                <span class="verdict-text">{{ f.is_archival ? '符合留底要求' : '不符合留底要求' }}</span>
-                <span class="verdict-score">置信度 {{ f.confidence }}/100</span>
+                <span class="verdict-text">{{ verdictLabel(fileVerdict(f)) }}</span>
+                <span class="verdict-score">匹配度 {{ fileScore(f) }}/100</span>
               </div>
 
               <div class="confidence-track">
-                <div class="confidence-fill" :style="{ width: (f.confidence || 0) + '%' }"></div>
+                <div class="confidence-fill" :style="{ width: (fileScore(f) || 0) + '%' }"></div>
               </div>
 
               <div class="meta-row">
@@ -194,32 +455,110 @@
       </section>
 
       <!-- 空状态 -->
-      <section v-else-if="!submitting" class="card empty">
+      <section v-else-if="!busy" class="card empty">
         <el-icon :size="48"><Reading /></el-icon>
         <p class="empty-title">填写判定提示词，选择文件或输入文件地址，开始检测</p>
         <p class="empty-sub">检测结果中的金额、电话、身份证、银行卡等敏感信息会自动脱敏</p>
       </section>
     </div>
+
+    <!-- 历史记录抽屉 -->
+    <el-drawer
+      v-model="historyVisible"
+      title="留底检测记录"
+      direction="rtl"
+      size="60%"
+      :destroy-on-close="false"
+    >
+      <div class="history-toolbar">
+        <span class="history-summary">共 {{ historyList.length }} 条记录</span>
+        <el-button size="small" @click="loadHistory" :loading="historyLoading">
+          <el-icon style="margin-right: 4px"><Refresh /></el-icon>
+          刷新
+        </el-button>
+      </div>
+
+      <el-table
+        :data="historyList"
+        v-loading="historyLoading"
+        stripe
+        empty-text="暂无历史记录"
+      >
+        <el-table-column label="批次" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono dim">{{ row.batch_id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag :type="historyStatusTag(row.status)" size="small" effect="light">
+              {{ historyStatusLabel(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="完成" width="90" align="center">
+          <template #default="{ row }">
+            {{ row.done_files }}/{{ row.total_files }}
+          </template>
+        </el-table-column>
+        <el-table-column label="来源" width="80" align="center">
+          <template #default="{ row }">
+            <span class="dim">{{ row.source_kind }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="时间" width="160">
+          <template #default="{ row }">
+            <span class="dim mono">{{ row.created_at }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="140" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              type="primary"
+              link
+              :disabled="row.status !== 'done'"
+              @click="loadHistoryItem(row)"
+            >
+              查看
+            </el-button>
+            <el-popconfirm
+              title="确认删除该批次记录?"
+              @confirm="removeHistoryItem(row)"
+            >
+              <template #reference>
+                <el-button size="small" type="danger" link>删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onUnmounted, watch } from 'vue'
 import {
   EditPen, UploadFilled, Files, Reading, MagicStick,
-  CircleCheck, CircleClose, Warning, Loading, Plus, Close,
+  CircleCheck, CircleClose, Warning, Loading, Plus, Close, Lock,
+  Clock, Refresh,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   submitArchiveDetectUpload,
   submitArchiveDetectUrls,
   pollArchiveDetect,
+  listArchiveDetectHistory,
+  deleteArchiveDetectBatch,
+  submitBusinessBatch,
+  submitBusinessBatchUpload,
+  pollBusinessBatch,
 } from '../api.js'
 
 const MAX_FILES = 20
-const DEFAULT_PROMPT = '帮我检测文件是否是 XXX 客户 XXX 项目的 XXX 进展（留底）文件'
 
-const userPrompt = ref(DEFAULT_PROMPT)
+const userPrompt = ref('')
 const sourceKind = ref('upload')         // 'upload' | 'url'
 const uploadFiles = ref([])              // el-upload v-model 接管
 
@@ -230,16 +569,122 @@ function makeRow(value = '') {
 }
 const urlRows = ref([makeRow()])
 
-const submitting = ref(false)
+const submitting = ref(false)            // HTTP 提交瞬态
 const batch = ref(null)
 let pollTimer = null
+
+// 历史记录抽屉
+const historyVisible = ref(false)
+const historyList = ref([])
+const historyLoading = ref(false)
+
+// ==================== 业务审核 tab(阶段三) ====================
+const tabKind = ref('business')               // 'quick' | 'business'，默认进入业务审核
+const tabMode = ref('business')               // 当前 batch 是哪个 tab 提交的(决定轮询走哪个 api)
+
+const bizClient = ref({
+  client_code: '',
+  name: '',
+})
+const bizProgress = ref({
+  progress_oid: '',
+  handler: '',
+  project_name: '',
+  project_code: '',
+  project_detail_name: '',
+  project_detail_code: '',
+  progress_name: '',
+})
+
+const bizSourceKind = ref('url')              // 业务模式 url | upload
+const bizStage = ref('post_submit')           // 业务阶段:pre_submit | post_submit
+const criteriaDirty = ref(false)              // 用户是否手改过 criteria
+
+let _bizRowSeq = 0
+function makeBizUrlRow() {
+  return { id: ++_bizRowSeq, file_id: '', filename: '', url: '' }
+}
+function makeBizUploadRow() {
+  return { id: ++_bizRowSeq, file_id: '', file: null }
+}
+const bizUrlRows = ref([makeBizUrlRow()])
+const bizUploadRows = ref([makeBizUploadRow()])
+
+// 用业务字段自动拼装 criteria
+function buildBizCriteria() {
+  const c = bizClient.value
+  const p = bizProgress.value
+  const stage = bizStage.value === 'pre_submit' ? '递交前' : '递交后'
+
+  const parts = []
+  if (c.name) parts.push(`客户「${c.name}」`)
+  if (p.project_name) parts.push(`「${p.project_name}」项目`)
+  if (p.project_detail_name) parts.push(`「${p.project_detail_name}」`)
+  if (p.progress_name) parts.push(`「${p.progress_name}」进展`)
+
+  const subject = parts.length ? parts.join(' / ') : '本客户'
+  return `请按公司文件留底标准,审核此文件是否为 ${subject} 在「${stage}」阶段应上传的留底文件。重点关注文件能否归入合理的分类,以及是否符合当前阶段。`
+}
+
+function onCriteriaInput() {
+  // 用户手改 → 标 dirty,后续业务字段变更不再覆盖
+  criteriaDirty.value = true
+}
+
+function resetCriteria() {
+  criteriaDirty.value = false
+  userPrompt.value = buildBizCriteria()
+}
+
+// 监听业务字段变化 → 实时刷新 criteria(除非用户已手改)
+watch(
+  () => [
+    bizClient.value.name,
+    bizProgress.value.project_name,
+    bizProgress.value.project_detail_name,
+    bizProgress.value.progress_name,
+    bizStage.value,
+  ],
+  () => {
+    if (tabKind.value !== 'business') return
+    if (criteriaDirty.value) return
+    userPrompt.value = buildBizCriteria()
+  },
+  { immediate: true },
+)
+
+// 切换到业务 tab → 自动预填(若用户未手改)
+watch(tabKind, (newTab) => {
+  if (newTab === 'business' && !criteriaDirty.value) {
+    userPrompt.value = buildBizCriteria()
+  }
+})
 
 const filledUrlCount = computed(
   () => urlRows.value.filter((r) => r.value.trim()).length,
 )
 
+// 是否还在跑（提交瞬态 OR 轮询期）。整个生命周期都视为忙。
+const busy = computed(
+  () => submitting.value || (batch.value && batch.value.status !== 'done'),
+)
+
+// 已有完整结果 → 再次提交前要确认（避免误覆盖）
+const hasResult = computed(
+  () => batch.value && batch.value.status === 'done',
+)
+
+const submitButtonText = computed(() => {
+  if (submitting.value) return '提交中...'
+  if (batch.value && batch.value.status !== 'done') {
+    return `检测中 ${batch.value.done_files}/${batch.value.total_files}...`
+  }
+  if (hasResult.value) return '重新检测'
+  return '开始检测'
+})
+
 const canSubmit = computed(() => {
-  if (submitting.value) return false
+  if (busy.value) return false
   if (!userPrompt.value.trim()) return false
   if (sourceKind.value === 'upload') {
     return uploadFiles.value.length > 0 && uploadFiles.value.length <= MAX_FILES
@@ -247,8 +692,166 @@ const canSubmit = computed(() => {
   return filledUrlCount.value > 0 && urlRows.value.length <= MAX_FILES
 })
 
+// ==================== 业务审核 computed + 函数 ====================
+
+const canSubmitBiz = computed(() => {
+  if (busy.value) return false
+  if (!userPrompt.value.trim()) return false
+  if (!bizClient.value.client_code.trim() || !bizClient.value.name.trim()) return false
+  if (!bizProgress.value.progress_oid.trim()) return false
+  if (bizSourceKind.value === 'url') {
+    return bizUrlRows.value.some(r => r.file_id.trim() && r.url.trim() &&
+      /^https?:\/\//i.test(r.url.trim()))
+  }
+  return bizUploadRows.value.some(r => r.file_id.trim() && r.file)
+})
+
+const bizSubmitButtonText = computed(() => {
+  if (submitting.value) return '提交中...'
+  if (batch.value && batch.value.status !== 'done') {
+    return `审核中 ${batch.value.done_files}/${batch.value.total_files}...`
+  }
+  if (batch.value && batch.value.status === 'done') return '重新审核'
+  return '开始审核'
+})
+
+function bizAddUrlRow() {
+  if (bizUrlRows.value.length >= MAX_FILES) {
+    ElMessage.warning(`最多 ${MAX_FILES} 个文件`)
+    return
+  }
+  bizUrlRows.value.push(makeBizUrlRow())
+}
+function bizRemoveUrlRow(i) {
+  if (bizUrlRows.value.length <= 1) return
+  bizUrlRows.value.splice(i, 1)
+}
+function bizAddUploadRow() {
+  if (bizUploadRows.value.length >= MAX_FILES) {
+    ElMessage.warning(`最多 ${MAX_FILES} 个文件`)
+    return
+  }
+  bizUploadRows.value.push(makeBizUploadRow())
+}
+function bizRemoveUploadRow(i) {
+  if (bizUploadRows.value.length <= 1) return
+  bizUploadRows.value.splice(i, 1)
+}
+function bizOnFileSelect(event, i) {
+  const file = event.target.files && event.target.files[0]
+  if (file) bizUploadRows.value[i].file = file
+}
+
+async function handleSubmitBiz() {
+  if (busy.value) return
+
+  if (batch.value && batch.value.status === 'done') {
+    try {
+      await ElMessageBox.confirm(
+        '当前已有审核结果,重新审核会清空现有结果,是否继续?',
+        '确认重新审核',
+        { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch { return }
+  }
+
+  const criteria = userPrompt.value.trim()
+  if (!criteria) { ElMessage.warning('请填写判定提示词'); return }
+
+  const clientObj = {
+    client_code: bizClient.value.client_code.trim(),
+    name: bizClient.value.name.trim(),
+  }
+  const progressObj = {
+    progress_oid: bizProgress.value.progress_oid.trim(),
+    handler: bizProgress.value.handler.trim() || null,
+    project_name: bizProgress.value.project_name.trim() || null,
+    project_code: bizProgress.value.project_code.trim() || null,
+    project_detail_name: bizProgress.value.project_detail_name.trim() || null,
+    project_detail_code: bizProgress.value.project_detail_code.trim() || null,
+    progress_name: bizProgress.value.progress_name.trim() || null,
+  }
+
+  submitting.value = true
+  batch.value = null
+  stopPoll()
+  tabMode.value = 'business'
+
+  try {
+    let resp
+    if (bizSourceKind.value === 'url') {
+      // URL 模式:校验每行
+      const items = []
+      const seen = new Set()
+      for (let i = 0; i < bizUrlRows.value.length; i++) {
+        const row = bizUrlRows.value[i]
+        const fid = row.file_id.trim()
+        const url = row.url.trim()
+        if (!fid && !url) continue   // 空行允许
+        if (!fid) throw new Error(`第 ${i+1} 行缺 file_id`)
+        if (seen.has(fid)) throw new Error(`重复 file_id: ${fid}`)
+        if (!/^https?:\/\//i.test(url)) throw new Error(`第 ${i+1} 行 url 不合法`)
+        seen.add(fid)
+        items.push({ file_id: fid, filename: row.filename.trim() || null, url })
+      }
+      if (!items.length) throw new Error('请至少添加一个文件')
+
+      resp = await submitBusinessBatch({
+        criteria,
+        stage: bizStage.value,
+        client: clientObj,
+        progress: progressObj,
+        items,
+      })
+    } else {
+      // upload 模式
+      const files = []
+      const perFileMeta = []
+      const seen = new Set()
+      for (let i = 0; i < bizUploadRows.value.length; i++) {
+        const row = bizUploadRows.value[i]
+        const fid = row.file_id.trim()
+        if (!fid && !row.file) continue
+        if (!fid) throw new Error(`第 ${i+1} 行缺 file_id`)
+        if (!row.file) throw new Error(`第 ${i+1} 行未选择文件`)
+        if (seen.has(fid)) throw new Error(`重复 file_id: ${fid}`)
+        seen.add(fid)
+        files.push(row.file)
+        perFileMeta.push({ file_id: fid, filename: row.file.name })
+      }
+      if (!files.length) throw new Error('请至少添加一个文件')
+
+      resp = await submitBusinessBatchUpload(criteria, clientObj, progressObj, files, perFileMeta, bizStage.value)
+    }
+
+    ElMessage.success(
+      `已提交 ${resp.total_files} 个文件:${resp.reused_count} 个复用历史 + ${resp.new_count} 个新检测`
+    )
+    startPoll(resp.batch_id)
+  } catch (err) {
+    const msg = err.response?.data?.detail || err.message || '提交失败'
+    ElMessage.error('提交失败:' + msg)
+  } finally {
+    submitting.value = false
+  }
+}
+
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024   // 与后端 file_fetcher.MAX_DOWNLOAD_BYTES 对齐
+
 function onExceedUpload() {
   ElMessage.warning(`最多 ${MAX_FILES} 个文件`)
+}
+
+/**
+ * el-upload 每次添加/移除文件触发。仅做大小提醒，不阻止用户加入。
+ * 后端 file_fetcher 上限 50MB，超限会被服务端 413 拒绝（写到该文件结果卡的 error_msg）。
+ */
+function onUploadChange(file) {
+  if (file?.status !== 'ready') return
+  if (file.size && file.size > MAX_FILE_SIZE_BYTES) {
+    const mb = (file.size / 1024 / 1024).toFixed(1)
+    ElMessage.warning(`「${file.name}」体积 ${mb}MB 超过 50MB 上限，提交后该文件会失败`)
+  }
 }
 
 function addUrlRow() {
@@ -300,6 +903,24 @@ function onUrlPaste(event, rowIdx) {
 }
 
 async function handleSubmit() {
+  // 防呆 1: 进行中禁止再次提交（按钮已禁用，但保险起见再挡一层）
+  if (busy.value) return
+
+  tabMode.value = 'quick'      // 快速检测模式,轮询走 pollArchiveDetect
+
+  // 防呆 2: 已有完成结果时再次提交 → 弹确认
+  if (hasResult.value) {
+    try {
+      await ElMessageBox.confirm(
+        '当前已有检测结果，重新检测会清空现有结果，是否继续？',
+        '确认重新检测',
+        { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch {
+      return                                 // 用户取消
+    }
+  }
+
   const prompt = userPrompt.value.trim()
   if (!prompt) {
     ElMessage.warning('请填写判定提示词')
@@ -389,7 +1010,10 @@ function stopPoll() {
 
 async function pollOnce(batchId) {
   try {
-    const data = await pollArchiveDetect(batchId)
+    // 业务模式走 pollBusinessBatch(含 client/progress 透传);快速模式走 pollArchiveDetect
+    const data = (tabMode.value === 'business')
+      ? await pollBusinessBatch(batchId)
+      : await pollArchiveDetect(batchId)
     batch.value = data
     if (data.status === 'done') {
       stopPoll()
@@ -403,6 +1027,37 @@ async function pollOnce(batchId) {
 }
 
 // ==================== utils ====================
+
+// ==================== verdict 三态相关 ====================
+
+/** 优先用后端新字段 verdict;老 batch 无 verdict 时回落到 is_archival 二态。 */
+function fileVerdict(f) {
+  if (f.verdict && ['match', 'partial', 'mismatch'].includes(f.verdict)) return f.verdict
+  // 老 batch 兼容:is_archival=true → match,否则 → mismatch
+  return f.is_archival ? 'match' : 'mismatch'
+}
+
+/** 优先用 match_score(新);老 batch 回落到 confidence(旧)。 */
+function fileScore(f) {
+  if (f.match_score != null) return f.match_score
+  return f.confidence ?? 0
+}
+
+function verdictLabel(v) {
+  return {
+    match: '符合留底要求',
+    partial: '部分符合',
+    mismatch: '不符合留底要求',
+  }[v] || '判定异常'
+}
+
+function overallVerdictLabel(v) {
+  return {
+    match: '整体符合留底要求',
+    partial: '部分符合',
+    mismatch: '整体不符合留底要求',
+  }[v] || '判定异常'
+}
 
 function statusLabel(s) {
   return {
@@ -431,6 +1086,70 @@ function statusTagType(s) {
   return 'info'
 }
 
+// ==================== 历史记录 ====================
+
+function historyStatusLabel(s) {
+  return { running: '进行中', done: '完成', error: '失败' }[s] || s
+}
+
+function historyStatusTag(s) {
+  if (s === 'done') return 'success'
+  if (s === 'error') return 'danger'
+  return 'warning'
+}
+
+async function openHistory() {
+  historyVisible.value = true
+  await loadHistory()
+}
+
+async function loadHistory() {
+  historyLoading.value = true
+  try {
+    const resp = await listArchiveDetectHistory(200)
+    historyList.value = resp.items || []
+  } catch (err) {
+    ElMessage.error('加载历史失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function loadHistoryItem(row) {
+  // 加载该 batch 结果并停止当前轮询
+  stopPoll()
+  historyVisible.value = false
+  submitting.value = true
+  try {
+    const data = await pollArchiveDetect(row.batch_id)
+    batch.value = data
+    if (data.status !== 'done') {
+      // 历史 batch 一般是 done；若仍 running 则继续轮询
+      startPoll(row.batch_id)
+    }
+    ElMessage.success(`已加载批次 ${row.batch_id}`)
+  } catch (err) {
+    ElMessage.error('加载批次失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function removeHistoryItem(row) {
+  try {
+    await deleteArchiveDetectBatch(row.batch_id)
+    ElMessage.success('已删除')
+    // 若删的是当前正在看的 batch，清空
+    if (batch.value && batch.value.batch_id === row.batch_id) {
+      stopPoll()
+      batch.value = null
+    }
+    await loadHistory()
+  } catch (err) {
+    ElMessage.error('删除失败：' + (err.response?.data?.detail || err.message))
+  }
+}
+
 onUnmounted(stopPoll)
 </script>
 
@@ -450,6 +1169,7 @@ onUnmounted(stopPoll)
   background: #fff;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   flex-shrink: 0;
   border-bottom: 1px solid #e8ebf5;
@@ -460,6 +1180,154 @@ onUnmounted(stopPoll)
   background: linear-gradient(180deg, #fb923c, #f59e0b);
   border-radius: 2px;
 }
+.history-btn {
+  color: #64748b !important;
+  border-color: #e2e8f0 !important;
+}
+.history-btn:hover {
+  color: #fb923c !important;
+  border-color: #fb923c !important;
+}
+
+/* 历史抽屉 */
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.history-summary {
+  font-size: 13px;
+  color: #64748b;
+}
+.dim { color: #94a3b8; }
+.mono { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 12px; }
+
+/* ==================== 业务审核 tab(阶段三) ==================== */
+
+.tab-switch {
+  margin-right: auto;
+  margin-left: 20px;
+}
+
+.card-sub {
+  margin-left: auto;
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: normal;
+}
+
+.form-grid {
+  display: grid;
+  gap: 14px 18px;
+}
+.form-grid-2 { grid-template-columns: repeat(2, 1fr); }
+.form-grid-3 { grid-template-columns: repeat(3, 1fr); }
+
+.form-item { display: flex; flex-direction: column; gap: 6px; }
+.form-label {
+  font-size: 12px;
+  color: #475569;
+  font-weight: 500;
+}
+.required { color: #ef4444; margin-left: 2px; }
+
+.biz-file-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.biz-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.biz-row-idx {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+  border-radius: 50%;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+.biz-input-id { flex: 0 0 140px; }
+.biz-input-name { flex: 0 0 180px; }
+.biz-input-url { flex: 1; }
+.biz-upload-cell {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  padding: 0 10px;
+  height: 32px;
+}
+.biz-upload-btn {
+  cursor: pointer;
+  color: #fb923c;
+  font-size: 13px;
+  font-weight: 500;
+}
+.biz-upload-btn:hover { color: #f59e0b; }
+.biz-file-size { color: #94a3b8; font-size: 12px; }
+
+.biz-actions {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 业务字段回显条 */
+.biz-context-bar {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 12px;
+  color: #92400e;
+}
+.biz-ctx-item { display: inline-flex; align-items: center; gap: 4px; }
+.biz-ctx-label {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #fb923c;
+  color: #fff;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 复用/新检测计数 */
+.overall-counts {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+  font-style: italic;
+}
+
+/* 已复用徽章 */
+.reused-tag {
+  background: #8b5cf6 !important;
+  border-color: #8b5cf6 !important;
+  color: #fff !important;
+  font-size: 11px !important;
+  padding: 0 6px !important;
+  height: 18px !important;
+  line-height: 18px !important;
+  margin-right: 4px;
+}
 
 /* 主体 */
 .main-scroll {
@@ -469,6 +1337,112 @@ onUnmounted(stopPoll)
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* 隐私提醒条 */
+.privacy-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 10px;
+  font-size: 13px;
+  color: #065f46;
+  font-weight: 500;
+}
+.privacy-banner :deep(.el-icon) {
+  color: #10b981;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+/* 总体判断条(在文件网格之前) */
+.overall-banner {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid transparent;
+}
+.overall-banner.overall-match {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #065f46;
+}
+.overall-banner.overall-partial {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+.overall-banner.overall-mismatch {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+.overall-banner.overall-pending {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #64748b;
+}
+.overall-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+.overall-banner.overall-match .overall-head :deep(.el-icon) { color: #10b981; }
+.overall-banner.overall-partial .overall-head :deep(.el-icon) { color: #f59e0b; }
+.overall-banner.overall-mismatch .overall-head :deep(.el-icon) { color: #94a3b8; }
+.overall-title { font-size: 15px; }
+.overall-score {
+  margin-left: auto;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-weight: 600;
+  opacity: 0.85;
+}
+.overall-bar {
+  height: 6px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.overall-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+.overall-banner.overall-match .overall-fill { background: linear-gradient(90deg, #34d399, #10b981); }
+.overall-banner.overall-partial .overall-fill { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.overall-banner.overall-mismatch .overall-fill { background: linear-gradient(90deg, #cbd5e1, #94a3b8); }
+.overall-banner.overall-pending .overall-fill,
+.overall-fill-pending {
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0.2) 0%,
+    rgba(148, 163, 184, 0.5) 50%,
+    rgba(148, 163, 184, 0.2) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.overall-reason-pending {
+  font-style: italic;
+  opacity: 0.7;
+}
+.overall-reason {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
 }
 
 .card {
@@ -634,10 +1608,12 @@ onUnmounted(stopPoll)
   font-weight: 600;
   font-size: 14px;
 }
-.verdict.pass { background: #ecfdf5; color: #065f46; }
-.verdict.pass :deep(.el-icon) { color: #10b981; font-size: 20px; }
-.verdict.fail { background: #f1f5f9; color: #475569; }
-.verdict.fail :deep(.el-icon) { color: #94a3b8; font-size: 20px; }
+.verdict.pass, .verdict.verdict-match { background: #ecfdf5; color: #065f46; }
+.verdict.pass :deep(.el-icon), .verdict.verdict-match :deep(.el-icon) { color: #10b981; font-size: 20px; }
+.verdict.verdict-partial { background: #fffbeb; color: #92400e; }
+.verdict.verdict-partial :deep(.el-icon) { color: #f59e0b; font-size: 20px; }
+.verdict.fail, .verdict.verdict-mismatch { background: #f1f5f9; color: #475569; }
+.verdict.fail :deep(.el-icon), .verdict.verdict-mismatch :deep(.el-icon) { color: #94a3b8; font-size: 20px; }
 .verdict-score {
   margin-left: auto;
   font-size: 12px;

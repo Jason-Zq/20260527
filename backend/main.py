@@ -8,11 +8,11 @@ import json
 import asyncio
 import time
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 import llm_service
@@ -78,6 +78,8 @@ async def startup():
     await asyncio.to_thread(_cleanup_expired_output, 30)
     # 启动拆分任务 7 天 TTL 周期清理(后台 task,每 24h 跑一次)
     asyncio.create_task(_split_cleanup_loop())
+    # 启动留底检测内存态 GC(无 DB 版本,6 小时 TTL,每 30 分钟扫一次)
+    asyncio.create_task(archive_detect_service.gc_loop())
     print("配置已加载，数据库已连接，服务启动完成")
 
 def _cleanup_stale_template_temp(max_age_minutes: int = 60) -> None:
@@ -1923,14 +1925,168 @@ async def delete_summary(summary_id: int):
 
 class ArchiveDetectUrlsPayload(BaseModel):
     """URL 列表模式提交体。"""
-    user_prompt: str
-    urls: list[str]
+    user_prompt: str = Field(..., description="判定提示词/审核标准,会拼接进 AI 识别 prompt")
+    urls: list[str] = Field(..., description="文件 URL 列表,支持 http/https;可为 OSS 临时签名地址")
 
 
-@app.post("/api/archive-detect/upload")
+# ---- 业务接口(阶段三):增量复用 + 业务字段透传 ----
+
+class BusinessClientPayload(BaseModel):
+    client_code: str = Field(..., description="客户编码,业务方稳定客户 ID,系统按该字段 upsert clients 表")
+    name: str = Field(..., description="客户姓名,用于业务上下文和客户档案展示")
+
+
+class BusinessProgressPayload(BaseModel):
+    progress_oid: str = Field(..., description="进展 OID,业务方稳定进展标识;(client_id, progress_oid) 组合唯一")
+    handler: Optional[str] = Field(None, description="办理人,归属于当前进展包,同客户不同进展可不同")
+    project_name: Optional[str] = Field(None, description="项目名称,如:新加坡家办")
+    project_code: Optional[str] = Field(None, description="项目编码,如:P001")
+    project_detail_name: Optional[str] = Field(None, description="项目详情名称,如:架构设计")
+    project_detail_code: Optional[str] = Field(None, description="项目详情编码,如:PD001")
+    progress_name: Optional[str] = Field(None, description="进展名称,如:递交后进展中")
+
+
+class BusinessItemPayload(BaseModel):
+    file_id: str = Field(..., description="业务方文件稳定 ID,增量复用 key;同一 progress 下相同 file_id 会复用历史结果")
+    filename: Optional[str] = Field(None, description="文件名,可选;若为空系统尝试从 URL/上传文件名解析")
+    url: str = Field(..., description="文件访问地址,支持 http/https;可为 OSS 临时签名地址")
+
+
+class BusinessBatchPayload(BaseModel):
+    """业务接口 JSON 入口提交体。"""
+    criteria: str = Field(..., description="审核标准/判定提示词;业务审核 tab 会根据客户/项目/阶段自动预填,也可手动调整")
+    stage: str = Field("post_submit", description="审核阶段:pre_submit=递交前,post_submit=递交后;默认 post_submit")
+    client: BusinessClientPayload = Field(..., description="客户信息")
+    progress: BusinessProgressPayload = Field(..., description="进展包信息")
+    items: list[BusinessItemPayload] = Field(..., description="待检测文件列表,至少 1 个,最多 MAX_FILES_PER_BATCH 个")
+
+
+# ---- 文件留底检测:Response Models(用于 Swagger UI Schema 中文说明) ----
+
+class ArchiveDetectSubmitResponse(BaseModel):
+    """快速检测/业务审核 提交后立即返回的批次创建结果。"""
+    batch_id: str = Field(..., description="批次ID,后续轮询 GET /{batch_id} 使用")
+    total_files: int = Field(..., description="本次提交的文件总数")
+
+
+class ArchiveDetectBusinessSubmitResponse(BaseModel):
+    """业务审核接口提交后立即返回的批次创建结果(含增量复用统计)。"""
+    batch_id: str = Field(..., description="批次ID,后续轮询使用")
+    progress_id: int = Field(..., description="进展包数据库ID(关联 client_id + progress_oid 唯一)")
+    total_files: int = Field(..., description="本次提交的文件总数")
+    reused_count: int = Field(..., description="复用历史结果的文件数(同 file_id 命中,不走 OCR/LLM)")
+    new_count: int = Field(..., description="需重新检测的文件数(走完整 OCR/LLM 流水线)")
+
+
+class ArchiveDetectClientInfo(BaseModel):
+    """批次关联的客户简要信息。"""
+    id: int = Field(..., description="客户表主键 ID")
+    client_code: str = Field(..., description="客户编码(业务方稳定 ID,upsert key)")
+    name: str = Field(..., description="客户姓名")
+
+
+class ArchiveDetectProgressInfo(BaseModel):
+    """批次关联的进展包信息(业务字段透传)。"""
+    id: int = Field(..., description="进展包数据库 ID")
+    client_id: int = Field(..., description="所属客户 ID")
+    handler: Optional[str] = Field(None, description="办理人(进展包属性,同客户不同进展可不同)")
+    project_name: Optional[str] = Field(None, description="项目名称(如:新加坡家办)")
+    project_code: Optional[str] = Field(None, description="项目编码(如:P001)")
+    project_detail_name: Optional[str] = Field(None, description="项目详情名称(如:架构设计)")
+    project_detail_code: Optional[str] = Field(None, description="项目详情编码(如:PD001)")
+    progress_oid: str = Field(..., description="进展 OID(业务方稳定标识,(client_id, progress_oid) 唯一)")
+    progress_name: Optional[str] = Field(None, description="进展名称(如:递交后进展中)")
+
+
+class ArchiveDetectFileItem(BaseModel):
+    """单个文件检测结果。
+
+    业务模式有 progress_id/file_id/version/is_reused 等字段;匿名模式这些为 null。
+    """
+    id: int = Field(..., description="文件记录数据库 ID")
+    idx: int = Field(..., description="在 batch 内的顺序号(0-based)")
+    progress_id: Optional[int] = Field(None, description="所属进展包 ID(仅业务模式)")
+    file_id: Optional[str] = Field(None, description="业务方传入的文件稳定 ID(增量复用 key,仅业务模式)")
+    version: Optional[int] = Field(None, description="该 file_id 的检测版本号(严格复用模式恒为 1)")
+    source_url: Optional[str] = Field(None, description="URL 模式下的原始 OSS 地址")
+    filename: Optional[str] = Field(None, description="文件名")
+    mime_type: Optional[str] = Field(None, description="MIME 类型,如 application/pdf")
+    page_count: Optional[int] = Field(None, description="文档页数(PDF/docx)")
+    char_count: Optional[int] = Field(None, description="OCR 抽取后的字符数")
+    is_archival: Optional[bool] = Field(None, description="(旧字段)= (verdict == 'match'),向后兼容")
+    confidence: Optional[int] = Field(None, description="(旧字段)= match_score,向后兼容,0-100")
+    verdict: Optional[str] = Field(None, description="三态判定:match(符合)/partial(部分符合)/mismatch(不符合)")
+    match_score: Optional[int] = Field(None, description="匹配度 0-100(LLM 量化结果)")
+    reason: Optional[str] = Field(None, description="LLM 判断依据,30-120 字(已脱敏)")
+    key_points: list[str] = Field(default_factory=list, description="LLM 提取的 3-6 条关键要点(已脱敏)")
+    doc_category: Optional[str] = Field(None, description="文档分类,如 'A-护照'/'G-批复函'(公司分类术语)")
+    status: str = Field(..., description="状态机:pending/fetching/ocr/llm/done/error")
+    error_msg: Optional[str] = Field(None, description="error 状态时的失败原因")
+    elapsed_sec: Optional[float] = Field(None, description="单文件处理耗时秒数(复用项为 0)")
+    is_reused: bool = Field(False, description="本次是否复用了历史结果(true=未走 OCR/LLM)")
+
+
+class ArchiveDetectBatchResponse(BaseModel):
+    """批次详情(GET /{batch_id} 通用返回)。
+
+    业务模式有 client/progress/reused_count/new_count 字段;匿名模式这些为 null。
+    """
+    batch_id: str = Field(..., description="批次 ID")
+    user_prompt: Optional[str] = Field(None, description="提交时的判定标准(criteria 同义)")
+    criteria: Optional[str] = Field(None, description="判定标准(业务模式专用字段名,与 user_prompt 等价)")
+    source_kind: str = Field(..., description="来源:upload(匿名上传)/url(匿名URL)/batch(业务模式)")
+    total_files: int = Field(..., description="本批次文件总数")
+    done_files: int = Field(..., description="已完成数(成功+失败都算)")
+    status: str = Field(..., description="批次状态:running(进行中)/done(完成)/error(失败)")
+    error: Optional[str] = Field(None, description="batch 级错误(极少触发)")
+    overall_verdict: Optional[str] = Field(None, description="批次总体判断:match/partial/mismatch(全部 done 后生成)")
+    overall_score: Optional[int] = Field(None, description="批次总体匹配度 0-100(所有 done 文件的平均 match_score)")
+    overall_reason: Optional[str] = Field(None, description="批次总体说明 80-200 字(LLM 生成,失败兜底规则文本)")
+    client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息(仅业务模式)")
+    progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息(仅业务模式)")
+    reused_count: Optional[int] = Field(None, description="本批次复用历史结果的文件数(仅业务模式)")
+    new_count: Optional[int] = Field(None, description="本批次新检测的文件数(仅业务模式)")
+    files: list[ArchiveDetectFileItem] = Field(default_factory=list, description="文件级检测结果数组,按 idx 排序")
+    created_at: str = Field(..., description="批次创建时间(YYYY-MM-DD HH:MM:SS)")
+    updated_at: str = Field(..., description="批次最后更新时间")
+
+
+class ArchiveDetectHistoryItem(BaseModel):
+    """历史列表项(不含 files 详情)。"""
+    batch_id: str = Field(..., description="批次 ID")
+    user_prompt: Optional[str] = Field(None, description="提交时的判定标准")
+    source_kind: str = Field(..., description="来源:upload/url/batch")
+    total_files: int = Field(..., description="文件总数")
+    done_files: int = Field(..., description="已完成数")
+    status: str = Field(..., description="批次状态")
+    error: Optional[str] = Field(None, description="batch 级错误")
+    overall_verdict: Optional[str] = Field(None, description="批次总体判断")
+    overall_score: Optional[int] = Field(None, description="批次总体匹配度 0-100")
+    overall_reason: Optional[str] = Field(None, description="批次总体说明")
+    created_at: str = Field(..., description="创建时间")
+    updated_at: str = Field(..., description="更新时间")
+
+
+class ArchiveDetectHistoryResponse(BaseModel):
+    """历史批次列表返回。"""
+    items: list[ArchiveDetectHistoryItem] = Field(..., description="历史批次数组,按创建时间倒序")
+    total: int = Field(..., description="返回条数(实际数量,非数据库总数)")
+
+
+class ArchiveDetectDeleteResponse(BaseModel):
+    """删除批次返回。"""
+    deleted: bool = Field(..., description="是否删除成功(true=已删除)")
+
+
+@app.post(
+    "/api/archive-detect/upload",
+    tags=["文件留底检测"],
+    summary="快速检测 - 上传文件",
+    response_model=ArchiveDetectSubmitResponse,
+)
 async def archive_detect_upload(
-    files: list[UploadFile] = File(...),
-    user_prompt: str = Form(...),
+    files: list[UploadFile] = File(..., description="待检测文件列表,支持 PDF/图片/Word,最多 20 个"),
+    user_prompt: str = Form(..., description="判定提示词/审核标准,会拼接进 AI 识别 prompt"),
 ):
     """上传文件模式：multipart 提交多文件 + 判定提示词。
 
@@ -1990,7 +2146,12 @@ async def archive_detect_upload(
     return {"batch_id": batch_id, "total_files": len(items)}
 
 
-@app.post("/api/archive-detect/urls")
+@app.post(
+    "/api/archive-detect/urls",
+    tags=["文件留底检测"],
+    summary="快速检测 - URL 列表",
+    response_model=ArchiveDetectSubmitResponse,
+)
 async def archive_detect_urls(payload: ArchiveDetectUrlsPayload):
     """URL 列表模式：JSON 提交一组 URL + 判定提示词。"""
     user_prompt = (payload.user_prompt or "").strip()
@@ -2021,26 +2182,190 @@ async def archive_detect_urls(payload: ArchiveDetectUrlsPayload):
     return {"batch_id": batch_id, "total_files": len(items)}
 
 
-# 注意：history 必须在 /{batch_id} 之前注册，避免路径参数吞掉 "history"
-@app.get("/api/archive-detect/history")
-async def archive_detect_history(limit: int = Query(200, ge=1, le=500)):
+# 注意:history 必须声明在 /{batch_id} 之前,避免路径参数吞掉 "history"
+@app.get(
+    "/api/archive-detect/history",
+    tags=["文件留底检测"],
+    summary="历史批次列表",
+    response_model=ArchiveDetectHistoryResponse,
+)
+async def archive_detect_history(
+    limit: int = Query(200, ge=1, le=500, description="返回最近多少条历史批次,范围 1-500,默认 200")
+):
     """历史 batch 列表（不含 files 详情）。"""
     items = await archive_detect_service.list_history(limit=limit)
     return {"items": items, "total": len(items)}
 
 
-@app.get("/api/archive-detect/{batch_id}")
-async def archive_detect_get(batch_id: str):
-    """轮询 batch + 每文件状态。优先内存态，缺失时从 DB 读。"""
-    data = await archive_detect_service.get_batch(batch_id)
+# ==================== 业务接口(阶段三):增量复用 + 业务字段透传 ====================
+# 注意:business/batch 和 business/batch/upload 必须声明在 /{batch_id} 之前。
+
+@app.post(
+    "/api/archive-detect/business/batch",
+    tags=["文件留底检测"],
+    summary="业务审核 - 提交进展包(OSS URL)",
+    response_model=ArchiveDetectBusinessSubmitResponse,
+)
+async def archive_detect_business_batch(payload: BusinessBatchPayload):
+    """业务方批量提交进展包(JSON + OSS URL 模式)。
+
+    请求体:{criteria, client:{client_code, name}, progress:{progress_oid, handler, ...}, items:[{file_id, filename, url}]}
+    返回:{batch_id, progress_id, total_files, reused_count, new_count}
+    业务方用 batch_id 轮询 GET /api/archive-detect/business/batch/{batch_id} 拿完整结果。
+    """
+    # URL 校验
+    for i, it in enumerate(payload.items):
+        url = (it.url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail=f"非法 URL(仅支持 http/https): items[{i}].url={url}")
+
+    if payload.stage not in ("pre_submit", "post_submit"):
+        raise HTTPException(status_code=400, detail=f"非法 stage: {payload.stage} (仅支持 pre_submit / post_submit)")
+
+    try:
+        result = await archive_detect_service.submit_business_batch(
+            criteria=payload.criteria,
+            stage=payload.stage,
+            client_payload=payload.client.model_dump(),
+            progress_payload=payload.progress.model_dump(),
+            items=[it.model_dump() for it in payload.items],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
+@app.post(
+    "/api/archive-detect/business/batch/upload",
+    tags=["文件留底检测"],
+    summary="业务审核 - 提交进展包(本地上传)",
+    response_model=ArchiveDetectBusinessSubmitResponse,
+)
+async def archive_detect_business_batch_upload(
+    files: list[UploadFile] = File(..., description="待检测文件列表,顺序必须与 items_payload 一一对应"),
+    criteria: str = Form(..., description="审核标准/判定提示词"),
+    stage: str = Form("post_submit", description="审核阶段:pre_submit=递交前,post_submit=递交后;默认 post_submit"),
+    client_payload: str = Form(..., description="客户信息 JSON 字符串,示例:{\"client_code\":\"C001\",\"name\":\"张三\"}"),
+    progress_payload: str = Form(..., description="进展信息 JSON 字符串,示例:{\"progress_oid\":\"POID_001\",\"handler\":\"李顾问\"}"),
+    items_payload: str = Form(..., description="文件元信息 JSON 数组,顺序与 files 对应,示例:[{\"file_id\":\"F001\",\"filename\":\"护照.pdf\"}]"),
+):
+    """业务方批量提交进展包(multipart + 本地上传模式)。
+
+    Form 字段:
+      - criteria: str
+      - stage: "pre_submit" | "post_submit" (默认 post_submit)
+      - client_payload: JSON {client_code, name}
+      - progress_payload: JSON {progress_oid, handler, ...}
+      - items_payload: JSON 数组 [{file_id, filename}, ...] 与 files 一一对应
+      - files: List[UploadFile]
+    """
+    if stage not in ("pre_submit", "post_submit"):
+        raise HTTPException(status_code=400, detail=f"非法 stage: {stage}")
+    # 解析 JSON 字符串
+    try:
+        client_obj = json.loads(client_payload)
+        progress_obj = json.loads(progress_payload)
+        items_obj = json.loads(items_payload)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"payload JSON 解析失败:{e}")
+
+    if not isinstance(items_obj, list):
+        raise HTTPException(status_code=400, detail="items_payload 必须是数组")
+    if len(items_obj) != len(files):
+        raise HTTPException(
+            status_code=400,
+            detail=f"items_payload 长度({len(items_obj)})与 files 数量({len(files)})不一致",
+        )
+
+    # 落盘 files 到 temp/archive_detect/,补 local_path 进 items
+    upload_dir = archive_detect_service._upload_temp_dir()
+    items_with_path = []
+    saved_paths = []
+    for i, (f, meta) in enumerate(zip(files, items_obj)):
+        if not f.filename:
+            raise HTTPException(status_code=400, detail=f"第 {i+1} 个文件没有文件名")
+        if not file_fetcher.is_supported_extension(f.filename):
+            raise HTTPException(status_code=400, detail=f"不支持的文件类型:{f.filename}")
+        safe_name = os.path.basename(f.filename)
+        token = datetime.now().strftime("%y%m%d%H%M%S") + f"_{i}_"
+        local_path = os.path.join(upload_dir, token + safe_name)
+        content = await f.read()
+        with open(local_path, "wb") as out:
+            out.write(content)
+        saved_paths.append(local_path)
+        items_with_path.append({
+            "file_id": meta.get("file_id"),
+            "filename": meta.get("filename") or safe_name,
+            "local_path": local_path,
+        })
+
+    try:
+        result = await archive_detect_service.submit_business_batch(
+            criteria=criteria,
+            stage=stage,
+            client_payload=client_obj,
+            progress_payload=progress_obj,
+            items=items_with_path,
+        )
+    except ValueError as e:
+        # 校验失败时清理已落盘文件
+        for p in saved_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
+@app.get(
+    "/api/archive-detect/business/batch/{batch_id}",
+    tags=["文件留底检测"],
+    summary="业务审核 - 查询批次结果",
+    response_model=ArchiveDetectBatchResponse,
+)
+async def archive_detect_business_batch_get(
+    batch_id: str = Path(..., description="批次 ID,由业务审核提交接口返回")
+):
+    """业务接口轮询:返回完整结果含 client/progress/files/overall_*。"""
+    data = await archive_detect_service.get_business_batch(batch_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
     return data
 
 
-@app.delete("/api/archive-detect/{batch_id}")
-async def archive_detect_delete(batch_id: str):
-    """删除一条历史记录（DB 级联清理 files）。"""
+@app.get(
+    "/api/archive-detect/{batch_id}",
+    tags=["文件留底检测"],
+    summary="查询批次状态(通用)",
+    response_model=ArchiveDetectBatchResponse,
+)
+async def archive_detect_get(
+    batch_id: str = Path(..., description="批次 ID,由提交接口返回")
+):
+    """轮询 batch + 每文件状态。优先内存态,缺失时从 DB 读（重启后可恢复）。
+
+    内存态含细粒度中间态(fetching/ocr/llm);DB 只含终态(done/error)。
+    ocr_text 在 DB 层已 defer,本接口不返回大文本。
+    """
+    data = await archive_detect_service.get_batch(batch_id)
+    if not data:
+        raise HTTPException(status_code=404,
+                            detail=f"批次 {batch_id} 不存在（服务可能已重启，请重新提交）")
+    return data
+
+
+@app.delete(
+    "/api/archive-detect/{batch_id}",
+    tags=["文件留底检测"],
+    summary="删除历史批次",
+    response_model=ArchiveDetectDeleteResponse,
+)
+async def archive_detect_delete(
+    batch_id: str = Path(..., description="要删除的批次 ID")
+):
+    """删除一条历史记录（内存 + DB 级联清理 files）。"""
     ok = await archive_detect_service.delete_batch(batch_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")

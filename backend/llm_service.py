@@ -6,6 +6,7 @@ LLM 服务模块
 import os
 import json
 import re
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 
@@ -487,45 +488,86 @@ def summarize_text(text: str, progress_name: str | None = None) -> dict:
 
 ARCHIVE_DETECT_INPUT_LIMIT_CHARS = 30000
 
+# 公司真实文件留底分类体系(基于业务方提供的售后客户文件留底要求)
+ARCHIVE_CATEGORIES_FULL = """
+【递交前阶段应上传的 5 大类】
+A. 客户基础文件:护照、身份证、中文信息表、个人简历、出生证明类文件、户口本、毕业证书&学位证书、结婚证&离婚证等婚姻状态文件、港澳通行证、房产证、工作证明信等
+B. 客户个人文件:职业&专业证书、照片、社保/个税、不反对移民申明、无犯罪记录证明、体检类文件、地址证明、在读证明、资产/资信文件、公证/认证文件、成就类文件、学生签证、成绩单、疫苗本、翻译类文件、证书或获奖记录、客户访校指南、单身证明、个人文件等
+C. 客户公司文件:营业执照、章程、股东会决议、验资报告、公司财报/审计报告、银行流水、业务合同/合作协议、组织架构图、股东名册、雇佣合同、公司介绍、办公室照片、办公室租赁合同等
+D. 其他备用文件:律师文件、投资文件、批复留底文件、使馆申请表、合规部KYC留底文件、开户KYC文件、投资证明、购房文件、入境处申请表格、劳工卡申请、正签信、工作签证留底、商业计划书等
+E. 转款凭证:服务过程中涉及的转账凭证等
 
-def _build_archive_detect_prompt(text: str, user_prompt: str) -> str:
-    """把用户输入的多行判定标准拼接进 LLM prompt。"""
-    doc_types = CONFIG.get("document_types") or [
-        "身份证件", "学历证明", "婚姻证明", "财务证明", "工作证明",
-        "申请表单", "合同协议", "报告说明", "简历", "其他",
-    ]
-    cat_str = " / ".join(doc_types)
+【递交后阶段应上传的 4 大类】
+F. 文案制作的递交文件类:递交全套留底、递交后补料留底等
+G. 获批/失败:筛选/名额通知函、使馆信、入境处信件、批复函、录取通知、补料信、打款通知、体检通知、获身份文件、拒签信、撤案信等任何客户相关批复类文件
+H. 其他文件:客户获批后协助客户留存的重要证件信息,如更新护照、入境小白条等
+I. 停滞/放弃类文件:客户明确表示撤案、不再继续办理、不启动了/放弃办理了等主观原因不再继续办理项目的邮件、聊天等截图
+"""
+
+ARCHIVE_CATEGORIES_SIMPLE = """
+A. 客户基础文件 / B. 客户个人文件 / C. 客户公司文件 / D. 其他备用文件 / E. 转款凭证 /
+F. 文案制作的递交文件类 / G. 获批/失败 / H. 其他文件 / I. 停滞/放弃类文件
+"""
+
+
+def _build_archive_detect_prompt(
+    text: str,
+    user_prompt: str,
+    stage: Optional[str] = None,
+) -> str:
+    """把用户输入的多行判定标准拼接进 LLM prompt。
+
+    stage: None(匿名模式)用简化版分类; "pre_submit" / "post_submit" 用完整分类树 + 阶段提醒。
+    输出 verdict 三态(match/partial/mismatch) + match_score(0-100)。
+    is_archival/confidence 由 service 层从 verdict/match_score 推导。
+    """
+    if stage in ("pre_submit", "post_submit"):
+        cat_block = ARCHIVE_CATEGORIES_FULL
+        stage_label = "递交前" if stage == "pre_submit" else "递交后"
+        stage_hint = f"\n当前阶段: {stage} ({stage_label})\n"
+    else:
+        cat_block = ARCHIVE_CATEGORIES_SIMPLE
+        stage_hint = ""
 
     return (
-        "你是一个文档归档（留底）判定助手。下面是用户描述的判定标准（请严格按它判定，未提到的维度不要发挥）：\n"
+        "你是一个公司文件留底审核助手。请根据下方公司分类标准 + 用户判定提示词,审核文件。\n\n"
         "---用户判定标准开始---\n"
         f"{user_prompt}\n"
         "---用户判定标准结束---\n\n"
-        "请阅读以下文件内容，判定该文件是否符合上述判定标准，并输出：\n"
-        "1. is_archival: true / false\n"
-        "2. confidence: 0-100 整数（基于文本证据强度）\n"
-        "3. reason: 30-120 字判断依据，仅引用与判定标准直接相关的内容；"
-        "**不要泄露金额、电话、身份证号、银行卡号、账号等敏感信息，遇到这类内容请用 [金额]/[手机号]/[身份证]/[银行卡] 等占位词代替**\n"
-        "4. key_points: 3-6 条要点 bullets，遵循同样的脱敏要求\n"
-        f"5. doc_category: 从下列中选一个：{cat_str}\n\n"
-        "返回严格 JSON，不要 markdown 代码块、不要任何额外解释：\n"
-        '{"is_archival": true, "confidence": 0, "reason": "...", "key_points": ["..."], "doc_category": "..."}\n\n'
+        "---公司分类标准开始---"
+        f"{stage_hint}{cat_block}\n"
+        "---公司分类标准结束---\n\n"
+        "请输出:\n"
+        "1. verdict: 三选一\n"
+        "   - \"match\"   : 文件可明确归入上述某个分类,且符合用户判定标准\n"
+        "   - \"partial\" : 可归类但部分指标不匹配(如阶段轻微错配)\n"
+        "   - \"mismatch\": 无法归入任何分类,或与判定标准明显不符\n"
+        "2. match_score: 0-100 整数\n"
+        "3. doc_category: 字母编号+子类名, 如 \"A-护照\"、\"G-批复函\"。若无法精确到子类,只填字母编号+大类名如 \"A-客户基础文件\"\n"
+        "4. reason: 30-120 字判断依据,仅引用与分类标准/用户判定相关的内容;"
+        "**不要泄露金额、电话、身份证号、银行卡号、账号等敏感信息,遇到这类内容请用 [金额]/[手机号]/[身份证]/[银行卡] 等占位词代替**\n"
+        "5. key_points: 3-6 条要点 bullets,遵循同样的脱敏要求\n\n"
+        "返回严格 JSON,不要 markdown 代码块:\n"
+        '{"verdict": "match", "match_score": 0, "doc_category": "A-护照", "reason": "...", "key_points": ["..."]}\n\n'
         "文件内容：\n---\n"
         f"{text}\n---\n"
     )
 
 
-def detect_archival(text: str, user_prompt: str) -> dict:
-    """以用户提供的判定标准判断 text 是否符合留底要求。
+def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None) -> dict:
+    """以用户提供的判定标准判断 text 符合程度（三态 verdict）。
 
     入参：
       text        - 已抽取的纯文本（OCR 或 docx 抽取）
       user_prompt - 用户输入的多行判定标准（必填）
+      stage       - None(匿名/简化版分类) | "pre_submit" | "post_submit"(完整分类树+阶段提醒)
 
     返回：
       {
-        "is_archival": bool,
-        "confidence": int 0-100,
+        "verdict": "match"|"partial"|"mismatch",
+        "match_score": int 0-100,
+        "is_archival": bool,           # = (verdict == "match"),向后兼容
+        "confidence": int 0-100,       # = match_score,向后兼容
         "reason": str (LLM 已被 prompt 要求脱敏；服务层还会再用 redactor 兜底),
         "key_points": list[str] (同上),
         "doc_category": str,
@@ -549,7 +591,7 @@ def detect_archival(text: str, user_prompt: str) -> dict:
             + src[-tail_n:]
         )
 
-    prompt = _build_archive_detect_prompt(src, user_prompt.strip())
+    prompt = _build_archive_detect_prompt(src, user_prompt.strip(), stage=stage)
     raw = _call_llm(prompt)
 
     # 解析 JSON（容错）
@@ -563,22 +605,98 @@ def detect_archival(text: str, user_prompt: str) -> dict:
     except json.JSONDecodeError as e:
         raise ValueError(f"LLM 返回非合法 JSON：{raw[:200]}") from e
 
-    # 字段兜底
-    is_archival = data.get("is_archival")
-    if isinstance(is_archival, str):
-        is_archival = is_archival.strip().lower() in ("true", "1", "yes", "是")
-    is_archival = bool(is_archival)
+    # ---- 字段兜底 ----
 
+    # 1) verdict：白名单三态，兜底 mismatch
+    raw_v = str(data.get("verdict", "")).strip().lower()
+    if raw_v not in ("match", "partial", "mismatch"):
+        raw_v = "mismatch"
+    verdict = raw_v
+
+    # 2) match_score：钳位 0-100
     try:
-        confidence = int(data.get("confidence", 0))
+        match_score = int(data.get("match_score", 0))
     except (TypeError, ValueError):
-        confidence = 0
-    confidence = max(0, min(100, confidence))
+        match_score = 0
+    match_score = max(0, min(100, match_score))
+
+    # 3) 向后兼容推导
+    is_archival = (verdict == "match")
+    confidence = match_score
 
     return {
+        "verdict": verdict,
+        "match_score": match_score,
         "is_archival": is_archival,
         "confidence": confidence,
         "reason": str(data.get("reason", "")).strip(),
         "key_points": [str(x).strip() for x in (data.get("key_points") or []) if str(x).strip()],
         "doc_category": str(data.get("doc_category", "其他")).strip() or "其他",
     }
+
+
+# ==================== 批次总报告生成 ====================
+
+
+def _build_summarize_batch_prompt(
+    files_brief: list,
+    user_prompt: str,
+    overall_verdict: str,
+    overall_score: int,
+) -> str:
+    """批次总报告 prompt:输入各文件简要明细 + 已算好的规则汇总结论,输出 80-200 字总体说明文本。"""
+    lines = []
+    for i, f in enumerate(files_brief, 1):
+        kp = " | ".join(f.get("key_points") or [])
+        lines.append(
+            f"- 文件{i} 「{f.get('filename') or '?'}」: "
+            f"verdict={f.get('verdict')}, score={f.get('match_score')}, "
+            f"类别={f.get('doc_category') or '?'}, "
+            f"reason={f.get('reason') or ''}"
+            + (f", 要点={kp}" if kp else "")
+        )
+    detail = "\n".join(lines) if lines else "（无符合 done 状态的文件）"
+
+    return (
+        "你是一个文档留底审核总结助手。请基于以下信息撰写一段总体审核说明:\n\n"
+        f"用户判定标准:\n{user_prompt}\n\n"
+        f"规则汇总结论: verdict={overall_verdict}, 综合匹配度={overall_score}\n\n"
+        f"文件检测明细(共 {len(files_brief)} 条):\n{detail}\n\n"
+        "请围绕规则结论,用 80-200 字中文描述总体审核情况,包含:\n"
+        "① 整体符合度评价(贴合 verdict)\n"
+        "② 主要问题点(若有 mismatch / partial 文件,简要点出问题)\n"
+        "③ 关键发现(突出共性或重要差异)\n\n"
+        "**脱敏要求**:不要泄露金额、电话、身份证号、银行卡号、账号等敏感信息,"
+        "遇到这类内容请用 [金额]/[手机号]/[身份证]/[银行卡] 等占位词代替。\n\n"
+        "直接返回纯文本(不要 JSON、不要 markdown、不要前后缀说明文字):\n"
+    )
+
+
+def summarize_batch(
+    files_brief: list,
+    user_prompt: str,
+    overall_verdict: str,
+    overall_score: int,
+) -> str:
+    """对一个 batch 内所有已 done 文件生成总体审核说明文本。
+
+    入参:
+      files_brief - list[dict],每条含 {filename, verdict, match_score, doc_category, reason, key_points}
+      user_prompt - 用户的审核判定标准
+      overall_verdict - 规则汇总结论 match/partial/mismatch
+      overall_score - 规则汇总平均分 0-100
+
+    返回:
+      str - 80-200 字总体说明纯文本(未脱敏,调用方再 redact 兜底)
+    """
+    prompt = _build_summarize_batch_prompt(files_brief, user_prompt, overall_verdict, overall_score)
+    raw = _call_llm(prompt)
+    # 简单清理:去掉首尾空白和潜在 markdown 代码块标记
+    out = (raw or "").strip()
+    if out.startswith("```"):
+        out = out.strip("`")
+        # 去掉可能的语言标识符
+        if "\n" in out:
+            out = out.split("\n", 1)[1]
+        out = out.strip()
+    return out

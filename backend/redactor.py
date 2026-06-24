@@ -6,7 +6,8 @@
 身份证必须先于座机（7-8 位）匹配，否则会被短数字段误吞。
 
 只对返回前端的字符串字段调用：reason / summary / title / key_points 列表。
-不对 OCR 原文 / DB 写入的原始 LLM 响应做脱敏（OCR 原文根本不返回前端，无需脱敏）。
+archive_detect 流水线还会对 OCR 原文调 redact() 后再入库（archive_detect_files.ocr_text），
+绝不存 OCR 原文。原始 LLM 响应在 redact_dict 内统一脱敏。
 """
 import re
 from typing import Iterable

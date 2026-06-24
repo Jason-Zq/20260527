@@ -5,97 +5,100 @@
       <div class="home-logo">
         <span>AI</span>
       </div>
-      <h1 class="home-title">智能文档工作台</h1>
-      <p class="home-sub">移民客户档案 · AI 解析 · 模板填写 · PDF 拆分</p>
+      <h1 class="home-title">智能文档审核工作台</h1>
+      <p class="home-sub">AI 文件留底检测 · 多文件并发 · 敏感信息自动脱敏</p>
     </header>
 
-    <!-- 横向四栏卡片 -->
-    <main class="home-entries">
-      <article class="entry-card" @click="go('/parse')" tabindex="0" @keydown.enter="go('/parse')">
-        <div class="card-glow icon-magic"></div>
-        <div class="entry-icon icon-magic">
-          <el-icon :size="30"><MagicStick /></el-icon>
-        </div>
-        <h3 class="entry-title">AI 材料解析</h3>
-        <p class="entry-desc">上传证件、护照、学历证书等材料，AI 自动 OCR 识别并归档到客户档案</p>
-        <ul class="entry-bullets">
-          <li><el-icon size="12"><Check /></el-icon> 拖拽多文件批量上传</li>
-          <li><el-icon size="12"><Check /></el-icon> 智能匹配现有客户</li>
-          <li><el-icon size="12"><Check /></el-icon> 字段精准路由到主表/子表</li>
-        </ul>
-        <div class="entry-cta">
-          开始使用
-          <el-icon size="14"><ArrowRight /></el-icon>
-        </div>
-      </article>
-
-      <article class="entry-card" @click="go('/template')" tabindex="0" @keydown.enter="go('/template')">
-        <div class="card-glow icon-doc"></div>
-        <div class="entry-icon icon-doc">
-          <el-icon :size="30"><Document /></el-icon>
-        </div>
-        <h3 class="entry-title">AI 填写文件</h3>
-        <p class="entry-desc">上传 Word 模板，AI 自动定位占位符，从客户档案抽取数据生成 PDF</p>
-        <ul class="entry-bullets">
-          <li><el-icon size="12"><Check /></el-icon> 智能识别占位符</li>
-          <li><el-icon size="12"><Check /></el-icon> 客户档案一键填充</li>
-          <li><el-icon size="12"><Check /></el-icon> 核心字段自动锁定</li>
-        </ul>
-        <div class="entry-cta">
-          开始使用
-          <el-icon size="14"><ArrowRight /></el-icon>
+    <!-- 主推大卡：文件留底检测 -->
+    <main class="home-main">
+      <article
+        class="primary-card"
+        @click="go('/archive-detect')"
+        tabindex="0"
+        @keydown.enter="go('/archive-detect')"
+      >
+        <div class="primary-glow"></div>
+        <div class="primary-content">
+          <div class="primary-icon">
+            <el-icon :size="40"><Reading /></el-icon>
+          </div>
+          <div class="primary-text">
+            <div class="primary-badge">主功能</div>
+            <h2 class="primary-title">文件留底检测</h2>
+            <p class="primary-desc">
+              上传文件或粘贴 URL，AI 根据你的判定标准检测文件是否符合留底要求；金额、电话、身份证、银行卡等敏感信息自动脱敏。
+            </p>
+            <ul class="primary-bullets">
+              <li><el-icon size="14"><Check /></el-icon> 多文件并发处理（≤20）</li>
+              <li><el-icon size="14"><Check /></el-icon> 自定义判定标准</li>
+              <li><el-icon size="14"><Check /></el-icon> 支持 OSS 临时签名地址</li>
+              <li><el-icon size="14"><Check /></el-icon> 敏感信息自动脱敏</li>
+            </ul>
+          </div>
+          <div class="primary-cta">
+            立即开始
+            <el-icon size="16"><ArrowRight /></el-icon>
+          </div>
         </div>
       </article>
 
-      <article class="entry-card" @click="go('/split')" tabindex="0" @keydown.enter="go('/split')">
-        <div class="card-glow icon-split"></div>
-        <div class="entry-icon icon-split">
-          <el-icon :size="30"><Files /></el-icon>
-        </div>
-        <h3 class="entry-title">处理超长 PDF</h3>
-        <p class="entry-desc">把多证件合并的 PDF 自动按证件类型拆分为独立文件，一键打包下载</p>
-        <ul class="entry-bullets">
-          <li><el-icon size="12"><Check /></el-icon> 全页 OCR 自动分类</li>
-          <li><el-icon size="12"><Check /></el-icon> 进程重启历史可恢复</li>
-          <li><el-icon size="12"><Check /></el-icon> 7 天后自动清理文件</li>
-        </ul>
-        <div class="entry-cta">
-          开始使用
-          <el-icon size="14"><ArrowRight /></el-icon>
-        </div>
-      </article>
+      <!-- 折叠区：更多内部工具 -->
+      <div class="more-section">
+        <button
+          class="more-toggle"
+          :class="{ open: showMore }"
+          @click="showMore = !showMore"
+        >
+          更多内部工具
+          <el-icon class="more-arrow"><ArrowDown /></el-icon>
+        </button>
 
-      <article class="entry-card" @click="go('/archive-detect')" tabindex="0" @keydown.enter="go('/archive-detect')">
-        <div class="card-glow icon-summary"></div>
-        <div class="entry-icon icon-summary">
-          <el-icon :size="30"><Reading /></el-icon>
-        </div>
-        <h3 class="entry-title">文件留底检测</h3>
-        <p class="entry-desc">上传或粘贴文件 URL，AI 检测是否符合留底标准，敏感信息自动脱敏</p>
-        <ul class="entry-bullets">
-          <li><el-icon size="12"><Check /></el-icon> 多文件并发处理（≤20）</li>
-          <li><el-icon size="12"><Check /></el-icon> 用户自定义判定标准</li>
-          <li><el-icon size="12"><Check /></el-icon> 金额/电话/身份证自动脱敏</li>
-        </ul>
-        <div class="entry-cta">
-          开始使用
-          <el-icon size="14"><ArrowRight /></el-icon>
-        </div>
-      </article>
+        <transition name="fold">
+          <div v-show="showMore" class="more-tools">
+            <article class="tool-card" @click="go('/parse')" tabindex="0" @keydown.enter="go('/parse')">
+              <div class="tool-icon icon-magic"><el-icon :size="22"><MagicStick /></el-icon></div>
+              <div class="tool-body">
+                <h4 class="tool-title">AI 材料解析</h4>
+                <p class="tool-desc">OCR 识别证件并归档客户档案</p>
+              </div>
+              <el-icon class="tool-arrow"><ArrowRight /></el-icon>
+            </article>
+
+            <article class="tool-card" @click="go('/template')" tabindex="0" @keydown.enter="go('/template')">
+              <div class="tool-icon icon-doc"><el-icon :size="22"><Document /></el-icon></div>
+              <div class="tool-body">
+                <h4 class="tool-title">AI 填写文件</h4>
+                <p class="tool-desc">Word 模板自动定位占位符 + 填值</p>
+              </div>
+              <el-icon class="tool-arrow"><ArrowRight /></el-icon>
+            </article>
+
+            <article class="tool-card" @click="go('/split')" tabindex="0" @keydown.enter="go('/split')">
+              <div class="tool-icon icon-split"><el-icon :size="22"><Files /></el-icon></div>
+              <div class="tool-body">
+                <h4 class="tool-title">处理超长 PDF</h4>
+                <p class="tool-desc">按证件类型自动拆分为独立文件</p>
+              </div>
+              <el-icon class="tool-arrow"><ArrowRight /></el-icon>
+            </article>
+          </div>
+        </transition>
+      </div>
     </main>
-
-    <!-- 底部脚标 -->
-    <footer class="home-footer">
-      <span class="footer-tip">💡 推荐先建立客户档案，再使用 AI 解析自动归档</span>
-    </footer>
   </div>
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { MagicStick, Document, Files, Reading, ArrowRight, Check } from '@element-plus/icons-vue'
+import {
+  MagicStick, Document, Files, Reading,
+  ArrowRight, ArrowDown, Check,
+} from '@element-plus/icons-vue'
 
 const router = useRouter()
+const showMore = ref(false)
+
 function go(path) {
   router.push(path)
 }
@@ -107,13 +110,12 @@ function go(path) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 48px;
-  padding: 40px 24px 32px;
+  gap: 36px;
+  padding: 48px 24px 40px;
   overflow-y: auto;
   background:
-    radial-gradient(circle at 15% 20%, rgba(99, 102, 241, 0.10) 0%, transparent 45%),
-    radial-gradient(circle at 85% 75%, rgba(16, 185, 129, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 15% 20%, rgba(251, 146, 60, 0.10) 0%, transparent 45%),
+    radial-gradient(circle at 85% 80%, rgba(245, 158, 11, 0.08) 0%, transparent 45%),
     linear-gradient(180deg, #f8fafc 0%, #f0f2f8 100%);
 }
 
@@ -131,7 +133,7 @@ function go(path) {
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  background: linear-gradient(135deg, #fb923c 0%, #f59e0b 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -140,7 +142,7 @@ function go(path) {
   font-size: 20px;
   letter-spacing: 1px;
   box-shadow:
-    0 12px 30px rgba(99, 102, 241, 0.35),
+    0 12px 30px rgba(251, 146, 60, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.25);
   animation: float 6s ease-in-out infinite;
 }
@@ -154,7 +156,7 @@ function go(path) {
   margin: 4px 0 0;
   font-size: 30px;
   font-weight: 800;
-  background: linear-gradient(135deg, #1e293b 0%, #6366f1 60%, #8b5cf6 100%);
+  background: linear-gradient(135deg, #1e293b 0%, #fb923c 60%, #f59e0b 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -168,202 +170,323 @@ function go(path) {
   letter-spacing: 0.5px;
 }
 
-/* ========== 横向卡片区 ========== */
-.home-entries {
+/* ========== 主区域 ========== */
+.home-main {
   width: 100%;
-  max-width: 1280px;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 20px;
-  flex-shrink: 0;
-}
-
-.entry-card {
-  position: relative;
+  max-width: 880px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 32px 28px 28px;
+  gap: 28px;
+}
+
+/* ========== 主推卡片 ========== */
+.primary-card {
+  position: relative;
   background: #fff;
-  border: 1px solid #e8ebf5;
-  border-radius: 18px;
+  border: 1px solid #fde68a;
+  border-radius: 20px;
+  padding: 36px 40px 32px;
   cursor: pointer;
   transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
               box-shadow 0.3s ease,
               border-color 0.3s ease;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  outline: none;
-  overflow: hidden;
-}
-
-.entry-card:hover,
-.entry-card:focus-visible {
-  transform: translateY(-6px);
   box-shadow:
-    0 20px 40px -12px rgba(99, 102, 241, 0.25),
+    0 4px 12px rgba(251, 146, 60, 0.08),
+    0 1px 3px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+  outline: none;
+}
+
+.primary-card:hover,
+.primary-card:focus-visible {
+  transform: translateY(-4px);
+  box-shadow:
+    0 20px 50px -12px rgba(251, 146, 60, 0.35),
     0 8px 16px -8px rgba(15, 23, 42, 0.08);
-  border-color: rgba(99, 102, 241, 0.3);
+  border-color: #fb923c;
 }
 
-.entry-card:focus-visible {
-  outline: 2px solid #6366f1;
-  outline-offset: 2px;
+.primary-card:focus-visible {
+  outline: 2px solid #fb923c;
+  outline-offset: 3px;
 }
 
-/* 卡片角落柔光（hover 时显现） */
-.card-glow {
+.primary-glow {
   position: absolute;
-  top: -40px;
-  right: -40px;
-  width: 160px;
-  height: 160px;
+  top: -80px;
+  right: -80px;
+  width: 280px;
+  height: 280px;
   border-radius: 50%;
-  filter: blur(40px);
-  opacity: 0;
-  transition: opacity 0.4s ease;
+  background: radial-gradient(circle, rgba(251, 146, 60, 0.25), transparent 70%);
+  filter: blur(20px);
   pointer-events: none;
-}
-.card-glow.icon-magic   { background: rgba(99, 102, 241, 0.4); }
-.card-glow.icon-doc     { background: rgba(59, 130, 246, 0.4); }
-.card-glow.icon-split   { background: rgba(16, 185, 129, 0.4); }
-.card-glow.icon-summary { background: rgba(251, 146, 60, 0.4); }
-
-.entry-card:hover .card-glow,
-.entry-card:focus-visible .card-glow {
-  opacity: 1;
+  transition: opacity 0.4s ease;
 }
 
-/* 图标 */
-.entry-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
+.primary-content {
+  position: relative;
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+}
+
+.primary-icon {
+  flex-shrink: 0;
+  width: 76px;
+  height: 76px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #fb923c, #f59e0b);
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  flex-shrink: 0;
-  position: relative;
+  box-shadow: 0 10px 25px -6px rgba(251, 146, 60, 0.5);
   transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.entry-icon.icon-magic {
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  box-shadow: 0 8px 20px -4px rgba(99, 102, 241, 0.4);
-}
-.entry-icon.icon-doc {
-  background: linear-gradient(135deg, #3b82f6, #6366f1);
-  box-shadow: 0 8px 20px -4px rgba(59, 130, 246, 0.4);
-}
-.entry-icon.icon-split {
-  background: linear-gradient(135deg, #10b981, #06b6d4);
-  box-shadow: 0 8px 20px -4px rgba(16, 185, 129, 0.4);
-}
-.entry-icon.icon-summary {
-  background: linear-gradient(135deg, #fb923c, #f59e0b);
-  box-shadow: 0 8px 20px -4px rgba(251, 146, 60, 0.4);
+.primary-card:hover .primary-icon,
+.primary-card:focus-visible .primary-icon {
+  transform: scale(1.05) rotate(-4deg);
 }
 
-.entry-card:hover .entry-icon,
-.entry-card:focus-visible .entry-icon {
-  transform: scale(1.08) rotate(-4deg);
+.primary-text {
+  flex: 1;
+  min-width: 0;
 }
 
-/* 文字 */
-.entry-title {
-  margin: 4px 0 0;
-  font-size: 19px;
+.primary-badge {
+  display: inline-block;
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 1px;
+  color: #fb923c;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  padding: 3px 10px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.primary-title {
+  margin: 0 0 8px;
+  font-size: 24px;
+  font-weight: 800;
   color: #0f172a;
   letter-spacing: 0.3px;
 }
 
-.entry-desc {
-  margin: 0;
-  color: #64748b;
-  font-size: 13px;
-  line-height: 1.6;
-  min-height: 40px;
+.primary-desc {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #475569;
 }
 
-/* 特性列表 */
-.entry-bullets {
+.primary-bullets {
   list-style: none;
-  margin: 6px 0 0;
+  margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 16px;
 }
 
-.entry-bullets li {
+.primary-bullets li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: #475569;
-  line-height: 1.4;
+  gap: 6px;
+  font-size: 13px;
+  color: #334155;
 }
 
-.entry-bullets li :deep(.el-icon) {
+.primary-bullets li :deep(.el-icon) {
   flex-shrink: 0;
   color: #10b981;
 }
 
-/* CTA */
-.entry-cta {
-  margin-top: 12px;
-  padding-top: 14px;
-  border-top: 1px dashed #e2e8f0;
+.primary-cta {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #fb923c;
+  padding: 10px 18px;
+  background: #fff7ed;
+  border-radius: 12px;
+  transition: gap 0.2s ease, transform 0.2s ease;
+}
+
+.primary-card:hover .primary-cta,
+.primary-card:focus-visible .primary-cta {
+  gap: 12px;
+  transform: translateX(-2px);
+}
+
+/* ========== 折叠区：更多工具 ========== */
+.more-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.more-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
+  background: transparent;
+  border: 1px dashed #cbd5e1;
+  color: #64748b;
+  padding: 7px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.more-toggle:hover {
+  border-color: #94a3b8;
+  color: #475569;
+  background: #f8fafc;
+}
+
+.more-arrow {
+  transition: transform 0.3s ease;
+}
+
+.more-toggle.open .more-arrow {
+  transform: rotate(180deg);
+}
+
+.more-tools {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.tool-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #fff;
+  border: 1px solid #e8ebf5;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  opacity: 0.85;
+  outline: none;
+}
+
+.tool-card:hover,
+.tool-card:focus-visible {
+  opacity: 1;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 14px -6px rgba(15, 23, 42, 0.15);
+  border-color: #cbd5e1;
+}
+
+.tool-card:focus-visible {
+  outline: 2px solid #94a3b8;
+  outline-offset: 2px;
+}
+
+.tool-icon {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.tool-icon.icon-magic {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+.tool-icon.icon-doc {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+}
+.tool-icon.icon-split {
+  background: linear-gradient(135deg, #10b981, #06b6d4);
+}
+
+.tool-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-title {
+  margin: 0 0 2px;
   font-size: 13px;
   font-weight: 600;
-  color: #6366f1;
-  transition: gap 0.2s ease;
+  color: #1e293b;
 }
 
-.entry-card:hover .entry-cta,
-.entry-card:focus-visible .entry-cta {
-  gap: 10px;
-}
-
-/* ========== 脚标 ========== */
-.home-footer {
-  flex-shrink: 0;
-}
-
-.footer-tip {
+.tool-desc {
+  margin: 0;
   font-size: 12px;
   color: #94a3b8;
-  letter-spacing: 0.3px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-arrow {
+  flex-shrink: 0;
+  color: #cbd5e1;
+  transition: transform 0.2s ease, color 0.2s ease;
+}
+
+.tool-card:hover .tool-arrow,
+.tool-card:focus-visible .tool-arrow {
+  color: #64748b;
+  transform: translateX(2px);
+}
+
+/* 折叠过渡 */
+.fold-enter-active,
+.fold-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.fold-enter-from,
+.fold-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 
 /* ========== 响应式 ========== */
-@media (max-width: 1180px) {
-  .home-entries {
-    grid-template-columns: repeat(2, 1fr);
-    max-width: 760px;
+@media (max-width: 900px) {
+  .primary-content {
+    flex-direction: column;
+    gap: 18px;
   }
-}
-
-@media (max-width: 640px) {
-  .home-entries {
+  .primary-cta {
+    position: static;
+    align-self: flex-end;
+    margin-top: 8px;
+  }
+  .more-tools {
     grid-template-columns: 1fr;
-    max-width: 480px;
   }
-  .entry-card { padding: 24px 22px; }
-  .entry-desc { min-height: 0; }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 540px) {
   .home-page {
-    padding: 24px 16px;
-    gap: 32px;
+    padding: 28px 16px;
+    gap: 24px;
   }
   .home-title { font-size: 24px; }
-  .home-logo { width: 56px; height: 56px; font-size: 18px; }
+  .primary-card { padding: 24px 22px; }
+  .primary-bullets { grid-template-columns: 1fr; }
 }
 </style>

@@ -1,8 +1,0 @@
-{
-  "llm": {
-    "api_key": "把这里替换为你的火山引擎 ark API Key",
-    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-    "model": "ep-xxxxxxxxxxxxxx-xxxxx",
-    "temperature": 0.1
-  }
-}

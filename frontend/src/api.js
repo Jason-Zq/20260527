@@ -264,8 +264,12 @@ export async function pollArchiveDetect(batchId) {
   return r.data
 }
 
+// NOTE: 留底检测已支持 DB 双写持久化,history/delete 接口已恢复。
+
 /**
- * 历史 batch 列表（不含 files）。
+ * 历史 batch 列表（不含 files 详情）。
+ * @param {number} limit
+ * @returns {Promise<{items: Array, total: number}>}
  */
 export async function listArchiveDetectHistory(limit = 200) {
   const r = await axios.get(`${API_BASE}/archive-detect/history`, { params: { limit } })
@@ -273,10 +277,61 @@ export async function listArchiveDetectHistory(limit = 200) {
 }
 
 /**
- * 删除一条历史。
+ * 删除一条历史 batch。
+ * @param {string} batchId
  */
-export async function deleteArchiveDetect(batchId) {
+export async function deleteArchiveDetectBatch(batchId) {
   const r = await axios.delete(`${API_BASE}/archive-detect/${batchId}`)
+  return r.data
+}
+
+// ==================== 业务接口(阶段三): 增量复用 + 业务字段透传 ====================
+
+/**
+ * 业务方批量提交进展包(JSON + OSS URL 模式)。
+ * @param {Object} payload
+ * @param {string} payload.criteria
+ * @param {{client_code:string, name:string}} payload.client
+ * @param {{progress_oid:string, handler?:string, project_name?:string, project_code?:string, project_detail_name?:string, project_detail_code?:string, progress_name?:string}} payload.progress
+ * @param {Array<{file_id:string, filename?:string, url:string}>} payload.items
+ * @returns {Promise<{batch_id:string, progress_id:number, total_files:number, reused_count:number, new_count:number}>}
+ */
+export async function submitBusinessBatch(payload) {
+  const r = await axios.post(`${API_BASE}/archive-detect/business/batch`, payload, {
+    timeout: 60000,
+  })
+  return r.data
+}
+
+/**
+ * 业务方批量提交(multipart 上传模式)。
+ * @param {string} criteria
+ * @param {Object} client {client_code, name}
+ * @param {Object} progress {progress_oid, handler, project_*, progress_name}
+ * @param {File[]} files
+ * @param {Array<{file_id:string, filename?:string}>} perFileMeta 顺序与 files 对应
+ */
+export async function submitBusinessBatchUpload(criteria, client, progress, files, perFileMeta, stage = 'post_submit') {
+  const fd = new FormData()
+  fd.append('criteria', criteria)
+  fd.append('stage', stage)
+  fd.append('client_payload', JSON.stringify(client))
+  fd.append('progress_payload', JSON.stringify(progress))
+  fd.append('items_payload', JSON.stringify(perFileMeta))
+  for (const f of files) fd.append('files', f)
+  const r = await axios.post(`${API_BASE}/archive-detect/business/batch/upload`, fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+  return r.data
+}
+
+/**
+ * 业务接口轮询。返回完整结果含 client/progress/files/overall/reused_count/new_count。
+ * @param {string} batchId
+ */
+export async function pollBusinessBatch(batchId) {
+  const r = await axios.get(`${API_BASE}/archive-detect/business/batch/${batchId}`)
   return r.data
 }
 
