@@ -12,12 +12,15 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 
 const routes = [
   { path: '/', component: () => import('./components/HomePage.vue') },
+  { path: '/clients', component: () => import('./components/ClientListPage.vue') },
+  { path: '/clients/:clientId', component: () => import('./components/ClientDetailPage.vue'), props: route => ({ clientId: Number(route.params.clientId) }) },
   { path: '/parse', component: () => import('./components/ParseEntryPage.vue') },
   { path: '/template', component: () => import('./components/FillEntryPage.vue') },
   { path: '/split', component: () => import('./components/SplitEntryPage.vue') },
   { path: '/summary', component: () => import('./components/SummaryEntryPage.vue') },
   { path: '/archive-detect', component: () => import('./components/ArchiveDetectEntryPage.vue') },
   { path: '/archive-admin', component: () => import('./components/ArchiveAdminPage.vue') },
+  { path: '/child-age-leads', component: () => import('./components/ChildAgeLeadsPage.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

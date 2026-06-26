@@ -16,6 +16,9 @@ URL 文件下载工具（通用，可被任何接口复用）。
 import os
 import re
 import json
+import time
+import asyncio
+import threading
 import mimetypes
 import uuid
 from urllib.parse import urlparse, unquote
@@ -28,7 +31,7 @@ DOWNLOAD_TIMEOUT_S = 300                 # 5 min 总超时
 CONNECT_TIMEOUT_S = 60
 
 # 与 OCR/解析支持的扩展名对齐
-_SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".docx"}
+_SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif", ".docx", ".xls", ".xlsx", ".pptx"}
 
 
 class FileTooLargeError(Exception):
@@ -219,14 +222,112 @@ def is_supported_extension(filename: str) -> bool:
     return ext in _SUPPORTED_EXT
 
 
+def get_unsupported_hint(filename: str) -> str:
+    """针对常见但暂不支持的旧格式给出明确提示。"""
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext == ".doc":
+        return "暂不支持旧版 Word(.doc)，请转换为 .docx 后上传"
+    return f"不支持的文件类型：{filename}（支持 {', '.join(get_supported_extensions())}）"
+
+
 def get_supported_extensions() -> list[str]:
     return sorted(_SUPPORTED_EXT)
 
 
 def cleanup_temp_file(local_path: str) -> None:
-    """安全删除单个临时文件。"""
+    """安全删除单个临时文件。
+
+    Windows 上 pdfplumber/PaddleOCR 句柄释放有延迟，立即删常报 WinError 32。
+    策略：立即试 → 失败 sleep 0.5s 重试一次 → 仍失败丢进延迟队列由后台清理。
+    """
+    if not local_path or not os.path.exists(local_path):
+        return
     try:
-        if local_path and os.path.exists(local_path):
-            os.remove(local_path)
+        os.remove(local_path)
+        return
+    except OSError:
+        pass
+    # 短暂等待 GC 释放句柄后再试一次（覆盖大部分场景）
+    time.sleep(0.5)
+    try:
+        os.remove(local_path)
+        return
     except OSError as e:
-        print(f"[file_fetcher] 清理临时文件失败 {local_path}: {e}")
+        # 进入延迟队列，由 _periodic_cleanup_task 兜底
+        with _cleanup_lock:
+            _pending_cleanup.append((local_path, time.time() + 30))
+        print(f"[file_fetcher] 临时文件占用中，已加入延迟清理队列: {local_path} ({e})")
+
+
+# ==================== 延迟清理 + 启动时旧文件扫描 ====================
+
+# 模块级延迟队列：[(path, retry_after_ts)]
+_pending_cleanup: list[tuple[str, float]] = []
+_cleanup_lock = threading.Lock()
+
+# 启动时清理多久前的旧文件（兜底之前残留的）
+_STALE_FILE_MAX_AGE_SEC = 3600  # 1 小时
+# 后台任务扫描间隔
+_CLEANUP_INTERVAL_SEC = 60
+
+
+def _drain_pending_cleanup() -> None:
+    """清空一次延迟队列里能删的，删不动的留到下次。"""
+    now = time.time()
+    with _cleanup_lock:
+        remaining: list[tuple[str, float]] = []
+        for path, ts in _pending_cleanup:
+            if ts > now:
+                # 还没到重试时间
+                remaining.append((path, ts))
+                continue
+            if not os.path.exists(path):
+                continue  # 已经被别处删掉
+            try:
+                os.remove(path)
+            except OSError:
+                # 继续等 60s 后再试
+                remaining.append((path, now + _CLEANUP_INTERVAL_SEC))
+        _pending_cleanup[:] = remaining
+
+
+def _cleanup_stale_files(max_age_sec: int = _STALE_FILE_MAX_AGE_SEC) -> int:
+    """扫描 temp/fetched/ 目录，删 max_age_sec 以前的残留文件。返回成功删除的个数。"""
+    d = _temp_dir()
+    now = time.time()
+    deleted = 0
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(d, name)
+        try:
+            if os.path.isfile(p) and now - os.path.getmtime(p) > max_age_sec:
+                os.remove(p)
+                deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+
+async def periodic_cleanup_task() -> None:
+    """后台周期任务：启动时扫一次旧文件 + 之后每 60s 处理延迟队列。
+
+    由 main.py 的 startup 事件挂起 asyncio.create_task(periodic_cleanup_task())。
+    """
+    try:
+        n = _cleanup_stale_files()
+        if n > 0:
+            print(f"[file_fetcher] 启动清理：删除 {n} 个超过 {_STALE_FILE_MAX_AGE_SEC}s 的残留临时文件")
+    except Exception as e:
+        print(f"[file_fetcher] 启动清理异常（忽略）: {e}")
+
+    while True:
+        try:
+            await asyncio.sleep(_CLEANUP_INTERVAL_SEC)
+            _drain_pending_cleanup()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[file_fetcher] 后台清理异常（继续运行）: {e}")

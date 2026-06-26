@@ -27,7 +27,7 @@ from db import archive_detect_crud as crud
 
 # ==================== 常量与状态 ====================
 
-MAX_FILES_PER_BATCH = 20
+MAX_FILES_PER_BATCH = 50
 LLM_CONCURRENCY = 3
 RESULT_TTL_HOURS = 6                         # 内存结果保留 6 小时
 
@@ -293,7 +293,7 @@ async def _process_one(
             fetched_temp_path = local_path
 
             if not file_fetcher.is_supported_extension(filename):
-                raise ValueError(f"不支持的文件类型：{filename}")
+                raise ValueError(file_fetcher.get_unsupported_hint(filename))
         else:
             local_path = upload_path
             if not local_path or not os.path.exists(local_path):
@@ -753,7 +753,7 @@ async def _process_one_business(
                 raise ValueError(f"无法下载文件:{msg}")
             fetched_temp_path = local_path
             if not file_fetcher.is_supported_extension(filename):
-                raise ValueError(f"不支持的文件类型:{filename}")
+                raise ValueError(file_fetcher.get_unsupported_hint(filename))
         else:
             local_path = upload_path
             if not local_path or not os.path.exists(local_path):
@@ -1019,7 +1019,7 @@ async def _process_one_recheck(
                 raise ValueError(f"无法下载文件:{msg}")
             fetched_temp_path = local_path
             if not file_fetcher.is_supported_extension(filename):
-                raise ValueError(f"不支持的文件类型:{filename}")
+                raise ValueError(file_fetcher.get_unsupported_hint(filename))
 
             _set_file_state(batch_id, idx, status="ocr", filename=filename, mime_type=mime_type)
             async with _OCR_LOCK:

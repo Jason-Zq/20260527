@@ -700,3 +700,50 @@ def summarize_batch(
             out = out.split("\n", 1)[1]
         out = out.strip()
     return out
+
+
+# ==================== 客户资料结构化抽取 ====================
+
+
+def _build_client_profile_prompt(ocr_text: str, filename: str, doc_category: str) -> str:
+    return (
+        "你是移民客户档案结构化助手。请从单个客户文件 OCR 文本中抽取可写入 PostgreSQL 的结构化事实。\n"
+        "只抽取文本中明确出现的信息；不确定不要编造；日期尽量规范为 YYYY-MM-DD；金额只保留数字和币种。\n\n"
+        f"文件名:{filename or ''}\n"
+        f"文件分类:{doc_category or ''}\n\n"
+        "请返回严格 JSON，不要 markdown，结构如下：\n"
+        '{"client_basic":{"name_en":"","gender":"","birth_date":"YYYY-MM-DD","birth_place":"","nationality":"","id_number":"","passport_no":"","passport_expiry_date":"YYYY-MM-DD","marital_status":""},'
+        '"family_members":[{"relation":"child|spouse|parent|other","name":"","gender":"","birth_date":"YYYY-MM-DD","nationality":"","id_number":"","passport_no":"","birth_cert_no":"","birth_place":""}],'
+        '"assets":[{"asset_type":"deposit|bank_statement|property|stock|vehicle|other","asset_name":"","owner_name":"","value_amount":null,"currency":"","bank_name":"","account_no":"","location_address":"","certificate_no":""}],'
+        '"extra_info":[{"key":"","value":""}],"confidence_notes":["..."]}\n\n'
+        "OCR 文本:\n---\n"
+        f"{ocr_text}\n---\n"
+    )
+
+
+def extract_client_profile_facts(ocr_text: str, filename: str = "", doc_category: str = "") -> dict:
+    """从单个文件 OCR 文本中抽取客户档案结构化事实。"""
+    if not ocr_text or not ocr_text.strip():
+        raise ValueError("OCR 文本为空，无法抽取客户档案")
+    src = ocr_text.strip()
+    if len(src) > ARCHIVE_DETECT_INPUT_LIMIT_CHARS:
+        head_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS // 2
+        tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
+        src = src[:head_n] + f"\n\n...[省略 {len(ocr_text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n" + src[-tail_n:]
+
+    raw = _call_llm(_build_client_profile_prompt(src, filename, doc_category))
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        data = json.loads(raw[start:end + 1] if start >= 0 and end > start else raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM 返回非合法客户档案 JSON：{raw[:200]}") from e
+
+    return {
+        "client_basic": data.get("client_basic") or {},
+        "family_members": data.get("family_members") or [],
+        "assets": data.get("assets") or [],
+        "extra_info": data.get("extra_info") or [],
+        "confidence_notes": data.get("confidence_notes") or [],
+    }
+

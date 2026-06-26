@@ -542,3 +542,33 @@ class ArchiveDetectFolderSummary(Base):
 
     def __repr__(self):
         return f"<ArchiveDetectFolderSummary(progress={self.progress_id}, version={self.version})>"
+
+
+class ClientProfileGenerationTask(Base):
+    """客户资料结构化生成任务。
+
+    基于 archive_detect_files.ocr_text 直接生成并写入客户结构化档案。
+    source_file_ids/source_files_snapshot 用于追溯本次生成使用了哪些文件。
+    """
+    __tablename__ = "client_profile_generation_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(Integer, ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, comment="客户ID")
+    status = Column(String(20), default="running", nullable=False, comment="running|done|error")
+    source_file_ids = Column(JSONB, nullable=True, comment="本次使用的 archive_detect_files.id 数组")
+    source_files_snapshot = Column(JSONB, nullable=True, comment="本次使用文件的摘要快照")
+    source_file_count = Column(Integer, default=0, nullable=False, comment="本次使用文件数")
+    extracted_summary = Column(JSONB, nullable=True, comment="AI 抽取汇总结果")
+    created_count = Column(JSONB, nullable=True, comment="写入数量统计")
+    error = Column(Text, nullable=True, comment="错误信息")
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+    __table_args__ = (
+        Index("ix_client_profile_generation_client", "client_id"),
+        Index("ix_client_profile_generation_status", "status"),
+        Index("ix_client_profile_generation_created", "created_at"),
+    )
+
+    def __repr__(self):
+        return f"<ClientProfileGenerationTask(id={self.id}, client_id={self.client_id}, status='{self.status}')>"

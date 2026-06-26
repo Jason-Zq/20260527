@@ -10,9 +10,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **文件留底检测 / 业务审核**：快速检测上传/URL 文件，或由业务方传入客户+项目+进展+文件列表；后端 OCR/文本抽取 + LLM 按公司留底分类体系判定，持久化单文件结果、OCR 脱敏文本、批次总体报告，支持同 `(progress_id, file_id)` 的历史结果复用。
 2. **AI 材料解析**：上传 PDF/图片 → OCR + LLM 提取结构化字段 → 人工复核 → 归档到客户档案。
-3. **Word 模板填写**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
-4. **PDF 拆分**：上传多证件合并 PDF → 全页 OCR + LLM 判断页边界 → 按证件类型拆为独立 PDF。
-5. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
+3. **客户档案结构化生成**：从文件留底检测完成的 OCR 文件中，批量抽取客户/家庭成员/资产事实，自动写入客户档案结构化表；策略：**只补空字段，不覆盖已有非空人工数据**，避免误改。
+4. **Word 模板填写**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
+5. **PDF 拆分**：上传多证件合并 PDF → 全页 OCR + LLM 判断页边界 → 按证件类型拆为独立 PDF。
+6. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
 
 ## 常用命令
 
@@ -72,26 +73,27 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_sca
 
 ```text
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
-  frontend/src/router.js                 路由: /, /parse, /template, /split, /summary, /archive-detect
+  frontend/src/router.js                 路由: /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /child-age-leads
   frontend/src/api.js                    axios API 封装
-  frontend/src/components/*.vue          各业务页面
+  frontend/src/components/*.vue          各业务页面（新增 ArchiveAdminPage.vue, ChildAgeLeadsPage.vue）
 
 后端: FastAPI + SQLAlchemy 2 async + Alembic
   backend/main.py                        FastAPI 入口 + 路由聚合
-  backend/llm_service.py                 LLM 调用封装与各业务 prompt
+  backend/llm_service.py                 LLM 调用封装与各业务 prompt（含客户档案抽取prompt）
   backend/ocr_service.py                 PDF/图片 OCR 通用入口
   backend/text_extractor.py              PDF/图片/docx 统一文本抽取（文件留底检测复用）
   backend/file_fetcher.py                httpx 下载 URL/OSS 临时签名地址到临时文件
   backend/archive_detect_service.py      文件留底检测编排（批次、增量复用、总体报告）
+  backend/client_profile_service.py      客户档案结构化生成编排（后台任务，只补空不覆盖）
   backend/template_service.py            Word 模板解析、锚点扫描、渲染
   backend/split_ocr_service.py           PDF 拆分专用全页 OCR（双线程、多 OCR 实例）
   backend/split_service.py               PDF 页范围规整与拆分
-  backend/db/*.py                        ORM、engine、CRUD 模块
+  backend/db/*.py                        ORM、engine、CRUD 模块（新增 client_profile_crud.py）
 
 config.json                              DB + LLM + OCR/文档类型配置
 output/                                  静态挂载为 /uploads/，保存 PNG/PDF/DOCX 等产物
 temp/                                    上传/下载/模板解析临时文件
-migrations/versions/                     Alembic 迁移（当前包含 archive-detect 009/010）
+migrations/versions/                     Alembic 迁移（当前到 011_client_profile_generation）
 ```
 
 ## 数据库重点
@@ -107,6 +109,7 @@ migrations/versions/                     Alembic 迁移（当前包含 archive-d
 - `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`。
 - `archive_detect_progress`：业务审核的进展包实体，`(client_id, progress_oid)` 唯一；存办理人、项目、项目详情、进展名称等。
 - `archive_detect_folder_summaries`：进展包维度滚动总报告（多版本，后续阶段使用）。
+- `client_profile_generation_tasks`：客户档案结构化生成任务；记录源文件、抽取结果、写入统计、状态。
 
 ## 文件留底检测 / 业务审核
 
@@ -134,6 +137,22 @@ migrations/versions/                     Alembic 迁移（当前包含 archive-d
 - 批次总报告：所有文件完成后，规则计算 `overall_verdict/overall_score`，再调用 `llm_service.summarize_batch` 生成 `overall_reason`；失败时用规则文本兜底。
 - 公司售后留底分类体系硬编码在 `llm_service.py` 的 `ARCHIVE_CATEGORIES_FULL/SIMPLE`，业务模式会传 `stage=pre_submit|post_submit` 让 LLM 感知递交前/后分类。
 
+## 客户档案结构化生成
+
+入口路由在 `/api/client-profile/*`，Swagger 已用 `tags=["客户档案生成"]` 分组：
+
+流程：
+1. 用户在前端选择客户，系统从该客户的 `archive_detect_files` 中列出所有 `done` 且有 `ocr_text` 的文件作为候选
+2. 用户勾选候选文件 → 提交生成任务，后台异步处理
+3. 对每个选中文献：`llm_service.extract_client_profile_facts` 抽取客户基本信息、家庭成员、资产等结构化事实
+4. 按 **只补空，不覆盖** 策略写入数据库：已有非空值保持人工修改不变，仅当字段为空时写入 AI 抽取结果
+5. 写入目标：`clients`（客户基本信息）→ `family_members`（家庭成员）→ `assets`（资产）→ `client_info`（Extra 兜底）
+
+关键逻辑：
+- 后台异步任务：`asyncio.create_task(_generate_background)`，前端可轮询任务状态
+- 写入策略保证人工数据主权：AI 只做补充，不覆盖已有内容
+- 任务完成后可在前端查看抽取结果和写入统计
+
 ## 其他流水线要点
 
 ### AI 材料解析
@@ -157,11 +176,36 @@ migrations/versions/                     Alembic 迁移（当前包含 archive-d
 - DB `split_tasks` 是权威状态；内存 `_split_task_status` 只做轮询 fast-path。
 - `/api/split/history` 必须声明在 `/api/split/{task_id}` 之前。
 
+### 审核任务管理后台（只读）
+
+- 路由 `/api/archive-detect/admin/*`，前端 `ArchiveAdminPage.vue`（`/archive-admin`）。
+- 支持按状态/来源/客户/进展/日期范围筛选历史批次，详情弹窗复用 `pollBusinessBatch`（business 批次）或 `pollArchiveDetect`（快速检测批次）兜底。
+
+### 销售线索：子女年龄
+
+- 路由 `/api/sales/child-age-leads`，逻辑在 `backend/db/sales_crud.py`。
+- 从 `family_members` 表中 `relation in ('child','子女','子','女','儿子','女儿','son','daughter',...)` 的记录算年龄；带 `min_age/max_age` 筛选时在 Python 层过滤（避免复杂 SQL），`total` 可能略有偏差是当前的可接受 MVP。
+
+## 临时文件清理（Windows 重要）
+
+`file_fetcher.cleanup_temp_file` 用于在文件留底检测处理完一个 URL 后删除 `temp/fetched/<uuid>_xxx.pdf`。Windows 上 pdfplumber/PaddleOCR 句柄释放有延迟，立即 `os.remove` 会报 `WinError 32 文件被占用`。
+
+实现策略：
+
+1. 立即尝试 → 失败 `time.sleep(0.5)` 重试一次 → 仍失败丢进模块级延迟队列 `_pending_cleanup`。
+2. 启动事件挂 `asyncio.create_task(file_fetcher.periodic_cleanup_task())`：
+   - 启动时扫一次 `temp/fetched/`，删 1 小时前的残留兜底。
+   - 之后每 60 秒处理一次延迟队列，能删则删，删不动重新排队。
+
+这是**业务无影响的收尾清理**，HTTP 仍返回 200。日志里看到「已加入延迟清理队列」是正常的，不需要告警。
+
 ## 已知遗留/注意事项
 
 - `archive_detect/` 独立子项目已迁出到 `E:\qoderproject\archive_detect\`；仓库内如残留空目录不要依赖。
-- 快速检测 tab 的“文件不入库、处理完即删”文案与当前 DB 双写持久化已不完全一致；改文案时要谨慎区分快速检测和业务审核。
+- 快速检测 tab 的"文件不入库、处理完即删"文案与当前 DB 双写持久化已不完全一致；改文案时要谨慎区分快速检测和业务审核。
 - `archive_detect_files.content_sha256` 列已建但当前不写值；增量复用依赖业务方传稳定 `file_id`。
 - `archive_detect_folder_summaries` 表已建，进展包维度滚动总报告是后续阶段，不要误以为当前已写入。
 - `pdf_ocr.py` 单文件 CLI 若存在，不属于 web 流程，改 web 流水线时不需要同步改它。
 - 业务接口不加 API Key 鉴权，当前假定由网络层隔离。
+- **客户档案生成的候选列表不携带 `ocr_text`**：`client_profile_crud.list_source_files_for_client` 只返回元数据，生成阶段 `client_profile_service._generate_background` 再按 `id` 重查 `ocr_text` 喂给 LLM，避免大文本反复传输。
+- **`/api/client-profile/generate/{client_id}` (POST) 与 `/api/client-profile/generate/{task_id}` (GET) 共用同一前缀**：FastAPI 按 method 区分，但任何新增 GET 子路径必须放在 `/generate/list/{client_id}` 这类更具体的路由之前，否则会被 `{task_id}` 抢匹配。

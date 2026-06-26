@@ -2,10 +2,27 @@
   <div class="app-container">
     <!-- 顶部标题栏 -->
     <header class="app-header">
-      <div class="header-left">
+      <div class="header-left" @click="go('/')">
         <div class="header-logo"></div>
         <h1 class="app-title">智能文档审核工作台</h1>
       </div>
+      <nav class="top-nav">
+        <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button>
+        <button class="nav-item" :class="{ active: isActive('/archive-detect') }" @click="go('/archive-detect')">文件留底检测</button>
+        <button class="nav-item" :class="{ active: isActive('/archive-admin') }" @click="go('/archive-admin')">审核任务管理</button>
+        <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button>
+        <el-dropdown trigger="click">
+          <button class="nav-item more">更多工具</button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="go('/parse')">AI 材料解析</el-dropdown-item>
+              <el-dropdown-item @click="go('/template')">AI 填写文件</el-dropdown-item>
+              <el-dropdown-item @click="go('/split')">处理超长 PDF</el-dropdown-item>
+              <el-dropdown-item @click="go('/summary')">URL 文件摘要</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </nav>
     </header>
 
     <!-- 路由出口：每个页面通过 router-view 渲染 -->
@@ -14,7 +31,18 @@
 </template>
 
 <script setup>
-// 路由配置在 src/router.js；App 仅承担布局壳
+import { useRouter, useRoute } from 'vue-router'
+
+const router = useRouter()
+const route = useRoute()
+
+function go(path) {
+  router.push(path)
+}
+
+function isActive(path) {
+  return route.path === path || route.path.startsWith(path + '/')
+}
 </script>
 
 <style>
@@ -70,6 +98,35 @@ html, body {
   display: flex;
   align-items: center;
   gap: 12px;
+  cursor: pointer;
+}
+
+.top-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-item {
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nav-item:hover,
+.nav-item.active {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.nav-item.more {
+  outline: none;
 }
 
 .header-logo {

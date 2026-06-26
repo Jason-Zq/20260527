@@ -62,14 +62,14 @@
             multiple
             :auto-upload="false"
             :limit="MAX_FILES"
-            accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.docx"
+            accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.gif,.docx,.xls,.xlsx,.pptx"
             :on-exceed="onExceedUpload"
             :on-change="onUploadChange"
             drag
           >
             <el-icon class="upload-icon"><UploadFilled /></el-icon>
             <div class="upload-text">点击或拖拽文件到此处</div>
-            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 支持 PDF / 图片 / Word</div>
+            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 支持 PDF / 图片 / Word / Excel / PPT（GIF 仅识别第一帧，.doc 请转 .docx）</div>
           </el-upload>
         </div>
 
@@ -274,7 +274,7 @@
                   :id="`biz-up-${row.id}`"
                   style="display: none"
                   :disabled="busy"
-                  accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.docx"
+                  accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.gif,.docx,.xls,.xlsx,.pptx"
                   @change="bizOnFileSelect($event, i)"
                 />
                 <label :for="`biz-up-${row.id}`" class="biz-upload-btn">
@@ -568,7 +568,7 @@ import {
   recheckArchiveDetectBatch,
 } from '../api.js'
 
-const MAX_FILES = 20
+const MAX_FILES = 50
 
 const userPrompt = ref('')
 const sourceKind = ref('upload')         // 'upload' | 'url'

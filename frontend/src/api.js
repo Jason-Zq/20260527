@@ -348,6 +348,37 @@ export async function recheckArchiveDetectBatch(batchId, criteria, stage = null)
   return r.data
 }
 
+// ==================== 客户档案结构化生成 ====================
+
+export async function listClientProfileSourceFiles(clientId) {
+  const r = await axios.get(`${API_BASE}/client-profile/source-files/${clientId}`)
+  return r.data
+}
+
+export async function generateClientProfile(clientId, sourceFileIds) {
+  const r = await axios.post(`${API_BASE}/client-profile/generate/${clientId}`, {
+    source_file_ids: sourceFileIds,
+  })
+  return r.data
+}
+
+export async function getClientProfileGenerationTask(taskId) {
+  const r = await axios.get(`${API_BASE}/client-profile/generate/${taskId}`)
+  return r.data
+}
+
+export async function listClientProfileGenerationTasks(clientId, limit = 20) {
+  const r = await axios.get(`${API_BASE}/client-profile/generate/list/${clientId}`, { params: { limit } })
+  return r.data
+}
+
+// ==================== 销售线索 ====================
+
+export async function listChildAgeLeads(params = {}) {
+  const r = await axios.get(`${API_BASE}/sales/child-age-leads`, { params })
+  return r.data
+}
+
 // ==================== 文件留底检测后台管理(只读) ====================
 
 export async function listArchiveAdminBatches(params = {}) {

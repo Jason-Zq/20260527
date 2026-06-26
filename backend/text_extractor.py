@@ -4,6 +4,8 @@
 按文件类型分发：
   .pdf            → ocr_service.process_file（自动判断文字型/图片型）
   .docx           → python-docx 抽段落+表格（不走 OCR）
+  .xlsx           → openpyxl 抽 sheet/cell 文本
+  .pptx           → python-pptx 抽 slide 文本
   .png/.jpg/...   → ocr_service.extract_image_file
 
 返回统一格式：
@@ -24,7 +26,11 @@ import ocr_service
 
 
 _DOCX_EXT = ".docx"
+_XLS_EXT = ".xls"
+_XLSX_EXT = ".xlsx"
+_PPTX_EXT = ".pptx"
 _PDF_EXT = ".pdf"
+_GIF_EXT = ".gif"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
 
 
@@ -55,6 +61,105 @@ def _extract_docx(file_path: str) -> dict:
         "text": text,
         "source": "docx_text",
         "page_count": 1,                 # docx 没有"页"概念，记 1
+        "char_count": len(text),
+    }
+
+
+def _extract_xlsx(file_path: str) -> dict:
+    """openpyxl 抽 xlsx 文本：逐 sheet 读取非空 cell。"""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    parts: list[str] = []
+    max_lines = 5000  # 防止超大表格抽取过多无效文本；LLM 层还会二次截断
+
+    sheet_count = len(wb.sheetnames)
+    try:
+        for ws in wb.worksheets:
+            if len(parts) >= max_lines:
+                break
+            parts.append(f"--- Sheet: {ws.title} ---")
+            for row in ws.iter_rows():
+                cells = []
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    value = str(cell.value).strip()
+                    if value:
+                        cells.append(f"{cell.coordinate}: {value}")
+                if cells:
+                    parts.append(" | ".join(cells))
+                if len(parts) >= max_lines:
+                    parts.append("...[表格内容过长，已截断]...")
+                    break
+    finally:
+        wb.close()
+
+    text = "\n".join(parts).strip()
+    return {
+        "text": text,
+        "source": "xlsx_text",
+        "page_count": sheet_count,
+        "char_count": len(text),
+    }
+
+
+def _extract_xls(file_path: str) -> dict:
+    """xlrd 抽旧版 xls 文本：逐 sheet 读取非空 cell。"""
+    import xlrd
+
+    book = xlrd.open_workbook(file_path)
+    parts: list[str] = []
+    max_lines = 5000
+
+    for sheet in book.sheets():
+        if len(parts) >= max_lines:
+            break
+        parts.append(f"--- Sheet: {sheet.name} ---")
+        for r in range(sheet.nrows):
+            cells = []
+            for c in range(sheet.ncols):
+                value = sheet.cell_value(r, c)
+                if value is None:
+                    continue
+                value = str(value).strip()
+                if value:
+                    # xlrd 用 0-based,展示成 R/C 避免复杂列号转换
+                    cells.append(f"R{r + 1}C{c + 1}: {value}")
+            if cells:
+                parts.append(" | ".join(cells))
+            if len(parts) >= max_lines:
+                parts.append("...[表格内容过长，已截断]...")
+                break
+
+    text = "\n".join(parts).strip()
+    return {
+        "text": text,
+        "source": "xls_text",
+        "page_count": book.nsheets,
+        "char_count": len(text),
+    }
+def _extract_pptx(file_path: str) -> dict:
+    """python-pptx 抽 pptx 文本：逐 slide 抽 shape.text。"""
+    from pptx import Presentation
+
+    prs = Presentation(file_path)
+    parts: list[str] = []
+    for idx, slide in enumerate(prs.slides, 1):
+        slide_lines = []
+        for shape in slide.shapes:
+            text = getattr(shape, "text", "")
+            if text and text.strip():
+                slide_lines.append(text.strip())
+        if slide_lines:
+            parts.append(f"--- Slide {idx} ---")
+            parts.extend(slide_lines)
+
+    text = "\n".join(parts).strip()
+    return {
+        "text": text,
+        "source": "pptx_text",
+        "page_count": len(prs.slides),
         "char_count": len(text),
     }
 
@@ -92,6 +197,28 @@ def _extract_image(file_path: str) -> dict:
     }
 
 
+def _extract_gif(file_path: str) -> dict:
+    """GIF 只取第一帧转 PNG 后走 OCR。"""
+    from PIL import Image
+    import tempfile
+
+    base = os.path.splitext(os.path.basename(file_path))[0]
+    tmp_path = os.path.join(tempfile.gettempdir(), f"{base}_gif_first_frame.png")
+    try:
+        with Image.open(file_path) as im:
+            im.seek(0)
+            im.convert("RGB").save(tmp_path, "PNG")
+        result = _extract_image(tmp_path)
+        result["source"] = "gif_first_frame_ocr"
+        return result
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
     """统一文字提取入口（异步，把同步阻塞代码扔到线程池）。
 
@@ -108,9 +235,21 @@ async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
     if ext == _DOCX_EXT:
         return await asyncio.to_thread(_extract_docx, file_path)
 
+    if ext == _XLSX_EXT:
+        return await asyncio.to_thread(_extract_xlsx, file_path)
+
+    if ext == _PPTX_EXT:
+        return await asyncio.to_thread(_extract_pptx, file_path)
+
+    if ext == _XLS_EXT:
+        return await asyncio.to_thread(_extract_xls, file_path)
+
+    if ext == _GIF_EXT:
+        return await asyncio.to_thread(_extract_gif, file_path)
+
     if ext == ".doc":
         # 旧二进制 doc 格式不支持
-        raise ValueError("不支持 .doc 格式，请转换为 .docx 后重试")
+        raise ValueError("暂不支持旧版 Word(.doc)，请转换为 .docx 后上传")
 
     if ext == _PDF_EXT:
         return await asyncio.to_thread(_extract_pdf, file_path)
@@ -118,7 +257,7 @@ async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
     if ext in _IMAGE_EXTS:
         return await asyncio.to_thread(_extract_image, file_path)
 
-    raise ValueError(f"不支持的文件类型: {ext}（支持 .pdf/.docx/{'/'.join(sorted(_IMAGE_EXTS))}）")
+    raise ValueError(f"不支持的文件类型: {ext}（支持 .pdf/.docx/.xls/.xlsx/.pptx/.gif/{'/'.join(sorted(_IMAGE_EXTS))}）")
 
 
 def normalize_text(text: str, max_chars: Optional[int] = None) -> str:

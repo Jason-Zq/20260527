@@ -1,15 +1,19 @@
 <template>
   <div class="client-detail-page">
     <div class="page-header">
-      <el-button class="back-btn" @click="emit('back')" size="default">
+      <el-button class="back-btn" @click="handleBack" size="default">
         <el-icon style="margin-right: 4px"><ArrowLeft /></el-icon>
-        返回客户列表
+        返回
       </el-button>
       <div class="page-title">
         <span class="title-indicator"></span>
         客户档案详情
       </div>
       <div class="header-right" v-if="detail">
+        <el-button size="small" type="warning" :loading="profileGenerating" @click="openProfileGenerateDialog">
+          <el-icon style="margin-right: 4px"><Star /></el-icon>
+          AI 生成客户档案
+        </el-button>
         <el-button size="small" @click="editOpen = true">
           <el-icon style="margin-right: 4px"><Edit /></el-icon>
           编辑主表
@@ -71,6 +75,26 @@
               <span class="alert-date">{{ item.valid_until }} ({{ item.daysLeft }} 天)</span>
             </div>
           </div>
+        </section>
+
+        <!-- AI 档案生成记录 -->
+        <section class="card" v-if="generationTasks.length">
+          <div class="card-title">
+            <span class="indicator"></span>
+            AI 档案生成记录
+          </div>
+          <el-table :data="generationTasks" stripe size="small" empty-text="暂无生成记录">
+            <el-table-column label="时间" width="160" prop="created_at" />
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }"><el-tag size="small" :type="row.status === 'done' ? 'success' : row.status === 'error' ? 'danger' : 'warning'">{{ row.status }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="使用文件数" width="110" prop="source_file_count" />
+            <el-table-column label="写入结果" min-width="220">
+              <template #default="{ row }">
+                <span class="mono">{{ JSON.stringify(row.created_count || {}) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
         </section>
 
         <!-- 分组卡：联系/护照/教育/工作/婚姻 -->
@@ -200,16 +224,49 @@
     </div>
 
     <ClientEditDialog v-model="editOpen" :client="detail" @saved="reload" />
+
+    <el-dialog v-model="profileDialogOpen" title="选择用于生成客户档案的文件" width="760px">
+      <div v-loading="profileFilesLoading">
+        <p class="dialog-hint">默认勾选可用 OCR 文件；可取消不相关文件后再生成。</p>
+        <el-table :data="profileSourceFiles" size="small" max-height="420" @selection-change="profileSelection = $event">
+          <el-table-column type="selection" width="48" :selectable="row => row.selectable" />
+          <el-table-column label="文件名" min-width="190" show-overflow-tooltip prop="filename" />
+          <el-table-column label="分类" width="130" show-overflow-tooltip prop="doc_category" />
+          <el-table-column label="进展" width="120" show-overflow-tooltip prop="progress_name" />
+          <el-table-column label="OCR" width="90" align="center">
+            <template #default="{ row }"><el-tag size="small" :type="row.has_ocr_text ? 'success' : 'info'">{{ row.has_ocr_text ? '有' : '无' }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="字数" width="80" align="center" prop="char_count" />
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="profileDialogOpen = false">取消</el-button>
+        <el-button type="primary" :loading="profileGenerating" :disabled="!profileSelection.length" @click="startProfileGenerate">确认生成</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="profileTaskOpen" title="客户档案生成进度" width="560px" :close-on-click-modal="false">
+      <div v-if="profileTask" class="task-box">
+        <p>任务状态：<el-tag :type="profileTask.status === 'done' ? 'success' : profileTask.status === 'error' ? 'danger' : 'warning'">{{ profileTask.status }}</el-tag></p>
+        <p>使用文件数：{{ profileTask.source_file_count }}</p>
+        <p v-if="profileTask.created_count">写入结果：<span class="mono">{{ JSON.stringify(profileTask.created_count) }}</span></p>
+        <p v-if="profileTask.error" class="error-text">{{ profileTask.error }}</p>
+      </div>
+      <template #footer>
+        <el-button :disabled="profileTask?.status === 'running'" @click="profileTaskOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   ArrowLeft, Loading, Edit, Phone, Postcard, School, OfficeBuilding, Star, EditPen,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getClientDetail, getClientFills } from '../api.js'
+import { getClientDetail, getClientFills, listClientProfileSourceFiles, generateClientProfile, getClientProfileGenerationTask, listClientProfileGenerationTasks } from '../api.js'
 import ClientFamilyTab from './ClientFamilyTab.vue'
 import ClientAssetsTab from './ClientAssetsTab.vue'
 import ClientInfoKvTab from './ClientInfoKvTab.vue'
@@ -219,10 +276,29 @@ const props = defineProps({
   clientId: { type: Number, required: true },
 })
 const emit = defineEmits(['back', 'select-doc'])
+const router = useRouter()
+
+function handleBack() {
+  // 路由直达时回客户列表；嵌入式使用时交给父组件处理
+  if (router.currentRoute.value.path.startsWith('/clients')) {
+    router.push('/clients')
+  } else {
+    emit('back')
+  }
+}
 
 const detail = ref(null)
 const loading = ref(false)
 const editOpen = ref(false)
+const profileDialogOpen = ref(false)
+const profileFilesLoading = ref(false)
+const profileSourceFiles = ref([])
+const profileSelection = ref([])
+const profileGenerating = ref(false)
+const profileTaskOpen = ref(false)
+const profileTask = ref(null)
+const generationTasks = ref([])
+let profileTaskTimer = null
 
 const activeTab = ref('family')
 const fills = ref([])
@@ -252,6 +328,70 @@ const passportExpirySoon = computed(() => {
   return d != null && d >= 0 && d <= 90
 })
 
+async function openProfileGenerateDialog() {
+  profileDialogOpen.value = true
+  profileFilesLoading.value = true
+  profileSelection.value = []
+  try {
+    const resp = await listClientProfileSourceFiles(props.clientId)
+    profileSourceFiles.value = resp.items || []
+  } catch (err) {
+    ElMessage.error('加载候选文件失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    profileFilesLoading.value = false
+  }
+}
+
+async function startProfileGenerate() {
+  const ids = profileSelection.value.map(x => x.id).filter(Boolean)
+  if (!ids.length) {
+    ElMessage.warning('请选择至少一个文件')
+    return
+  }
+  profileGenerating.value = true
+  try {
+    const resp = await generateClientProfile(props.clientId, ids)
+    profileDialogOpen.value = false
+    profileTaskOpen.value = true
+    profileTask.value = resp
+    pollProfileTask(resp.task_id)
+  } catch (err) {
+    ElMessage.error('创建生成任务失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    profileGenerating.value = false
+  }
+}
+
+function pollProfileTask(taskId) {
+  if (profileTaskTimer) clearInterval(profileTaskTimer)
+  profileTaskTimer = setInterval(async () => {
+    try {
+      const data = await getClientProfileGenerationTask(taskId)
+      profileTask.value = data
+      if (data.status !== 'running') {
+        clearInterval(profileTaskTimer)
+        profileTaskTimer = null
+        if (data.status === 'done') {
+          ElMessage.success('客户档案生成完成')
+          await load()
+        }
+      }
+    } catch (err) {
+      clearInterval(profileTaskTimer)
+      profileTaskTimer = null
+      ElMessage.error('查询生成任务失败：' + (err.response?.data?.detail || err.message))
+    }
+  }, 2000)
+}
+
+async function loadGenerationTasks() {
+  try {
+    const resp = await listClientProfileGenerationTasks(props.clientId, 10)
+    generationTasks.value = resp.items || []
+  } catch {
+    generationTasks.value = []
+  }
+}
 function formatAmount(n) {
   return Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 }
@@ -261,6 +401,7 @@ async function load() {
   try {
     detail.value = await getClientDetail(props.clientId)
     loadFills()
+    loadGenerationTasks()
   } catch (err) {
     ElMessage.error('加载失败：' + (err.response?.data?.detail || err.message))
     detail.value = null
@@ -287,6 +428,9 @@ function reload() {
 
 watch(() => props.clientId, load)
 onMounted(load)
+onUnmounted(() => {
+  if (profileTaskTimer) clearInterval(profileTaskTimer)
+})
 </script>
 
 <style scoped>
@@ -295,7 +439,11 @@ onMounted(load)
 .page-title { font-size: 16px; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
 .title-indicator { width: 3px; height: 16px; background: linear-gradient(180deg, #6366f1, #8b5cf6); border-radius: 2px; }
 .indicator-warn { width: 3px; height: 16px; background: linear-gradient(180deg, #f59e0b, #ef4444); border-radius: 2px; }
-.header-right { margin-left: auto; }
+.header-right { margin-left: auto; display: flex; gap: 8px; }
+.dialog-hint { margin: 0 0 10px; color: #64748b; font-size: 13px; }
+.task-box { display: flex; flex-direction: column; gap: 10px; color: #334155; }
+.error-text { color: #dc2626; white-space: pre-wrap; }
+.mono { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 12px; }
 
 .page-content { flex: 1; overflow-y: auto; padding: 20px; }
 .detail-wrap { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }

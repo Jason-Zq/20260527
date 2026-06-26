@@ -1,10 +1,6 @@
 <template>
   <div class="client-list-page">
     <div class="page-header">
-      <el-button class="back-btn" @click="emit('back')" size="default">
-        <el-icon style="margin-right: 4px"><ArrowLeft /></el-icon>
-        返回
-      </el-button>
       <div class="page-title">
         <span class="title-indicator"></span>
         客户档案
@@ -82,7 +78,7 @@
           v-for="c in clients"
           :key="c.id"
           class="client-card"
-          @click="emit('select', c.id)"
+          @click="selectClient(c.id)"
         >
           <div class="client-avatar">{{ (c.name || '?').charAt(0) }}</div>
           <div class="client-info">
@@ -169,11 +165,13 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ArrowLeft, Search, Loading, Plus, Warning, Document, User, Wallet } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { listClients, createClient } from '../api.js'
 
 const emit = defineEmits(['back', 'select'])
+const router = useRouter()
 
 const keyword = ref('')
 const visaTypeFilter = ref('')
@@ -197,6 +195,14 @@ const visaTypeOptions = computed(() => {
   }
   return [...set].sort()
 })
+
+function selectClient(clientId) {
+  if (router.currentRoute.value.path.startsWith('/clients')) {
+    router.push(`/clients/${clientId}`)
+  } else {
+    emit('select', clientId)
+  }
+}
 
 function isExpiringSoon(dateStr) {
   if (!dateStr) return false
