@@ -34,6 +34,39 @@ CONNECT_TIMEOUT_S = 60
 _SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif", ".docx", ".xls", ".xlsx", ".pptx"}
 
 
+# 共享 httpx.AsyncClient,复用 TCP 连接 + DNS 缓存。
+# 每次新建会做 TLS 握手,5 个并发批次 × 50 文件 = 250 次握手,显著拖慢下载。
+_http_client: httpx.AsyncClient | None = None
+_http_client_lock = asyncio.Lock()
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """懒加载共享 AsyncClient。所有下载/刷新 URL 都走这一个 client。"""
+    global _http_client
+    if _http_client is not None:
+        return _http_client
+    async with _http_client_lock:
+        if _http_client is not None:
+            return _http_client
+        _http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(DOWNLOAD_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        return _http_client
+
+
+async def close_http_client() -> None:
+    """FastAPI shutdown 调用,优雅关闭共享 client。"""
+    global _http_client
+    if _http_client is None:
+        return
+    try:
+        await _http_client.aclose()
+    finally:
+        _http_client = None
+
+
 class FileTooLargeError(Exception):
     """文件超过 MAX_DOWNLOAD_BYTES。"""
 
@@ -98,44 +131,42 @@ async def fetch_url_to_temp(url: str) -> Tuple[str, str, str]:
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"仅支持 http/https URL（收到 scheme={parsed.scheme!r}）")
 
-    timeout = httpx.Timeout(DOWNLOAD_TIMEOUT_S, connect=CONNECT_TIMEOUT_S)
+    client = await get_http_client()
+    async with client.stream("GET", url) as resp:
+        resp.raise_for_status()
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
+        # 早期 Content-Length 检查
+        content_length = resp.headers.get("content-length")
+        if content_length and content_length.isdigit():
+            if int(content_length) > MAX_DOWNLOAD_BYTES:
+                raise FileTooLargeError(
+                    f"文件 {int(content_length)/1024/1024:.1f} MB 超过 {MAX_DOWNLOAD_BYTES/1024/1024:.0f} MB 上限"
+                )
 
-            # 早期 Content-Length 检查
-            content_length = resp.headers.get("content-length")
-            if content_length and content_length.isdigit():
-                if int(content_length) > MAX_DOWNLOAD_BYTES:
+        # 推断文件名 + MIME
+        raw_name = _filename_from_response(resp, url)
+        filename = _sanitize_filename(raw_name)
+        mime_type = _guess_mime(filename, resp.headers.get("content-type"))
+
+        # 落盘到 temp/fetched/<uuid>_<filename>
+        unique_id = uuid.uuid4().hex[:8]
+        local_path = os.path.join(_temp_dir(), f"{unique_id}_{filename}")
+
+        written = 0
+        with open(local_path, "wb") as f:
+            async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                written += len(chunk)
+                if written > MAX_DOWNLOAD_BYTES:
+                    # 下载到一半发现超限 → 删除半成品
+                    f.close()
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
                     raise FileTooLargeError(
-                        f"文件 {int(content_length)/1024/1024:.1f} MB 超过 {MAX_DOWNLOAD_BYTES/1024/1024:.0f} MB 上限"
+                        f"下载已超过 {MAX_DOWNLOAD_BYTES/1024/1024:.0f} MB 上限，已中止"
                     )
-
-            # 推断文件名 + MIME
-            raw_name = _filename_from_response(resp, url)
-            filename = _sanitize_filename(raw_name)
-            mime_type = _guess_mime(filename, resp.headers.get("content-type"))
-
-            # 落盘到 temp/fetched/<uuid>_<filename>
-            unique_id = uuid.uuid4().hex[:8]
-            local_path = os.path.join(_temp_dir(), f"{unique_id}_{filename}")
-
-            written = 0
-            with open(local_path, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
-                    written += len(chunk)
-                    if written > MAX_DOWNLOAD_BYTES:
-                        # 下载到一半发现超限 → 删除半成品
-                        f.close()
-                        try:
-                            os.remove(local_path)
-                        except OSError:
-                            pass
-                        raise FileTooLargeError(
-                            f"下载已超过 {MAX_DOWNLOAD_BYTES/1024/1024:.0f} MB 上限，已中止"
-                        )
-                    f.write(chunk)
+                f.write(chunk)
 
     return local_path, filename, mime_type
 
@@ -177,10 +208,11 @@ async def refresh_download_url(file_id: str, type_: str = None) -> tuple[str, di
     timeout_sec = int(cfg.get("timeout_sec") or 20)
     timeout = httpx.Timeout(timeout_sec, connect=min(timeout_sec, 10))
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-        resp = await client.get(base_url, params={"file_id": file_id, "type": type_value})
-        resp.raise_for_status()
-        payload = resp.json()
+    # 复用全局 client(它有自己的较长 timeout),刷新 URL 的请求级别 timeout 用 client.get 的 timeout 覆盖
+    client = await get_http_client()
+    resp = await client.get(base_url, params={"file_id": file_id, "type": type_value}, timeout=timeout)
+    resp.raise_for_status()
+    payload = resp.json()
 
     if payload.get("ret") != 200 or payload.get("code") != 0:
         raise ValueError(f"刷新下载地址失败: {payload.get('msg') or payload}")

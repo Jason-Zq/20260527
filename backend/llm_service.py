@@ -6,8 +6,10 @@ LLM 服务模块
 import os
 import json
 import re
+import threading
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
+import httpx
 from openai import OpenAI
 
 # 配置文件路径
@@ -16,24 +18,59 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "co
 # 全局配置
 CONFIG = {}
 
+# 进程级共享 OpenAI 客户端,避免每次调用都做 TLS 握手 + 新建连接池
+# 由 _get_client() 在 load_config 之后懒初始化
+_client: OpenAI | None = None
+_client_lock = threading.Lock()
+
+# LLM 调用超时(秒):上游卡死时单 worker 不会被永久占住
+LLM_CONNECT_TIMEOUT = 10
+LLM_READ_TIMEOUT = 60
+LLM_WRITE_TIMEOUT = 30
+LLM_POOL_TIMEOUT = 10
+
 
 def load_config():
     """从项目根目录的 config.json 加载配置。"""
-    global CONFIG
+    global CONFIG, _client
     if not os.path.exists(CONFIG_PATH):
         raise FileNotFoundError(f"配置文件不存在: {CONFIG_PATH}")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         CONFIG = json.load(f)
+    # 配置变了,重置客户端,让下次 _get_client 重建
+    with _client_lock:
+        _client = None
+
+
+def _get_client() -> OpenAI:
+    """懒加载共享 OpenAI 客户端。带超时配置,防止上游卡死把 worker 占住。"""
+    global _client
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is not None:
+            return _client
+        llm = CONFIG.get("llm", {})
+        api_key = llm.get("api_key", "")
+        if not api_key:
+            raise ValueError("未配置大模型 API Key")
+        _client = OpenAI(
+            base_url=llm.get("base_url", ""),
+            api_key=api_key,
+            timeout=httpx.Timeout(
+                connect=LLM_CONNECT_TIMEOUT,
+                read=LLM_READ_TIMEOUT,
+                write=LLM_WRITE_TIMEOUT,
+                pool=LLM_POOL_TIMEOUT,
+            ),
+        )
+        return _client
 
 
 def _call_llm(prompt: str, max_retries: int = 3) -> str:
     """调用大模型 API，返回原始响应文本。支持重试机制。"""
     llm = CONFIG.get("llm", {})
-    api_key = llm.get("api_key", "")
-    if not api_key:
-        raise ValueError("未配置大模型 API Key")
-
-    client = OpenAI(base_url=llm.get("base_url", ""), api_key=api_key)
+    client = _get_client()
 
     last_error = None
     for attempt in range(max_retries):

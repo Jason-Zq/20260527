@@ -4,6 +4,12 @@ FastAPI 后端入口
 """
 
 import os
+
+# 进程级 OpenMP/MKL 线程上限,务必在 import paddlepaddle/numpy/opencv 之前设置
+# 默认会拉满所有核心,每线程一份临时 buffer,在小内存机器上反而拖垮内存。
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+
 import json
 import asyncio
 import time
@@ -56,10 +62,62 @@ app.mount("/uploads", StaticFiles(directory=OUTPUT_DIR), name="uploads")
 # 内存中的任务状态缓存（仅用于轮询进度，不再作为持久存储）
 _task_status = {}   # {task_id: {"status": "ocr|llm|done|error", "progress": "", "error": ""}}
 _task_results = {}
+_task_results_ts: dict[str, float] = {}   # 写入/命中时间戳,用于 TTL GC
 
 # PDF 拆分流水线的独立状态字典(与解析流水线隔离)
 # {task_id: {"status": "ocr|llm|splitting|done|error", "progress": "", "error": "", "result": dict|None}}
 _split_task_status = {}
+
+# 终态任务的内存 TTL(达到 done/error 起算),超时由 _inmem_ttl_gc 清理
+# 数据落在 DB,清掉内存条目不影响轮询正确性,仅会让前端少量请求走 DB fallback
+INMEM_TASK_TTL_SECONDS = 6 * 3600
+
+
+def _stamp_result(task_id: str, result_data) -> None:
+    """写入 _task_results 时同步打时间戳,供 _inmem_ttl_gc 用。所有写入位点都应走这里。"""
+    _task_results[task_id] = result_data
+    _task_results_ts[task_id] = time.time()
+
+
+# ==================== 上传工具 ====================
+
+# 单文件上传大小上限,与 file_fetcher.MAX_DOWNLOAD_BYTES 保持一致(50MB)。
+UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_UPLOAD_CHUNK_SIZE = 64 * 1024  # 64KB 流式块
+
+
+async def save_upload_stream(
+    upload_file: UploadFile,
+    dest_path: str,
+    max_bytes: int = UPLOAD_MAX_BYTES,
+) -> int:
+    """把 UploadFile 流式写入 dest_path,边读边写边累加大小,超阈值立即 413。
+
+    传统的 `content = await file.read(); f.write(content)` 把整个文件读进 Python 堆;
+    50 文件 × 50MB 一次性 ≈ 2.5GB,小内存机器直接 OOM。改用 64KB chunk 流式,堆内存常驻仅几十 KB。
+
+    超阈值时:已写入的临时文件会被删除,抛 HTTPException(413)。
+    返回:实际写入字节数。
+    """
+    total = 0
+    with open(dest_path, "wb") as out:
+        while True:
+            chunk = await upload_file.read(_UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                out.close()
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件超过 {max_bytes // (1024 * 1024)} MB 上限",
+                )
+            out.write(chunk)
+    return total
 
 class ReviewPayload(BaseModel):
     """人工复核提交的数据"""
@@ -153,7 +211,22 @@ async def startup():
     asyncio.create_task(archive_detect_service.gc_loop())
     # 启动 temp/fetched/ 临时文件兜底清理(Windows 句柄延迟释放导致的残留)
     asyncio.create_task(file_fetcher.periodic_cleanup_task())
+    # 启动业务审核文件级队列 worker(进程内串行/小并发消化,防止 OCR 内存击穿)
+    await archive_detect_service.start_workers()
     print("配置已加载，数据库已连接，服务启动完成")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """优雅关停:停止 worker,关闭长连接 httpx client。"""
+    try:
+        await archive_detect_service.stop_workers()
+    except Exception as e:
+        print(f"[shutdown] stop_workers 失败(忽略): {e}")
+    try:
+        await file_fetcher.close_http_client()
+    except Exception as e:
+        print(f"[shutdown] close_http_client 失败(忽略): {e}")
 
 def _cleanup_stale_template_temp(max_age_minutes: int = 60) -> None:
     """删除 temp/templates/ 和 output/templates/_parse/ 下早于阈值的临时文件/目录。
@@ -257,14 +330,12 @@ async def upload_file(file: UploadFile = File(...), client_id: Optional[int] = F
             n += 1
         task_id = f"{timestamp}_{stem}_{n}"
 
-    # 保存上传文件到临时位置
+    # 保存上传文件到临时位置（流式写入,避免整块进内存）
     ext = os.path.splitext(file.filename or "")[1] or ".pdf"
     temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "temp")
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, f"{task_id}{ext}")
-    with open(temp_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    await save_upload_stream(file, temp_path)
 
     # 初始化状态（内存）
     _task_status[task_id] = {"status": "ocr", "progress": "0页", "error": ""}
@@ -338,8 +409,8 @@ async def _process_file_background(task_id: str, file_path: str, filename: str, 
             file_path=f"output/{task_id}",
         )
 
-        _task_results[task_id] = result_data
-        _task_status[task_id] = {"status": "done", "progress": "", "error": ""}
+        _stamp_result(task_id, result_data)
+        _task_status[task_id] = {"status": "done", "progress": "", "error": "", "_finished_ts": time.time()}
         print(f"[{task_id}] 处理完成: {len(items)} 张证件")
 
         # A1 优化：批量队列模式带 client_id 上传时，跳过复核直接归档到指定客户
@@ -355,7 +426,7 @@ async def _process_file_background(task_id: str, file_path: str, filename: str, 
 
     except Exception as e:
         print(f"[{task_id}] 处理失败: {e}")
-        _task_status[task_id] = {"status": "error", "progress": "", "error": str(e)}
+        _task_status[task_id] = {"status": "error", "progress": "", "error": str(e), "_finished_ts": time.time()}
         # 更新数据库状态为 error
         await crud.update_document_status(task_id, "error", str(e))
     finally:
@@ -424,7 +495,7 @@ async def get_result(task_id: str):
             # 从数据库加载完整结果
             data = _build_result_from_db(doc)
             data["status"] = "done"
-            _task_results[task_id] = data
+            _stamp_result(task_id, data)
             return data
         if doc:
             return {
@@ -455,7 +526,7 @@ async def get_result(task_id: str):
     if doc and doc.status == "done":
         data = _build_result_from_db(doc)
         data["status"] = "done"
-        _task_results[task_id] = data
+        _stamp_result(task_id, data)
         return data
 
     raise HTTPException(status_code=404, detail=f"任务 {task_id} 结果不存在")
@@ -494,7 +565,7 @@ async def save_review(task_id: str, payload: dict):
             item["stats"] = _calc_stats(item.get("fields", {}))
         result_data["reviewed"] = True
 
-    _task_results[task_id] = result_data
+    _stamp_result(task_id, result_data)
 
     # 同步更新数据库
     if "items" in payload:
@@ -1104,6 +1175,7 @@ async def delete_history(task_id: str):
     # 清理内存缓存
     _task_status.pop(task_id, None)
     _task_results.pop(task_id, None)
+    _task_results_ts.pop(task_id, None)
     return {"message": "已删除", "task_id": task_id}
 
 def _calc_stats(fields: dict) -> dict:
@@ -1156,9 +1228,7 @@ async def parse_template(file: UploadFile = File(...)):
     temp_token = f"{timestamp}_{stem}"
     temp_path = os.path.join(TEMPLATE_TEMP_DIR, f"{temp_token}.docx")
 
-    with open(temp_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    await save_upload_stream(file, temp_path)
 
     # 1) mammoth 转 HTML
     html = await asyncio.to_thread(template_service.convert_docx_to_html, temp_path)
@@ -1731,11 +1801,11 @@ async def _process_split_background(task_id: str, pdf_path: str, t_started: floa
         }
         duration = round(time.time() - t_started, 2)
         await split_crud.update_done(task_id, total_pages, ranges_payload, duration)
-        _split_task_status[task_id] = {"status": "done", "progress": "", "error": "", "result": result}
+        _split_task_status[task_id] = {"status": "done", "progress": "", "error": "", "result": result, "_finished_ts": time.time()}
         print(f"[split:{task_id}] 完成: {len(files)} 份子 PDF, 耗时 {duration}s")
     except Exception as e:
         print(f"[split:{task_id}] 失败: {e}")
-        _split_task_status[task_id] = {"status": "error", "progress": "", "error": str(e), "result": None}
+        _split_task_status[task_id] = {"status": "error", "progress": "", "error": str(e), "result": None, "_finished_ts": time.time()}
         try:
             await split_crud.update_status(task_id, "error", error=str(e))
         except Exception as db_err:
@@ -1769,9 +1839,7 @@ async def split_upload(file: UploadFile = File(...)):
 
     os.makedirs(task_dir, exist_ok=True)
     original_path = os.path.join(task_dir, SPLIT_ORIGINAL_FILENAME)
-    with open(original_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    await save_upload_stream(file, original_path)
 
     await split_crud.create(task_id=task_id, filename=raw_name)
 
@@ -1922,17 +1990,93 @@ async def _split_cleanup_once() -> int:
     return len(cleaned_ids)
 
 
+def _inmem_ttl_gc() -> tuple[int, int, int]:
+    """清理 _task_status / _task_results / _split_task_status 中超过 TTL 的终态条目。
+
+    数据已在 DB,内存清掉只影响轮询 fast-path。无 _finished_ts(或 _task_results_ts)的旧条目
+    lazy 补一个,下一轮 GC 才会被清,保证升级期间不爆毁现有任务。
+    返回 (清理的 _task_status 数, _task_results 数, _split_task_status 数)。
+    """
+    now = time.time()
+    cutoff = now - INMEM_TASK_TTL_SECONDS
+    deleted_status = 0
+    deleted_results = 0
+    deleted_split = 0
+
+    # _task_status: 仅清终态(done/error)
+    stale = []
+    for tid, info in _task_status.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("status") not in ("done", "error"):
+            continue
+        ts = info.get("_finished_ts")
+        if ts is None:
+            info["_finished_ts"] = now
+            continue
+        if ts < cutoff:
+            stale.append(tid)
+    for tid in stale:
+        _task_status.pop(tid, None)
+        deleted_status += 1
+
+    # _split_task_status: 同上
+    stale = []
+    for tid, info in _split_task_status.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("status") not in ("done", "error"):
+            continue
+        ts = info.get("_finished_ts")
+        if ts is None:
+            info["_finished_ts"] = now
+            continue
+        if ts < cutoff:
+            stale.append(tid)
+    for tid in stale:
+        _split_task_status.pop(tid, None)
+        deleted_split += 1
+
+    # _task_results: 用独立 ts 表(可能含从 DB 重 hydrate 的条目,生命周期独立于 _task_status)
+    stale = []
+    for tid in list(_task_results.keys()):
+        ts = _task_results_ts.get(tid)
+        if ts is None:
+            _task_results_ts[tid] = now
+            continue
+        if ts < cutoff:
+            stale.append(tid)
+    for tid in stale:
+        _task_results.pop(tid, None)
+        _task_results_ts.pop(tid, None)
+        deleted_results += 1
+
+    return deleted_status, deleted_results, deleted_split
+
+
 async def _split_cleanup_loop():
     """周期任务:每 SPLIT_CLEANUP_INTERVAL_HOURS 小时跑一次 _split_cleanup_once。
 
     启动后立即跑一次(catch up 任何上次 server 关停期间过期的);之后按周期跑。
+    内存表 TTL GC 频率更高(每小时),数据已在 DB,清掉只是少量 fallback。
     """
+    inmem_gc_every = 3600   # 每小时 GC 一次内存表
+    last_split_cleanup = 0.0
     while True:
+        now = time.time()
         try:
-            await _split_cleanup_once()
+            if now - last_split_cleanup >= SPLIT_CLEANUP_INTERVAL_HOURS * 3600:
+                await _split_cleanup_once()
+                last_split_cleanup = now
         except Exception as e:
             print(f"[split_cleanup] 异常(忽略,下个周期重试): {e}")
-        await asyncio.sleep(SPLIT_CLEANUP_INTERVAL_HOURS * 3600)
+        try:
+            ds, dr, dsp = _inmem_ttl_gc()
+            if ds or dr or dsp:
+                print(f"[inmem_gc] 清理 task_status={ds} task_results={dr} split_task_status={dsp}")
+        except Exception as e:
+            print(f"[inmem_gc] 异常(忽略): {e}")
+        await asyncio.sleep(inmem_gc_every)
 
 
 # ====================== 文件解析（URL → 摘要） ======================
@@ -2134,6 +2278,7 @@ class ArchiveDetectBusinessSubmitResponse(BaseModel):
     total_files: int = Field(..., description="本次提交的文件总数")
     reused_count: int = Field(..., description="复用历史结果的文件数(同 file_id 命中,不走 OCR/LLM)")
     new_count: int = Field(..., description="需重新检测的文件数(走完整 OCR/LLM 流水线)")
+    queue_depth: int = Field(0, description="提交时全局文件队列深度(含本批),可用于估算等待时间")
 
 
 class ArchiveDetectClientInfo(BaseModel):
@@ -2344,9 +2489,7 @@ async def archive_detect_upload(
         safe_name = os.path.basename(f.filename)
         token = datetime.now().strftime("%y%m%d%H%M%S") + f"_{i}_"
         local_path = os.path.join(upload_dir, token + safe_name)
-        content = await f.read()
-        with open(local_path, "wb") as out:
-            out.write(content)
+        await save_upload_stream(f, local_path)
         items.append({
             "local_path": local_path,
             "filename": safe_name,
@@ -2424,6 +2567,33 @@ async def archive_detect_history(
 
 
 # ==================== 后台管理/识别进度监控(只读) ====================
+
+@app.get(
+    "/api/archive-detect/admin/queue-stats",
+    tags=["文件留底检测"],
+    summary="后台管理 - 文件级队列实时统计",
+)
+async def archive_detect_admin_queue_stats():
+    """实时返回业务审核文件级队列的运行指标。
+
+    用于:监控当前积压、worker 数、LLM 信号量余量、可用内存。
+    返回值字段:
+      - queue_depth: 队列中待处理文件数
+      - queue_max:  队列上限(超过此值 submit 会 429)
+      - workers:    后台 worker 数
+      - in_flight_batches: 还在等 worker 处理完的批次数
+      - llm_semaphore_avail: LLM 信号量剩余槽位
+      - free_memory_mb: 系统可用内存 MB(若安装了 psutil)
+    """
+    stats = archive_detect_service.queue_stats()
+    # 可用内存:有 psutil 就上报,没有就略过
+    try:
+        import psutil
+        stats["free_memory_mb"] = int(psutil.virtual_memory().available / (1024 * 1024))
+    except Exception:
+        stats["free_memory_mb"] = None
+    return stats
+
 
 @app.get(
     "/api/archive-detect/admin/batches",
@@ -2540,6 +2710,18 @@ async def archive_detect_business_batch(payload: BusinessBatchPayload):
             progress_payload=payload.progress.model_dump(),
             items=[it.model_dump() for it in payload.items],
         )
+    except archive_detect_service.QueueFullError as e:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "queue_full",
+                "message": str(e),
+                "queue_depth": e.queue_depth,
+                "queue_max": e.queue_max,
+                "retry_after": e.retry_after,
+            },
+            headers={"Retry-After": str(e.retry_after)},
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result
@@ -2599,9 +2781,7 @@ async def archive_detect_business_batch_upload(
         safe_name = os.path.basename(f.filename)
         token = datetime.now().strftime("%y%m%d%H%M%S") + f"_{i}_"
         local_path = os.path.join(upload_dir, token + safe_name)
-        content = await f.read()
-        with open(local_path, "wb") as out:
-            out.write(content)
+        await save_upload_stream(f, local_path)
         saved_paths.append(local_path)
         items_with_path.append({
             "file_id": meta.get("file_id"),
@@ -2616,6 +2796,25 @@ async def archive_detect_business_batch_upload(
             client_payload=client_obj,
             progress_payload=progress_obj,
             items=items_with_path,
+        )
+    except archive_detect_service.QueueFullError as e:
+        # 队列满时清理已落盘文件,避免占用磁盘
+        for p in saved_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "queue_full",
+                "message": str(e),
+                "queue_depth": e.queue_depth,
+                "queue_max": e.queue_max,
+                "retry_after": e.retry_after,
+            },
+            headers={"Retry-After": str(e.retry_after)},
         )
     except ValueError as e:
         # 校验失败时清理已落盘文件

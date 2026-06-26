@@ -1,9 +1,9 @@
 """文件留底检测：编排服务（无数据库版本）。
 
-提交 → in-memory 状态字典 → 异步 fan-out N 个文件并行处理
-- OCR：受 ocr_service 全局单引擎天然串行；额外加 _OCR_LOCK 显式串行
+提交 → in-memory 状态字典 + 文件级队列 → worker 串行/小并发处理
+- OCR：进程内单实例 PaddleOCR + threading.Lock 串行(ocr_service.run_ocr),业务流走文件级队列,worker 数即 OCR 并发上限
 - LLM：asyncio.Semaphore(3) 限流
-- 单文件失败不影响 batch 其他文件（return_exceptions=True）
+- 单文件失败不影响 batch 其他文件
 - 内存中保留 6 小时；超过后台 GC 自动清理（防止内存泄露）
 
 NOTE: 重启后所有任务状态丢失（用户需重新提交）。这是刻意去 DB 的代价；
@@ -31,12 +31,36 @@ MAX_FILES_PER_BATCH = 50
 LLM_CONCURRENCY = 3
 RESULT_TTL_HOURS = 6                         # 内存结果保留 6 小时
 
+# 业务审核文件级队列(单进程内,串行/小并发消化,防止瞬时 fan-out 打爆内存)
+QUEUE_MAX_SIZE = int(os.getenv("ARCHIVE_DETECT_QUEUE_MAX", "200"))   # ≈ 4 个满批次
+QUEUE_WORKERS = max(1, int(os.getenv("ARCHIVE_DETECT_WORKERS", "1")))
+
 # 内存态：{batch_id: {batch_id, status, total_files, done_files, user_prompt,
 #                    source_kind, files: [...], created_ts}}
 _batch_status: dict[str, dict] = {}
 
 _OCR_LOCK = asyncio.Lock()
 _LLM_SEMAPHORE = asyncio.Semaphore(LLM_CONCURRENCY)
+
+# 文件级队列。每项 = (batch_id, idx, plan, criteria, stage)。
+# 队列实例必须延迟到 startup 时才创建,确保绑定到运行中的事件循环。
+_FILE_QUEUE: asyncio.Queue | None = None
+_workers: list[asyncio.Task] = []
+
+# 每个 batch 待处理的 new 文件计数 + done 事件。orchestrator 阻塞在 event 上等所有 new 项被 worker 消化。
+_batch_pending: dict[str, int] = {}
+_batch_done_event: dict[str, asyncio.Event] = {}
+
+
+class QueueFullError(Exception):
+    """提交时队列水位超限,业务方应稍后重试。"""
+    def __init__(self, queue_depth: int, queue_max: int, retry_after: int = 60):
+        super().__init__(
+            f"任务队列已满 (depth={queue_depth}, max={queue_max}),请 {retry_after} 秒后重试"
+        )
+        self.queue_depth = queue_depth
+        self.queue_max = queue_max
+        self.retry_after = retry_after
 
 
 # ==================== 工具 ====================
@@ -455,6 +479,73 @@ async def gc_loop(interval_seconds: int = 1800):
 #   - 总报告生成同 _orchestrate(规则推 verdict/score + LLM 写 reason)
 
 
+# ==================== 进程内文件级队列 / Worker ====================
+
+async def start_workers() -> None:
+    """启动后台 worker 协程。由 FastAPI startup 调用一次。"""
+    global _FILE_QUEUE, _workers
+    if _FILE_QUEUE is not None:
+        return  # 幂等
+    _FILE_QUEUE = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
+    for i in range(QUEUE_WORKERS):
+        t = asyncio.create_task(_queue_worker(i), name=f"archive-detect-worker-{i}")
+        _workers.append(t)
+    print(f"[archive_detect] 启动 {QUEUE_WORKERS} 个 worker, 队列上限={QUEUE_MAX_SIZE}")
+
+
+async def stop_workers() -> None:
+    """关停 worker。由 FastAPI shutdown 调用,优雅退出。"""
+    for t in _workers:
+        t.cancel()
+    for t in _workers:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+    _workers.clear()
+
+
+async def _queue_worker(worker_id: int) -> None:
+    """worker 主循环:阻塞拉取一项,串行执行 _process_one_business,完成后递减 batch 计数。"""
+    assert _FILE_QUEUE is not None
+    while True:
+        try:
+            item = await _FILE_QUEUE.get()
+        except asyncio.CancelledError:
+            return
+        batch_id, idx, plan, criteria, stage = item
+        try:
+            await _process_one_business(batch_id, idx, plan, criteria, stage)
+        except Exception as e:
+            # _process_one_business 内部已经处理大部分异常并写 error 态,这里兜底 print
+            print(f"[archive_detect_worker:{worker_id}] batch={batch_id} idx={idx} 处理异常: {e}")
+        finally:
+            _FILE_QUEUE.task_done()
+            remaining = _batch_pending.get(batch_id)
+            if remaining is None:
+                continue
+            remaining -= 1
+            if remaining <= 0:
+                _batch_pending.pop(batch_id, None)
+                ev = _batch_done_event.pop(batch_id, None)
+                if ev is not None:
+                    ev.set()
+            else:
+                _batch_pending[batch_id] = remaining
+
+
+def queue_stats() -> dict:
+    """admin 监控接口使用。"""
+    depth = _FILE_QUEUE.qsize() if _FILE_QUEUE is not None else 0
+    return {
+        "queue_depth": depth,
+        "queue_max": QUEUE_MAX_SIZE,
+        "workers": QUEUE_WORKERS,
+        "in_flight_batches": len(_batch_pending),
+        "llm_semaphore_avail": _LLM_SEMAPHORE._value,   # 私有属性,只读监控可接受
+    }
+
+
 async def submit_business_batch(
     *,
     criteria: str,
@@ -509,10 +600,12 @@ async def submit_business_batch(
     )
     progress_id = progress["id"]
 
-    # 3) 增量预判:每个 item 查历史 done
+    # 3) 增量预判:一次 SQL 批量查所有 file_id 的最新 done 记录
+    file_ids = [it["file_id"] for it in items]
+    reuse_map = await crud.find_latest_done_files_bulk(progress_id, file_ids)
     items_plan = []
     for it in items:
-        existing = await crud.find_latest_done_file(progress_id, it["file_id"])
+        existing = reuse_map.get(it["file_id"])
         items_plan.append({
             "file_id": it["file_id"],
             "filename": it.get("filename"),
@@ -521,6 +614,14 @@ async def submit_business_batch(
             "reuse_from": existing,
             "version": (existing["version"] if existing else 1),
         })
+
+    # 3.5) 水位线检查:还要进队列的 new 项数 + 当前队列深度若超上限,直接 429,
+    #     避免业务方瞬时打爆。reuse 项不消耗队列容量。
+    new_count = sum(1 for p in items_plan if not p.get("reuse_from"))
+    if new_count > 0 and _FILE_QUEUE is not None:
+        depth = _FILE_QUEUE.qsize()
+        if depth + new_count > QUEUE_MAX_SIZE:
+            raise QueueFullError(queue_depth=depth, queue_max=QUEUE_MAX_SIZE)
 
     # 4) 生成 batch_id + 创建 DB 记录(含 reuse 项直接 done)
     batch_id = gen_batch_id()
@@ -552,19 +653,31 @@ async def submit_business_batch(
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "created_ts": time.time(),
         "files": [
-            _build_business_mem_file(i, plan)
+            _build_business_mem_file(i, plan, counts.get("idx_to_id", {}).get(i))
             for i, plan in enumerate(items_plan)
         ],
     }
 
-    # 6) 启动异步 orchestrator(只处理 new 项)
+    # 6) 把 new 项放进文件级队列;水位检查在前面已经做过,这里 put 不会阻塞超过短瞬。
     new_items_with_idx = [
         (i, plan) for i, plan in enumerate(items_plan)
         if not plan.get("reuse_from")
     ]
-    asyncio.create_task(_orchestrate_business(
-        batch_id, criteria.strip(), progress_id, stage, new_items_with_idx,
-    ))
+    if new_items_with_idx:
+        assert _FILE_QUEUE is not None, "worker 未启动,start_workers() 必须在 startup 钩子里调"
+        _batch_pending[batch_id] = len(new_items_with_idx)
+        _batch_done_event[batch_id] = asyncio.Event()
+        for idx, plan in new_items_with_idx:
+            await _FILE_QUEUE.put((batch_id, idx, plan, criteria.strip(), stage))
+        # 单独起一个 task 等所有 new 项处理完,生成总报告
+        asyncio.create_task(_finalize_business_batch(
+            batch_id, criteria.strip(), progress_id,
+        ))
+    else:
+        # 全是 reuse,无需进队列,直接生成总报告
+        asyncio.create_task(_finalize_business_batch(
+            batch_id, criteria.strip(), progress_id,
+        ))
 
     return {
         "batch_id": batch_id,
@@ -572,12 +685,17 @@ async def submit_business_batch(
         "total_files": len(items_plan),
         "reused_count": counts["reused_count"],
         "new_count": counts["new_count"],
+        "queue_depth": _FILE_QUEUE.qsize() if _FILE_QUEUE is not None else 0,
     }
 
 
-def _build_business_mem_file(idx: int, plan: dict) -> dict:
-    """构造内存态的单 file dict。reuse 项直接含 verdict 等;new 项 pending。"""
+def _build_business_mem_file(idx: int, plan: dict, file_db_id: Optional[int] = None) -> dict:
+    """构造内存态的单 file dict。reuse 项直接含 verdict 等;new 项 pending。
+
+    file_db_id 是 DB 主键,用于前端"详情"按钮跳转;来自 create_business_batch_with_files 的 idx_to_id 映射。
+    """
     base = {
+        "id": file_db_id,
         "idx": idx,
         "file_id": plan["file_id"],
         "filename": plan.get("filename"),
@@ -620,92 +738,87 @@ def _build_business_mem_file(idx: int, plan: dict) -> dict:
     return base
 
 
-async def _orchestrate_business(
+async def _finalize_business_batch(
     batch_id: str,
     criteria: str,
     progress_id: int,
-    stage: str,
-    new_items_with_idx: list,
 ):
-    """业务模式异步编排:只跑 new 项 OCR/LLM,reuse 项已在 submit 阶段 done。
+    """业务模式总报告生成:等所有 new 项被 worker 处理完后,汇总单文件结果写 batch overall。
 
-    stage: pre_submit | post_submit,透传给 LLM 分类阶段感知。
-    new_items_with_idx: [(idx, items_plan_entry), ...] 只含 reuse_from=None 的项。
+    与旧 _orchestrate_business 的差异:不再自己 fan-out _process_one_business,
+    那一步由 _queue_worker 完成。这里只 await 事件 + 算 overall + 写 DB。
+    全 reuse 的批次没有 event(未注册),会立即生成总报告。
     """
-    try:
-        # 若全是 reuse,new_items_with_idx 为空,直接跳到 finally 生成总报告
-        if new_items_with_idx:
-            tasks = [
-                asyncio.create_task(_process_one_business(
-                    batch_id, idx, plan, criteria, stage,
-                ))
-                for idx, plan in new_items_with_idx
-            ]
-            await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        # 生成总报告(复用现有 _orchestrate finally 的逻辑,但取的是 batch 内所有 done 文件)
-        state = _batch_status.get(batch_id)
-        overall_verdict = "mismatch"
-        overall_score = 0
-        overall_reason = ""
-        if state:
-            done_items = [f for f in (state.get("files") or []) if f.get("status") == "done"]
-            error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
+    ev = _batch_done_event.get(batch_id)
+    if ev is not None:
+        try:
+            await ev.wait()
+        except asyncio.CancelledError:
+            pass
 
-            if not done_items:
-                overall_verdict, overall_score = "mismatch", 0
+    # 生成总报告(逻辑同旧版,取 batch 内所有 done 文件)
+    state = _batch_status.get(batch_id)
+    overall_verdict = "mismatch"
+    overall_score = 0
+    overall_reason = ""
+    if state:
+        done_items = [f for f in (state.get("files") or []) if f.get("status") == "done"]
+        error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
+
+        if not done_items:
+            overall_verdict, overall_score = "mismatch", 0
+        else:
+            scores = [int(f.get("match_score") or 0) for f in done_items]
+            avg = round(sum(scores) / len(scores))
+            if avg >= 80:
+                overall_verdict = "match"
+            elif avg >= 50:
+                overall_verdict = "partial"
             else:
-                scores = [int(f.get("match_score") or 0) for f in done_items]
-                avg = round(sum(scores) / len(scores))
-                if avg >= 80:
-                    overall_verdict = "match"
-                elif avg >= 50:
-                    overall_verdict = "partial"
-                else:
-                    overall_verdict = "mismatch"
-                overall_score = avg
-
-            try:
-                files_brief = [
-                    {
-                        "filename": f.get("filename"),
-                        "verdict": f.get("verdict"),
-                        "match_score": f.get("match_score"),
-                        "doc_category": f.get("doc_category"),
-                        "reason": (f.get("reason") or "")[:80],
-                        "key_points": (f.get("key_points") or [])[:3],
-                    }
-                    for f in done_items
-                ]
-                async with _LLM_SEMAPHORE:
-                    overall_reason = await asyncio.to_thread(
-                        llm_service.summarize_batch,
-                        files_brief, criteria, overall_verdict, overall_score,
-                    )
-                overall_reason = redactor.redact(overall_reason or "")
-            except Exception as e:
-                print(f"[archive_detect:{batch_id}] LLM summarize_batch 失败,用规则文本兜底: {e}")
-                cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
-                cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
-                cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
-                overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
-
-            if error_count > 0:
-                overall_reason = (overall_reason or "").rstrip() + f" 另有 {error_count} 个文件处理失败。"
-
-            state["overall_verdict"] = overall_verdict
-            state["overall_score"] = overall_score
-            state["overall_reason"] = overall_reason
-            state["status"] = "done"
+                overall_verdict = "mismatch"
+            overall_score = avg
 
         try:
-            await crud.update_batch_overall(batch_id, overall_verdict, overall_score, overall_reason)
+            files_brief = [
+                {
+                    "filename": f.get("filename"),
+                    "verdict": f.get("verdict"),
+                    "match_score": f.get("match_score"),
+                    "doc_category": f.get("doc_category"),
+                    "reason": (f.get("reason") or "")[:80],
+                    "key_points": (f.get("key_points") or [])[:3],
+                }
+                for f in done_items
+            ]
+            async with _LLM_SEMAPHORE:
+                overall_reason = await asyncio.to_thread(
+                    llm_service.summarize_batch,
+                    files_brief, criteria, overall_verdict, overall_score,
+                )
+            overall_reason = redactor.redact(overall_reason or "")
         except Exception as e:
-            print(f"[archive_detect:{batch_id}] DB update_batch_overall 失败(忽略): {e}")
-        try:
-            await crud.update_batch_status(batch_id, "done")
-        except Exception as e:
-            print(f"[archive_detect:{batch_id}] DB update_batch_status 失败(忽略): {e}")
+            print(f"[archive_detect:{batch_id}] LLM summarize_batch 失败,用规则文本兜底: {e}")
+            cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
+            cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
+            cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
+            overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
+
+        if error_count > 0:
+            overall_reason = (overall_reason or "").rstrip() + f" 另有 {error_count} 个文件处理失败。"
+
+        state["overall_verdict"] = overall_verdict
+        state["overall_score"] = overall_score
+        state["overall_reason"] = overall_reason
+        state["status"] = "done"
+
+    try:
+        await crud.update_batch_overall(batch_id, overall_verdict, overall_score, overall_reason)
+    except Exception as e:
+        print(f"[archive_detect:{batch_id}] DB update_batch_overall 失败(忽略): {e}")
+    try:
+        await crud.update_batch_status(batch_id, "done")
+    except Exception as e:
+        print(f"[archive_detect:{batch_id}] DB update_batch_status 失败(忽略): {e}")
 
 
 async def _process_one_business(
@@ -766,10 +879,10 @@ async def _process_one_business(
                 mb = size / 1024 / 1024
                 raise ValueError(f"文件体积 {mb:.1f}MB 超过 50MB 上限")
 
-        # 2) OCR
+        # 2) OCR(business 走 queue worker,worker 数即 OCR 并发上限;
+        #    引擎内部由 ocr_service._OCR_ENGINE_LOCK threading.Lock 保护,跨线程池安全)
         _set_file_state(batch_id, idx, status="ocr", filename=filename, mime_type=mime_type)
-        async with _OCR_LOCK:
-            extracted = await text_extractor.extract_text(local_path, mime_type)
+        extracted = await text_extractor.extract_text(local_path, mime_type)
 
         text = extracted.get("text") or ""
         page_count = extracted.get("page_count")

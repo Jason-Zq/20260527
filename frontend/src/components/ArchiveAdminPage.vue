@@ -131,8 +131,19 @@
         </div>
 
         <el-table :data="detail?.files || []" stripe empty-text="暂无文件" max-height="420">
-          <el-table-column label="文件" min-width="180" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.filename || row.source_url || '-' }}</template>
+          <el-table-column label="文件" min-width="220">
+            <template #default="{ row }">
+              <div class="file-name" :title="row.filename || row.source_url || ''">
+                {{ row.filename || row.source_url || '-' }}
+              </div>
+              <el-tooltip
+                v-if="row.status === 'error'"
+                :content="row.error_msg || '未记录详细原因'"
+                placement="top"
+              >
+                <div class="file-error-msg">失败原因：{{ row.error_msg || '未记录详细原因' }}</div>
+              </el-tooltip>
+            </template>
           </el-table-column>
           <el-table-column label="状态" width="90" align="center">
             <template #default="{ row }"><el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag></template>
@@ -165,6 +176,10 @@
             <div><b>分类：</b>{{ fileDetail.doc_category || '-' }}</div>
             <div><b>判断：</b>{{ verdictLabel(fileDetail.verdict) }} {{ fileDetail.match_score ?? '' }}</div>
           </div>
+          <template v-if="fileDetail.status === 'error'">
+            <el-divider content-position="left">失败原因</el-divider>
+            <p class="reason-text error-text">{{ fileDetail.error_msg || '未知错误' }}</p>
+          </template>
           <el-divider content-position="left">判断依据</el-divider>
           <p class="reason-text">{{ fileDetail.reason || '-' }}</p>
           <el-divider content-position="left">OCR 文本（已脱敏）</el-divider>
@@ -358,6 +373,9 @@ onMounted(() => {
 .overall-box p { margin: 0; color: #475569; line-height: 1.7; }
 .detail-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px; color: #334155; }
 .reason-text { line-height: 1.7; color: #334155; background: #f8fafc; padding: 10px 12px; border-radius: 8px; }
+.reason-text.error-text { color: #b42318; background: #fef3f2; }
 .ocr-text { max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6; }
+.file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-error-msg { margin-top: 2px; font-size: 12px; color: #b42318; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 1200px) { .filter-grid { grid-template-columns: repeat(3, 1fr); } .summary-row { grid-template-columns: repeat(2, 1fr); } }
 </style>

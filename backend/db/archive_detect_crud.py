@@ -416,6 +416,49 @@ async def find_latest_done_file(progress_id: int, file_id: str) -> Optional[dict
         return d
 
 
+async def find_latest_done_files_bulk(
+    progress_id: int,
+    file_ids: list[str],
+) -> dict[str, dict]:
+    """批量版 find_latest_done_file:一次性查同 progress 下多个 file_id 的最新 done 记录。
+
+    submit 时遍历调单查接口会做 N 次往返,在大 batch + 网络 RTT 高时显著拖慢提交速度。
+    本函数一次 SQL 用 DISTINCT ON 抓每个 file_id 的最新一条,返回 {file_id: dict}(不命中的不在 key 里)。
+    返回字段含 ocr_text(复用旧 OCR 文本时需要)。
+
+    实现:用 PG 的 DISTINCT ON (file_id) ORDER BY file_id, version DESC, created_at DESC。
+    若未来需移植到其它库,可降级为子查询 + window function;当前项目固定 PG,直接用 DISTINCT ON。
+    """
+    if not file_ids:
+        return {}
+    # 去重避免重复 ID 浪费参数
+    unique_ids = list(dict.fromkeys(file_ids))
+    async with async_session_maker() as session:
+        stmt = (
+            select(ArchiveDetectFile)
+            .options(undefer(ArchiveDetectFile.ocr_text))
+            .where(
+                ArchiveDetectFile.progress_id == progress_id,
+                ArchiveDetectFile.file_id.in_(unique_ids),
+                ArchiveDetectFile.status == "done",
+                (ArchiveDetectFile.deleted.is_(False)) | (ArchiveDetectFile.deleted.is_(None)),
+            )
+            .order_by(
+                ArchiveDetectFile.file_id,
+                ArchiveDetectFile.version.desc(),
+                ArchiveDetectFile.created_at.desc(),
+            )
+            .distinct(ArchiveDetectFile.file_id)
+        )
+        res = await session.execute(stmt)
+        out: dict[str, dict] = {}
+        for f in res.scalars().all():
+            d = _file_to_dict(f)
+            d["ocr_text"] = f.ocr_text
+            out[f.file_id] = d
+        return out
+
+
 async def create_business_batch_with_files(
     *,
     batch_id: str,
@@ -432,6 +475,8 @@ async def create_business_batch_with_files(
     now = datetime.now()
     reused_count = 0
     new_count = 0
+    # 收集所有新建 file row,commit 后回填 id 给上层(用于前端跳"详情"链接)
+    file_rows: list[ArchiveDetectFile] = []
 
     async with async_session_maker() as session:
         # 1) 创建 batch
@@ -465,7 +510,7 @@ async def create_business_batch_with_files(
             )
             if reuse:
                 # 复用项:直接 done + 拷贝结果字段
-                session.add(ArchiveDetectFile(
+                row = ArchiveDetectFile(
                     **common,
                     status="done",
                     elapsed_sec=Decimal("0.0"),
@@ -479,21 +524,27 @@ async def create_business_batch_with_files(
                     ocr_text=reuse.get("ocr_text"),
                     page_count=reuse.get("page_count"),
                     char_count=reuse.get("char_count"),
-                ))
+                )
+                session.add(row)
+                file_rows.append(row)
                 reused_count += 1
             else:
-                # 新检项:pending 等待 _orchestrate_business 处理
-                session.add(ArchiveDetectFile(
+                # 新检项:pending 等待 worker 处理
+                row = ArchiveDetectFile(
                     **common,
                     status="pending",
-                ))
+                )
+                session.add(row)
+                file_rows.append(row)
                 new_count += 1
 
         # 3) batch.done_files = reused_count(复用项已 done)
         batch.done_files = reused_count
         await session.commit()
+        # commit 后 row.id 才被 PG 回填;按插入顺序对应 items_plan 的 idx
+        idx_to_id = {i: row.id for i, row in enumerate(file_rows)}
 
-    return {"reused_count": reused_count, "new_count": new_count}
+    return {"reused_count": reused_count, "new_count": new_count, "idx_to_id": idx_to_id}
 
 
 async def get_business_batch(batch_id: str) -> Optional[dict]:

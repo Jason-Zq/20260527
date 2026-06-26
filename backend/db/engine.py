@@ -34,8 +34,10 @@ def _build_dsn(driver: str = "postgresql+asyncpg") -> str:
 async_engine = create_async_engine(
     _build_dsn("postgresql+asyncpg"),
     echo=False,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+    pool_recycle=1800,
 )
 
 # 异步 session 工厂
