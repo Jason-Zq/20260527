@@ -15,6 +15,7 @@ URL 文件下载工具（通用，可被任何接口复用）。
 
 import os
 import re
+import json
 import mimetypes
 import uuid
 from urllib.parse import urlparse, unquote
@@ -134,6 +135,82 @@ async def fetch_url_to_temp(url: str) -> Tuple[str, str, str]:
                     f.write(chunk)
 
     return local_path, filename, mime_type
+
+
+def _load_config() -> dict:
+    """轻量读取根目录 config.json，避免 file_fetcher 反向依赖 llm_service。"""
+    config_path = os.path.normpath(os.path.join(_project_root(), "..", "config.json"))
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as e:
+        print(f"[file_fetcher] 读取 config.json 失败: {e}")
+        return {}
+
+
+def _is_expired_url_error(exc: Exception) -> bool:
+    """仅对明确的签名/地址失效状态码做刷新：401/403/404。"""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (401, 403, 404)
+    return False
+
+
+async def refresh_download_url(file_id: str, type_: str = None) -> tuple[str, dict]:
+    """用业务方 file_id 获取新的 OSS 临时下载地址。
+
+    返回 (file_url, data)。
+    """
+    if not file_id:
+        raise ValueError("刷新下载地址需要 file_id")
+
+    cfg = (_load_config().get("file_url_service") or {})
+    if not cfg.get("enabled", False):
+        raise ValueError("未启用 file_url_service")
+    base_url = (cfg.get("base_url") or "").strip()
+    if not base_url:
+        raise ValueError("file_url_service.base_url 未配置")
+
+    type_value = type_ or cfg.get("default_type") or "preview"
+    timeout_sec = int(cfg.get("timeout_sec") or 20)
+    timeout = httpx.Timeout(timeout_sec, connect=min(timeout_sec, 10))
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        resp = await client.get(base_url, params={"file_id": file_id, "type": type_value})
+        resp.raise_for_status()
+        payload = resp.json()
+
+    if payload.get("ret") != 200 or payload.get("code") != 0:
+        raise ValueError(f"刷新下载地址失败: {payload.get('msg') or payload}")
+    data = payload.get("data") or {}
+    file_url = data.get("file_url")
+    if not file_url:
+        raise ValueError("刷新下载地址响应缺少 data.file_url")
+    return file_url, data
+
+
+async def fetch_url_to_temp_with_refresh(
+    url: str,
+    file_id: str = None,
+    type_: str = None,
+) -> tuple[str, str, str, dict | None]:
+    """先下载原 URL；若 401/403/404 且有 file_id，则刷新 URL 后重试一次。
+
+    返回 (local_path, filename, mime_type, refresh_info)。
+    refresh_info=None 表示未刷新。
+    """
+    try:
+        local_path, filename, mime_type = await fetch_url_to_temp(url)
+        return local_path, filename, mime_type, None
+    except Exception as first_err:
+        if not file_id or not _is_expired_url_error(first_err):
+            raise
+        new_url, data = await refresh_download_url(file_id, type_)
+        local_path, filename, mime_type = await fetch_url_to_temp(new_url)
+        return local_path, filename, mime_type, {
+            "old_url": url,
+            "new_url": new_url,
+            "data": data,
+        }
 
 
 def is_supported_extension(filename: str) -> bool:

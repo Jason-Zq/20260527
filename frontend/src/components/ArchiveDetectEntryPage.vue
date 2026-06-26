@@ -324,6 +324,17 @@
           >
             {{ batch.status === 'done' ? '全部完成' : `进行中 ${batch.done_files}/${batch.total_files}` }}
           </el-tag>
+          <el-button
+            v-if="batch.status === 'done'"
+            size="small"
+            type="warning"
+            plain
+            style="margin-left: auto"
+            :disabled="busy || !userPrompt.trim()"
+            @click="handleRecheckBatch"
+          >
+            重新审核
+          </el-button>
         </div>
 
         <!-- 业务字段回显条(仅业务审核模式) -->
@@ -554,6 +565,7 @@ import {
   submitBusinessBatch,
   submitBusinessBatchUpload,
   pollBusinessBatch,
+  recheckArchiveDetectBatch,
 } from '../api.js'
 
 const MAX_FILES = 20
@@ -748,8 +760,8 @@ async function handleSubmitBiz() {
   if (batch.value && batch.value.status === 'done') {
     try {
       await ElMessageBox.confirm(
-        '当前已有审核结果,重新审核会清空现有结果,是否继续?',
-        '确认重新审核',
+        '当前已有审核结果,继续提交会清空页面上的当前结果并创建新批次,是否继续?',
+        '确认提交新批次',
         { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
       )
     } catch { return }
@@ -831,6 +843,46 @@ async function handleSubmitBiz() {
   } catch (err) {
     const msg = err.response?.data?.detail || err.message || '提交失败'
     ElMessage.error('提交失败:' + msg)
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function handleRecheckBatch() {
+  if (!batch.value || batch.value.status !== 'done') return
+  const criteria = userPrompt.value.trim()
+  if (!criteria) {
+    ElMessage.warning('请填写判定提示词')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '将使用当前判定提示词重新跑 AI 审核。已有 OCR 文本的文件不会重新 OCR；无 OCR 文本但有 URL 的文件会重新 OCR。是否继续？',
+      '确认重新审核',
+      { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  submitting.value = true
+  stopPoll()
+  try {
+    const resp = await recheckArchiveDetectBatch(
+      batch.value.batch_id,
+      criteria,
+      tabKind.value === 'business' ? bizStage.value : null,
+    )
+    ElMessage.success(
+      `已创建重新审核批次:${resp.ai_only_count} 个文件复用 OCR,${resp.ocr_count} 个文件需重新 OCR`,
+    )
+    tabMode.value = resp.mode === 'business' ? 'business' : 'quick'
+    batch.value = null
+    startPoll(resp.batch_id)
+  } catch (err) {
+    const msg = err.response?.data?.detail || err.message || '重新审核失败'
+    ElMessage.error('重新审核失败:' + msg)
   } finally {
     submitting.value = false
   }

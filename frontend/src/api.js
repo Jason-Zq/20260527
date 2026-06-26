@@ -335,6 +335,36 @@ export async function pollBusinessBatch(batchId) {
   return r.data
 }
 
+/**
+ * 重新审核当前批次:复用 OCR 文本重新跑 AI,并生成新的 recheck batch。
+ * @param {string} batchId 原批次 ID
+ * @param {string} criteria 当前最新判定提示词
+ * @param {string|null} stage pre_submit | post_submit | null
+ */
+export async function recheckArchiveDetectBatch(batchId, criteria, stage = null) {
+  const r = await axios.post(`${API_BASE}/archive-detect/recheck/${batchId}`, { criteria, stage }, {
+    timeout: 60000,
+  })
+  return r.data
+}
+
+// ==================== 文件留底检测后台管理(只读) ====================
+
+export async function listArchiveAdminBatches(params = {}) {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/batches`, { params })
+  return r.data
+}
+
+export async function listArchiveAdminProgress(params = {}) {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/progress`, { params })
+  return r.data
+}
+
+export async function getArchiveAdminFileDetail(recordId) {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/file/${recordId}`)
+  return r.data
+}
+
 // ==================== Word 模板 相关接口 (v2: anchor-based) ====================
 
 /**

@@ -2003,7 +2003,7 @@ class ArchiveDetectFileItem(BaseModel):
 
     业务模式有 progress_id/file_id/version/is_reused 等字段;匿名模式这些为 null。
     """
-    id: int = Field(..., description="文件记录数据库 ID")
+    id: Optional[int] = Field(None, description="文件记录数据库 ID;运行中内存态可能为空,DB 回落/完成后有值")
     idx: int = Field(..., description="在 batch 内的顺序号(0-based)")
     progress_id: Optional[int] = Field(None, description="所属进展包 ID(仅业务模式)")
     file_id: Optional[str] = Field(None, description="业务方传入的文件稳定 ID(增量复用 key,仅业务模式)")
@@ -2048,7 +2048,7 @@ class ArchiveDetectBatchResponse(BaseModel):
     new_count: Optional[int] = Field(None, description="本批次新检测的文件数(仅业务模式)")
     files: list[ArchiveDetectFileItem] = Field(default_factory=list, description="文件级检测结果数组,按 idx 排序")
     created_at: str = Field(..., description="批次创建时间(YYYY-MM-DD HH:MM:SS)")
-    updated_at: str = Field(..., description="批次最后更新时间")
+    updated_at: Optional[str] = Field(None, description="批次最后更新时间;运行中内存态可能为空")
 
 
 class ArchiveDetectHistoryItem(BaseModel):
@@ -2076,6 +2076,74 @@ class ArchiveDetectHistoryResponse(BaseModel):
 class ArchiveDetectDeleteResponse(BaseModel):
     """删除批次返回。"""
     deleted: bool = Field(..., description="是否删除成功(true=已删除)")
+
+
+class ArchiveDetectRecheckPayload(BaseModel):
+    """重新审核请求体。"""
+    criteria: str = Field(..., description="重新审核使用的最新判定提示词")
+    stage: Optional[str] = Field(None, description="审核阶段:pre_submit=递交前,post_submit=递交后;快速检测可为空")
+
+
+class ArchiveDetectRecheckResponse(BaseModel):
+    """重新审核提交后返回。"""
+    batch_id: str = Field(..., description="新建的重新审核批次 ID")
+    source_batch_id: str = Field(..., description="原批次 ID")
+    total_files: int = Field(..., description="参与重新审核的文件总数")
+    ai_only_count: int = Field(..., description="已有 OCR 文本、只重新跑 AI 的文件数")
+    ocr_count: int = Field(..., description="缺少 OCR 文本、需要重新下载/OCR 的文件数")
+    mode: str = Field(..., description="原批次模式:business=业务审核,quick=快速检测")
+
+
+class ArchiveDetectAdminBatchItem(BaseModel):
+    """后台管理批次列表项。"""
+    batch_id: str = Field(..., description="批次 ID")
+    source_kind: str = Field(..., description="来源类型:upload/url/batch/recheck")
+    status: str = Field(..., description="批次状态:running/done/error")
+    total_files: int = Field(..., description="文件总数")
+    done_files: int = Field(..., description="已完成文件数")
+    overall_verdict: Optional[str] = Field(None, description="批次总体判断")
+    overall_score: Optional[int] = Field(None, description="批次总体匹配度")
+    overall_reason: Optional[str] = Field(None, description="批次总体说明")
+    created_at: str = Field(..., description="创建时间")
+    updated_at: str = Field(..., description="更新时间")
+    client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息(业务批次才有)")
+    progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息(业务批次才有)")
+
+
+class ArchiveDetectAdminBatchListResponse(BaseModel):
+    """后台管理批次列表返回。"""
+    items: list[ArchiveDetectAdminBatchItem] = Field(..., description="批次列表")
+    total: int = Field(..., description="符合筛选条件的总条数")
+
+
+class ArchiveDetectAdminProgressItem(BaseModel):
+    """后台管理进展包列表项。"""
+    id: int = Field(..., description="进展包数据库 ID")
+    client_id: int = Field(..., description="所属客户 ID")
+    handler: Optional[str] = Field(None, description="办理人")
+    project_name: Optional[str] = Field(None, description="项目名称")
+    project_code: Optional[str] = Field(None, description="项目编码")
+    project_detail_name: Optional[str] = Field(None, description="项目详情名称")
+    project_detail_code: Optional[str] = Field(None, description="项目详情编码")
+    progress_oid: str = Field(..., description="进展 OID")
+    progress_name: Optional[str] = Field(None, description="进展名称")
+    client: ArchiveDetectClientInfo = Field(..., description="客户信息")
+    created_at: str = Field(..., description="创建时间")
+    updated_at: str = Field(..., description="更新时间")
+
+
+class ArchiveDetectAdminProgressListResponse(BaseModel):
+    """后台管理进展包列表返回。"""
+    items: list[ArchiveDetectAdminProgressItem] = Field(..., description="进展包列表")
+    total: int = Field(..., description="符合筛选条件的总条数")
+
+
+class ArchiveDetectAdminFileDetail(ArchiveDetectFileItem):
+    """后台管理单文件详情(含 OCR 文本)。"""
+    batch_id: str = Field(..., description="所属批次 ID")
+    ocr_text: Optional[str] = Field(None, description="OCR 识别文字(已脱敏),仅详情接口返回")
+    client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息")
+    progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息")
 
 
 @app.post(
@@ -2195,6 +2263,90 @@ async def archive_detect_history(
     """历史 batch 列表（不含 files 详情）。"""
     items = await archive_detect_service.list_history(limit=limit)
     return {"items": items, "total": len(items)}
+
+
+# ==================== 后台管理/识别进度监控(只读) ====================
+
+@app.get(
+    "/api/archive-detect/admin/batches",
+    tags=["文件留底检测"],
+    summary="后台管理 - 批次列表",
+    response_model=ArchiveDetectAdminBatchListResponse,
+)
+async def archive_detect_admin_batches(
+    status: Optional[str] = Query(None, description="批次状态筛选:running/done/error"),
+    source_kind: Optional[str] = Query(None, description="来源筛选:upload/url/batch/recheck"),
+    client_code: Optional[str] = Query(None, description="客户编码模糊查询"),
+    client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    progress_oid: Optional[str] = Query(None, description="进展 OID 模糊查询"),
+    progress_name: Optional[str] = Query(None, description="进展名称模糊查询"),
+    date_from: Optional[str] = Query(None, description="创建时间开始日期,格式 YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="创建时间结束日期,格式 YYYY-MM-DD"),
+    limit: int = Query(100, ge=1, le=500, description="返回条数,1-500"),
+    offset: int = Query(0, ge=0, description="分页偏移量"),
+):
+    """后台管理批次列表:用于查看数据库中的批次和运行进度。"""
+    for label, value in (("date_from", date_from), ("date_to", date_to)):
+        if value:
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{label} 日期格式必须是 YYYY-MM-DD")
+    return await archive_detect_crud.admin_list_batches(
+        status=status,
+        source_kind=source_kind,
+        client_code=client_code,
+        client_name=client_name,
+        progress_oid=progress_oid,
+        progress_name=progress_name,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/api/archive-detect/admin/progress",
+    tags=["文件留底检测"],
+    summary="后台管理 - 进展包列表",
+    response_model=ArchiveDetectAdminProgressListResponse,
+)
+async def archive_detect_admin_progress(
+    client_code: Optional[str] = Query(None, description="客户编码模糊查询"),
+    client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    handler: Optional[str] = Query(None, description="办理人模糊查询"),
+    project_name: Optional[str] = Query(None, description="项目名称模糊查询"),
+    progress_oid: Optional[str] = Query(None, description="进展 OID 模糊查询"),
+    limit: int = Query(100, ge=1, le=500, description="返回条数,1-500"),
+    offset: int = Query(0, ge=0, description="分页偏移量"),
+):
+    """后台管理进展包列表。"""
+    return await archive_detect_crud.admin_list_progress(
+        client_code=client_code,
+        client_name=client_name,
+        handler=handler,
+        project_name=project_name,
+        progress_oid=progress_oid,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/api/archive-detect/admin/file/{record_id}",
+    tags=["文件留底检测"],
+    summary="后台管理 - 文件详情(含 OCR 文本)",
+    response_model=ArchiveDetectAdminFileDetail,
+)
+async def archive_detect_admin_file_detail(
+    record_id: int = Path(..., description="文件记录 ID(archive_detect_files.id)"),
+):
+    """后台管理单文件详情:显式返回 ocr_text 大字段。"""
+    data = await archive_detect_crud.admin_get_file_detail(record_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"文件记录 {record_id} 不存在")
+    return data
 
 
 # ==================== 业务接口(阶段三):增量复用 + 业务字段透传 ====================
@@ -2320,6 +2472,22 @@ async def archive_detect_business_batch_upload(
 
 
 @app.get(
+    "/api/archive-detect/business/batch",
+    tags=["文件留底检测"],
+    summary="业务审核 - 查询批次结果(Query 参数)",
+    response_model=ArchiveDetectBatchResponse,
+)
+async def archive_detect_business_batch_get_by_query(
+    batch_id: str = Query(..., description="批次 ID,由业务审核提交接口返回"),
+):
+    """业务接口轮询(Query 版):返回完整结果含 client/progress/files/overall_*。"""
+    data = await archive_detect_service.get_business_batch(batch_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
+    return data
+
+
+@app.get(
     "/api/archive-detect/business/batch/{batch_id}",
     tags=["文件留底检测"],
     summary="业务审核 - 查询批次结果",
@@ -2332,6 +2500,44 @@ async def archive_detect_business_batch_get(
     data = await archive_detect_service.get_business_batch(batch_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"批次 {batch_id} 不存在")
+    return data
+
+
+@app.post(
+    "/api/archive-detect/recheck/{batch_id}",
+    tags=["文件留底检测"],
+    summary="重新审核 - 复用 OCR 文本重新跑 AI",
+    response_model=ArchiveDetectRecheckResponse,
+)
+async def archive_detect_recheck(
+    payload: ArchiveDetectRecheckPayload,
+    batch_id: str = Path(..., description="要重新审核的原批次 ID"),
+):
+    """重新审核当前批次:有 OCR 文本则跳过 OCR 只跑 AI;否则尝试重新下载/OCR。"""
+    try:
+        return await archive_detect_service.submit_recheck_batch(
+            source_batch_id=batch_id,
+            criteria=payload.criteria,
+            stage=payload.stage,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get(
+    "/api/archive-detect/batch",
+    tags=["文件留底检测"],
+    summary="查询批次状态(Query 参数)",
+    response_model=ArchiveDetectBatchResponse,
+)
+async def archive_detect_get_by_query(
+    batch_id: str = Query(..., description="批次 ID,由提交接口返回"),
+):
+    """轮询 batch + 每文件状态(Query 版)。优先内存态,缺失时从 DB 读。"""
+    data = await archive_detect_service.get_batch(batch_id)
+    if not data:
+        raise HTTPException(status_code=404,
+                            detail=f"批次 {batch_id} 不存在（服务可能已重启，请重新提交）")
     return data
 
 

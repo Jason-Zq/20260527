@@ -17,6 +17,7 @@ const routes = [
   { path: '/split', component: () => import('./components/SplitEntryPage.vue') },
   { path: '/summary', component: () => import('./components/SummaryEntryPage.vue') },
   { path: '/archive-detect', component: () => import('./components/ArchiveDetectEntryPage.vue') },
+  { path: '/archive-admin', component: () => import('./components/ArchiveAdminPage.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

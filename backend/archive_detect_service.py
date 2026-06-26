@@ -736,13 +736,18 @@ async def _process_one_business(
             if not source_url.strip():
                 raise ValueError("文件地址为空")
             try:
-                local_path, fname, mtype = await file_fetcher.fetch_url_to_temp(source_url)
+                local_path, fname, mtype, refresh_info = await file_fetcher.fetch_url_to_temp_with_refresh(
+                    source_url,
+                    file_id=plan.get("file_id"),
+                )
+                if refresh_info:
+                    print(f"[archive_detect:{batch_id}:{idx}] URL 已过期,已用 file_id={plan.get('file_id')} 刷新下载地址")
                 filename = fname or filename
                 mime_type = mtype
             except file_fetcher.FileTooLargeError:
                 raise ValueError("文件超过 50MB 上限,无法处理")
             except ValueError as e:
-                raise ValueError(f"文件地址无效:{e}")
+                raise ValueError(f"文件地址无效或刷新失败:{e}")
             except Exception as e:
                 msg = _humanize_fetch_error(e)
                 raise ValueError(f"无法下载文件:{msg}")
@@ -849,3 +854,301 @@ async def get_business_batch(batch_id: str) -> Optional[dict]:
     if mem:
         return mem
     return await crud.get_business_batch(batch_id)
+
+
+# ==================== 重新审核:复用 OCR 文本重新跑 AI ====================
+
+async def submit_recheck_batch(
+    *,
+    source_batch_id: str,
+    criteria: str,
+    stage: Optional[str] = None,
+) -> dict:
+    """基于当前 batch 创建 recheck batch,优先复用 ocr_text,重新跑 AI 和总报告。"""
+    if not criteria or not criteria.strip():
+        raise ValueError("重新审核的 criteria 不能为空")
+    if stage not in (None, "pre_submit", "post_submit"):
+        raise ValueError(f"非法 stage: {stage}")
+
+    source = await crud.get_batch_files_for_recheck(source_batch_id)
+    if not source:
+        raise ValueError(f"原批次 {source_batch_id} 不存在")
+    files = source.get("files") or []
+    if not files:
+        raise ValueError(f"原批次 {source_batch_id} 没有文件")
+
+    new_batch_id = gen_batch_id()
+    items_plan = []
+    ai_only_count = 0
+    ocr_count = 0
+    for i, f in enumerate(files):
+        needs_ocr = not bool(f.get("ocr_text"))
+        if needs_ocr:
+            ocr_count += 1
+        else:
+            ai_only_count += 1
+        items_plan.append({
+            "source_file_id": f.get("id"),
+            "idx": i,
+            "file_id": f.get("file_id"),
+            "filename": f.get("filename"),
+            "source_url": f.get("source_url"),
+            "ocr_text": f.get("ocr_text"),
+            "needs_ocr": needs_ocr,
+            "progress_id": f.get("progress_id"),
+            "version": f.get("version") or 1,
+            "mime_type": f.get("mime_type"),
+        })
+
+    await crud.create_recheck_batch_with_files(
+        source_batch=source,
+        new_batch_id=new_batch_id,
+        criteria=criteria.strip(),
+        items_plan=items_plan,
+    )
+
+    # 内存态:文件都先 pending,由 _process_one_recheck 逐个置 done/error
+    _batch_status[new_batch_id] = {
+        "batch_id": new_batch_id,
+        "source_batch_id": source_batch_id,
+        "user_prompt": criteria.strip(),
+        "criteria": criteria.strip(),
+        "stage": stage,
+        "source_kind": "recheck",
+        "total_files": len(items_plan),
+        "done_files": 0,
+        "status": "running",
+        "error": None,
+        "overall_verdict": None,
+        "overall_score": None,
+        "overall_reason": None,
+        "client": source.get("client"),
+        "progress": source.get("progress"),
+        "reused_count": 0,
+        "new_count": len(items_plan),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "created_ts": time.time(),
+        "files": [
+            {
+                "idx": p["idx"],
+                "file_id": p.get("file_id"),
+                "filename": p.get("filename"),
+                "source_url": p.get("source_url"),
+                "version": p.get("version") or 1,
+                "page_count": None,
+                "char_count": None,
+                "elapsed_sec": None,
+                "error_msg": None,
+                "mime_type": p.get("mime_type"),
+                "status": "pending",
+                "verdict": None,
+                "match_score": None,
+                "is_archival": None,
+                "confidence": None,
+                "reason": None,
+                "key_points": [],
+                "doc_category": None,
+                "is_reused": False,
+            }
+            for p in items_plan
+        ],
+    }
+
+    asyncio.create_task(_orchestrate_recheck(new_batch_id, criteria.strip(), stage, items_plan))
+
+    mode = "business" if source.get("progress") or source.get("client") else "quick"
+    return {
+        "batch_id": new_batch_id,
+        "source_batch_id": source_batch_id,
+        "total_files": len(items_plan),
+        "ai_only_count": ai_only_count,
+        "ocr_count": ocr_count,
+        "mode": mode,
+    }
+
+
+async def _orchestrate_recheck(batch_id: str, criteria: str, stage: Optional[str], items_plan: list[dict]):
+    try:
+        tasks = [
+            asyncio.create_task(_process_one_recheck(batch_id, p["idx"], p, criteria, stage))
+            for p in items_plan
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await _finalize_overall_for_batch(batch_id, criteria)
+
+
+async def _process_one_recheck(
+    batch_id: str,
+    idx: int,
+    item: dict,
+    criteria: str,
+    stage: Optional[str],
+):
+    """重新审核单文件:有 ocr_text 则 AI-only;否则尝试用 source_url 重新 OCR。"""
+    t0 = time.time()
+    fetched_temp_path = None
+    filename = item.get("filename") or ""
+    mime_type = item.get("mime_type")
+    page_count = char_count = None
+
+    try:
+        text = item.get("ocr_text") or ""
+        if text:
+            _set_file_state(batch_id, idx, status="llm")
+        else:
+            source_url = item.get("source_url")
+            if not source_url:
+                raise ValueError("缺少 OCR 文本且无可重新下载的 source_url")
+            _set_file_state(batch_id, idx, status="fetching")
+            try:
+                local_path, fname, mtype, refresh_info = await file_fetcher.fetch_url_to_temp_with_refresh(
+                    source_url,
+                    file_id=plan.get("file_id"),
+                )
+                if refresh_info:
+                    print(f"[archive_detect:{batch_id}:{idx}] URL 已过期,已用 file_id={plan.get('file_id')} 刷新下载地址")
+                filename = fname or filename
+                mime_type = mtype
+            except file_fetcher.FileTooLargeError:
+                raise ValueError("文件超过 50MB 上限,无法处理")
+            except ValueError as e:
+                raise ValueError(f"文件地址无效或刷新失败:{e}")
+            except Exception as e:
+                msg = _humanize_fetch_error(e)
+                raise ValueError(f"无法下载文件:{msg}")
+            fetched_temp_path = local_path
+            if not file_fetcher.is_supported_extension(filename):
+                raise ValueError(f"不支持的文件类型:{filename}")
+
+            _set_file_state(batch_id, idx, status="ocr", filename=filename, mime_type=mime_type)
+            async with _OCR_LOCK:
+                extracted = await text_extractor.extract_text(local_path, mime_type)
+            text = extracted.get("text") or ""
+            page_count = extracted.get("page_count")
+            char_count = extracted.get("char_count")
+            if not text.strip():
+                raise ValueError("OCR/抽取后无文字")
+            text = _redact_text(text)
+            _set_file_state(batch_id, idx, status="llm", page_count=page_count, char_count=char_count)
+
+        async with _LLM_SEMAPHORE:
+            verdict = await asyncio.to_thread(llm_service.detect_archival, text, criteria, stage)
+        verdict = redactor.redact_dict(verdict)
+
+        elapsed = round(time.time() - t0, 2)
+        _set_file_state(
+            batch_id, idx,
+            status="done",
+            filename=filename,
+            mime_type=mime_type,
+            page_count=page_count,
+            char_count=char_count,
+            elapsed_sec=elapsed,
+            is_reused=False,
+            **verdict,
+        )
+        try:
+            await crud.update_file_done(batch_id, idx, {
+                "filename": filename,
+                "mime_type": mime_type,
+                "page_count": page_count,
+                "char_count": char_count,
+                "is_archival": verdict.get("is_archival"),
+                "confidence": verdict.get("confidence"),
+                "verdict": verdict.get("verdict"),
+                "match_score": verdict.get("match_score"),
+                "reason": verdict.get("reason"),
+                "key_points": verdict.get("key_points"),
+                "doc_category": verdict.get("doc_category"),
+                "ocr_text": text,
+                "elapsed_sec": elapsed,
+            })
+        except Exception as e:
+            print(f"[archive_detect:{batch_id}:{idx}] DB recheck update_file_done 失败(忽略): {e}")
+
+    except Exception as e:
+        elapsed = round(time.time() - t0, 2)
+        msg = str(e) or e.__class__.__name__
+        _set_file_state(batch_id, idx, status="error", error_msg=msg, elapsed_sec=elapsed,
+                        filename=filename or None)
+        try:
+            await crud.update_file_error(batch_id, idx, msg, elapsed, filename or None)
+        except Exception as e2:
+            print(f"[archive_detect:{batch_id}:{idx}] DB recheck update_file_error 失败(忽略): {e2}")
+    finally:
+        try:
+            new_done = await crud.bump_done_count(batch_id)
+            state = _batch_status.get(batch_id)
+            if state:
+                state["done_files"] = new_done
+        except Exception as e:
+            state = _batch_status.get(batch_id)
+            if state:
+                state["done_files"] = (state.get("done_files") or 0) + 1
+            print(f"[archive_detect:{batch_id}] DB recheck bump_done_count 失败(回退内存): {e}")
+        if fetched_temp_path:
+            file_fetcher.cleanup_temp_file(fetched_temp_path)
+
+
+async def _finalize_overall_for_batch(batch_id: str, criteria: str) -> None:
+    """为内存态 batch 生成 overall_* 并写 DB。
+
+    recheck 使用;后续可抽给匿名/business 共用。
+    """
+    state = _batch_status.get(batch_id)
+    overall_verdict = "mismatch"
+    overall_score = 0
+    overall_reason = ""
+    if state:
+        done_items = [f for f in (state.get("files") or []) if f.get("status") == "done"]
+        error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
+        if done_items:
+            scores = [int(f.get("match_score") or 0) for f in done_items]
+            avg = round(sum(scores) / len(scores))
+            if avg >= 80:
+                overall_verdict = "match"
+            elif avg >= 50:
+                overall_verdict = "partial"
+            else:
+                overall_verdict = "mismatch"
+            overall_score = avg
+        try:
+            files_brief = [
+                {
+                    "filename": f.get("filename"),
+                    "verdict": f.get("verdict"),
+                    "match_score": f.get("match_score"),
+                    "doc_category": f.get("doc_category"),
+                    "reason": (f.get("reason") or "")[:80],
+                    "key_points": (f.get("key_points") or [])[:3],
+                }
+                for f in done_items
+            ]
+            async with _LLM_SEMAPHORE:
+                overall_reason = await asyncio.to_thread(
+                    llm_service.summarize_batch,
+                    files_brief, criteria, overall_verdict, overall_score,
+                )
+            overall_reason = redactor.redact(overall_reason or "")
+        except Exception as e:
+            print(f"[archive_detect:{batch_id}] LLM recheck summarize_batch 失败,用规则文本兜底: {e}")
+            cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
+            cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
+            cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
+            overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
+        if error_count > 0:
+            overall_reason = (overall_reason or "").rstrip() + f" 另有 {error_count} 个文件处理失败。"
+        state["overall_verdict"] = overall_verdict
+        state["overall_score"] = overall_score
+        state["overall_reason"] = overall_reason
+        state["status"] = "done"
+
+    try:
+        await crud.update_batch_overall(batch_id, overall_verdict, overall_score, overall_reason)
+    except Exception as e:
+        print(f"[archive_detect:{batch_id}] DB recheck update_batch_overall 失败(忽略): {e}")
+    try:
+        await crud.update_batch_status(batch_id, "done")
+    except Exception as e:
+        print(f"[archive_detect:{batch_id}] DB recheck update_batch_status 失败(忽略): {e}")

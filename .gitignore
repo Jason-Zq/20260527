@@ -104,3 +104,5 @@ plans/
 
 # 部署打包产物（zip 文件）
 release/
+
+*.zip

@@ -81,6 +81,15 @@
               </div>
               <el-icon class="tool-arrow"><ArrowRight /></el-icon>
             </article>
+
+            <article class="tool-card" @click="go('/archive-admin')" tabindex="0" @keydown.enter="go('/archive-admin')">
+              <div class="tool-icon icon-admin"><el-icon :size="22"><Reading /></el-icon></div>
+              <div class="tool-body">
+                <h4 class="tool-title">审核任务管理</h4>
+                <p class="tool-desc">查看批次、进度、文件结果与 OCR 文本</p>
+              </div>
+              <el-icon class="tool-arrow"><ArrowRight /></el-icon>
+            </article>
           </div>
         </transition>
       </div>
@@ -417,6 +426,9 @@ function go(path) {
 }
 .tool-icon.icon-split {
   background: linear-gradient(135deg, #10b981, #06b6d4);
+}
+.tool-icon.icon-admin {
+  background: linear-gradient(135deg, #f97316, #f59e0b);
 }
 
 .tool-body {

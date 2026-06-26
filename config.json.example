@@ -12,6 +12,12 @@
     "model": "your_model_id_here",
     "temperature": 0.1
   },
+  "file_url_service": {
+    "enabled": true,
+    "base_url": "https://restful.huanqiuyimin.com/Cloud/getFileDownloadUrl",
+    "default_type": "preview",
+    "timeout_sec": 20
+  },
   "max_ocr_pages": 5,
   "document_types": [
     "身份证", "护照", "户口本", "结婚证", "出生证明",

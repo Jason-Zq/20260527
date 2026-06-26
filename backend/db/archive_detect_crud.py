@@ -3,10 +3,10 @@
 设计上与 split_crud.py 类似：分阶段更新（pending→fetching→ocr→llm→done/error），
 每次写都更新 updated_at 便于排查"卡住"的任务。
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Iterable
-from sqlalchemy import select, update as sa_update, delete as sa_delete
+from sqlalchemy import select, update as sa_update, delete as sa_delete, func
 from sqlalchemy.orm import selectinload, defer, undefer
 
 from db.engine import async_session_maker
@@ -555,3 +555,230 @@ async def get_business_batch(batch_id: str) -> Optional[dict]:
         out["new_count"] = len(files) - reused
 
         return out
+
+
+async def get_batch_files_for_recheck(batch_id: str) -> Optional[dict]:
+    """返回原 batch + files(含 ocr_text) + progress/client(若有),供重新审核使用。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(ArchiveDetectBatch)
+            .options(
+                selectinload(ArchiveDetectBatch.files).options(
+                    undefer(ArchiveDetectFile.ocr_text)
+                ),
+                selectinload(ArchiveDetectBatch.progress),
+            )
+            .where(ArchiveDetectBatch.batch_id == batch_id)
+        )
+        res = await session.execute(stmt)
+        b = res.scalar_one_or_none()
+        if not b:
+            return None
+
+        out = _batch_to_dict(b, include_files=False)
+        out["progress_id"] = b.progress_id
+        out["progress"] = _progress_to_dict(b.progress) if b.progress else None
+        out["client"] = None
+        if b.progress:
+            cres = await session.execute(select(Client).where(Client.id == b.progress.client_id))
+            c = cres.scalar_one_or_none()
+            out["client"] = _client_to_brief_dict(c) if c else None
+
+        files = []
+        for f in b.files or []:
+            d = _file_to_dict(f)
+            d["ocr_text"] = f.ocr_text
+            files.append(d)
+        out["files"] = files
+        return out
+
+
+async def create_recheck_batch_with_files(
+    *,
+    source_batch: dict,
+    new_batch_id: str,
+    criteria: str,
+    items_plan: list[dict],
+) -> dict:
+    """创建 recheck batch + N 个 pending file。
+
+    recheck 的 source_kind='recheck'。progress_id 沿用原 batch(如果有)。
+    所有 file 初始 pending,由 _process_one_recheck 决定 AI-only 或重新 OCR。
+    """
+    now = datetime.now()
+    progress_id = source_batch.get("progress_id")
+    async with async_session_maker() as session:
+        batch = ArchiveDetectBatch(
+            batch_id=new_batch_id,
+            user_prompt=criteria,
+            source_kind="recheck",
+            total_files=len(items_plan),
+            done_files=0,
+            status="running",
+            progress_id=progress_id,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(batch)
+        for i, spec in enumerate(items_plan):
+            session.add(ArchiveDetectFile(
+                batch_id=new_batch_id,
+                idx=i,
+                progress_id=progress_id,
+                file_id=spec.get("file_id"),
+                version=spec.get("version") or 1,
+                source_url=spec.get("source_url"),
+                filename=spec.get("filename"),
+                mime_type=spec.get("mime_type"),
+                status="pending",
+                deleted=False,
+                created_at=now,
+                updated_at=now,
+            ))
+        await session.commit()
+    return {"total_files": len(items_plan)}
+
+
+# ==================== 后台管理/监控只读查询 ====================
+
+async def admin_list_batches(
+    *,
+    status: Optional[str] = None,
+    source_kind: Optional[str] = None,
+    client_code: Optional[str] = None,
+    client_name: Optional[str] = None,
+    progress_oid: Optional[str] = None,
+    progress_name: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """后台批次列表:join progress/client,支持基础筛选。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(ArchiveDetectBatch, ArchiveDetectProgress, Client)
+            .outerjoin(ArchiveDetectProgress, ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id)
+            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
+        )
+        count_stmt = (
+            select(func.count())
+            .select_from(ArchiveDetectBatch)
+            .outerjoin(ArchiveDetectProgress, ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id)
+            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
+        )
+
+        conditions = []
+        if status:
+            conditions.append(ArchiveDetectBatch.status == status)
+        if source_kind:
+            conditions.append(ArchiveDetectBatch.source_kind == source_kind)
+        if client_code:
+            conditions.append(Client.client_code.ilike(f"%{client_code}%"))
+        if client_name:
+            conditions.append(Client.name.ilike(f"%{client_name}%"))
+        if progress_oid:
+            conditions.append(ArchiveDetectProgress.progress_oid.ilike(f"%{progress_oid}%"))
+        if progress_name:
+            conditions.append(ArchiveDetectProgress.progress_name.ilike(f"%{progress_name}%"))
+        if date_from:
+            start = datetime.strptime(date_from, "%Y-%m-%d")
+            conditions.append(ArchiveDetectBatch.created_at >= start)
+        if date_to:
+            end = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+            conditions.append(ArchiveDetectBatch.created_at < end)
+        for cond in conditions:
+            stmt = stmt.where(cond)
+            count_stmt = count_stmt.where(cond)
+
+        stmt = stmt.order_by(ArchiveDetectBatch.created_at.desc()).limit(limit).offset(offset)
+        rows = (await session.execute(stmt)).all()
+        total = (await session.execute(count_stmt)).scalar() or 0
+
+        items = []
+        for b, p, c in rows:
+            items.append({
+                "batch_id": b.batch_id,
+                "source_kind": b.source_kind,
+                "status": b.status,
+                "total_files": b.total_files,
+                "done_files": b.done_files,
+                "overall_verdict": b.overall_verdict,
+                "overall_score": b.overall_score,
+                "overall_reason": b.overall_reason,
+                "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else "",
+                "updated_at": b.updated_at.strftime("%Y-%m-%d %H:%M:%S") if b.updated_at else "",
+                "client": _client_to_brief_dict(c) if c else None,
+                "progress": _progress_to_dict(p) if p else None,
+            })
+        return {"items": items, "total": total}
+
+
+async def admin_list_progress(
+    *,
+    client_code: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
+    project_name: Optional[str] = None,
+    progress_oid: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """后台进展包列表:join client,返回进展基本信息。"""
+    async with async_session_maker() as session:
+        stmt = select(ArchiveDetectProgress, Client).join(Client, ArchiveDetectProgress.client_id == Client.id)
+        count_stmt = select(func.count()).select_from(ArchiveDetectProgress).join(Client, ArchiveDetectProgress.client_id == Client.id)
+        conditions = []
+        if client_code:
+            conditions.append(Client.client_code.ilike(f"%{client_code}%"))
+        if client_name:
+            conditions.append(Client.name.ilike(f"%{client_name}%"))
+        if handler:
+            conditions.append(ArchiveDetectProgress.handler.ilike(f"%{handler}%"))
+        if project_name:
+            conditions.append(ArchiveDetectProgress.project_name.ilike(f"%{project_name}%"))
+        if progress_oid:
+            conditions.append(ArchiveDetectProgress.progress_oid.ilike(f"%{progress_oid}%"))
+        for cond in conditions:
+            stmt = stmt.where(cond)
+            count_stmt = count_stmt.where(cond)
+        stmt = stmt.order_by(ArchiveDetectProgress.updated_at.desc()).limit(limit).offset(offset)
+        rows = (await session.execute(stmt)).all()
+        total = (await session.execute(count_stmt)).scalar() or 0
+        items = []
+        for p, c in rows:
+            item = _progress_to_dict(p)
+            item["client"] = _client_to_brief_dict(c)
+            item["created_at"] = p.created_at.strftime("%Y-%m-%d %H:%M:%S") if p.created_at else ""
+            item["updated_at"] = p.updated_at.strftime("%Y-%m-%d %H:%M:%S") if p.updated_at else ""
+            items.append(item)
+        return {"items": items, "total": total}
+
+
+async def admin_get_file_detail(record_id: int) -> Optional[dict]:
+    """后台单文件详情:含 ocr_text + batch/progress/client 简要信息。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(ArchiveDetectFile)
+            .options(undefer(ArchiveDetectFile.ocr_text))
+            .where(ArchiveDetectFile.id == record_id)
+        )
+        f = (await session.execute(stmt)).scalar_one_or_none()
+        if not f:
+            return None
+        d = _file_to_dict(f)
+        d["ocr_text"] = f.ocr_text
+        d["batch_id"] = f.batch_id
+
+        if f.progress_id:
+            p = (await session.execute(
+                select(ArchiveDetectProgress).where(ArchiveDetectProgress.id == f.progress_id)
+            )).scalar_one_or_none()
+            d["progress"] = _progress_to_dict(p) if p else None
+            if p:
+                c = (await session.execute(select(Client).where(Client.id == p.client_id))).scalar_one_or_none()
+                d["client"] = _client_to_brief_dict(c) if c else None
+        else:
+            d["progress"] = None
+            d["client"] = None
+        return d
