@@ -20,7 +20,22 @@ def _load_db_config() -> dict:
 
 
 def _build_dsn(driver: str = "postgresql+asyncpg") -> str:
-    """根据配置构建数据库连接字符串。"""
+    """根据配置构建数据库连接字符串。
+
+    优先级:
+      1. 环境变量 DATABASE_URL(整段 DSN,12-factor 友好,适合 systemd/Docker)
+      2. config.json 的 database 段
+    """
+    env_url = os.getenv("DATABASE_URL", "").strip()
+    if env_url:
+        # 若给的是 postgresql://... 通用 DSN,按 driver 重写前缀
+        if env_url.startswith("postgresql://"):
+            return driver + "://" + env_url[len("postgresql://"):]
+        if env_url.startswith("postgresql+asyncpg://") or env_url.startswith("postgresql+psycopg2://"):
+            # 已经指定 driver,按需替换
+            prefix_end = env_url.find("://")
+            return driver + env_url[prefix_end:]
+        return env_url   # 用户写了其它 scheme,原样透传
     db = _load_db_config()
     host = db.get("host", "localhost")
     port = db.get("port", 5432)

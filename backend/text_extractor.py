@@ -23,6 +23,13 @@ import asyncio
 from typing import Optional
 
 import ocr_service
+import llm_service
+import event_service
+
+
+# 大文件 early-exit 阈值:扫描版 PDF 总页数 > 此值才启动 LLM 初判 + 采样
+# 小文件全文 OCR 也就几十秒,LLM 初判反而不划算
+OCR_EARLY_EXIT_THRESHOLD = int(os.getenv("OCR_EARLY_EXIT_THRESHOLD", "10"))
 
 
 _DOCX_EXT = ".docx"
@@ -164,37 +171,183 @@ def _extract_pptx(file_path: str) -> dict:
     }
 
 
-def _extract_pdf(file_path: str) -> dict:
-    """复用 ocr_service.process_file，自动选择文字型/图片型路径。"""
-    # task_id 仅用于图片型 PDF 落盘 OCR 渲染图。摘要场景不需要这些图，
-    # 取一个临时 ID，后续随 temp/ 清理一起带走（图片实际不在 temp/ 而在 output/，但摘要场景我们不存图）。
-    # 简化：传一个 fetched_<basename> 作为 task_id，避免污染主 task 命名空间。
-    base = os.path.splitext(os.path.basename(file_path))[0]
-    task_id = f"fetched_{base}"
+def _cleanup_ocr_dir(task_id: str) -> None:
+    """删除 OCR 渲染中间产物 output/{task_id}/。
+    业务审核/摘要场景下,PNG 只是 OCR 中间产物,文字抽完即可丢弃。
+    失败不抛(磁盘清理是 best-effort)。
+    """
+    try:
+        import shutil
+        d = os.path.join(ocr_service.OUTPUT_DIR, task_id)
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception as e:
+        print(f"[text_extractor] 清理 {task_id} 失败(忽略): {e}")
 
-    pdf_type = ocr_service.detect_pdf_type(file_path)
-    pages = ocr_service.process_file(file_path, task_id, max_ocr_pages=0)
-    text = "\n\n".join(p.get("text", "") for p in pages).strip()
-    return {
-        "text": text,
-        "source": "pdf_text" if pdf_type == "text" else "pdf_ocr",
-        "page_count": len(pages),
-        "char_count": len(text),
-    }
+
+def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int) -> str:
+    """只 OCR 指定页(0-based 索引)。用于大文件 early-exit 时抓末页盖章/合计。
+
+    内联实现,不污染 ocr_service 接口。
+    复用 ocr_service.run_ocr 引擎锁,跨线程池安全。
+    """
+    import pypdfium2
+    img_dir = os.path.join(ocr_service.OUTPUT_DIR, task_id, "images")
+    os.makedirs(img_dir, exist_ok=True)
+
+    pdf = pypdfium2.PdfDocument(file_path)
+    try:
+        page = pdf[page_index_0based]
+        bitmap = page.render(scale=ocr_service.OCR_RENDER_SCALE)
+        pil_image = bitmap.to_pil()
+        pil_image, _ = ocr_service._downscale_if_too_large(pil_image)
+        img_filename = f"page_{page_index_0based + 1}.png"
+        img_path = os.path.join(img_dir, img_filename)
+        pil_image.save(img_path, "PNG")
+    finally:
+        pdf.close()
+
+    # OCR 这一张图
+    ocr_result = ocr_service.run_ocr(img_path, cls=True)
+    lines = []
+    if ocr_result and ocr_result[0]:
+        for line in ocr_result[0]:
+            text = line[1][0]
+            conf = float(line[1][1])
+            if conf > 0.3:
+                lines.append(text)
+    return "\n".join(lines)
+
+
+def _extract_pdf(file_path: str) -> dict:
+    """PDF 文字提取,带大文件 early-exit 优化。
+
+    流程:
+    1. 文字型 PDF(有文字层) → pdfplumber 全文(秒级)
+    2. 扫描版 ≤ OCR_EARLY_EXIT_THRESHOLD 页 → 走原 OCR 全文
+    3. 扫描版 > 阈值页 → 先 OCR 前 2 页 → LLM 初判
+        - 是大表类(流水/社保/证券): 再 OCR 末页 = 3 页采样返回
+        - 否则: OCR 第 3 页起的剩余页 = 全文返回
+        - LLM 抽风: 也走采样(激进保速度)
+    """
+    import uuid
+    base = os.path.splitext(os.path.basename(file_path))[0]
+    task_id = f"fetched_{base}_{uuid.uuid4().hex[:8]}"
+
+    try:
+        # === 1. 文字型 PDF ===
+        pdf_type = ocr_service.detect_pdf_type(file_path)
+        if pdf_type == "text":
+            pages = ocr_service.extract_text_pdf(file_path)
+            text = "\n\n".join(p.get("text", "") for p in pages).strip()
+            return {
+                "text": text,
+                "source": "pdf_text",
+                "page_count": len(pages),
+                "char_count": len(text),
+            }
+
+        # === 2. 拿总页数 ===
+        import pypdfium2
+        pdf = pypdfium2.PdfDocument(file_path)
+        try:
+            total_pages = len(pdf)
+        finally:
+            pdf.close()
+
+        # === 3. 小文件直接全 OCR ===
+        if total_pages <= OCR_EARLY_EXIT_THRESHOLD:
+            pages = ocr_service.extract_image_pdf(file_path, task_id, max_ocr_pages=0)
+            text = "\n\n".join(p.get("text", "") for p in pages).strip()
+            return {
+                "text": text,
+                "source": "pdf_ocr",
+                "page_count": len(pages),
+                "char_count": len(text),
+            }
+
+        # === 4. 大文件 early-exit:先 OCR 前 2 页 ===
+        head_pages = ocr_service.extract_image_pdf(file_path, task_id, max_ocr_pages=2)
+        head_text = "\n\n".join(p.get("text", "") for p in head_pages[:2]).strip()
+
+        # === 5. LLM 初判 ===
+        verdict = llm_service.detect_large_table_doc(head_text)
+        is_large_table = bool(verdict.get("is_large_table"))
+        doc_type = verdict.get("doc_type") or "unknown"
+        is_fallback = bool(verdict.get("_fallback"))
+
+        # === 6a. 是大表类(或 LLM 抽风) → 加一页末页就返回 ===
+        if is_large_table:
+            try:
+                tail_text = _ocr_single_page(file_path, task_id, total_pages - 1)
+            except Exception as e:
+                print(f"[text_extractor] 末页 OCR 失败,只用前 2 页: {e}")
+                tail_text = ""
+
+            sampled_text = head_text
+            if tail_text:
+                sampled_text += "\n\n--- 中间页未识别 ---\n\n" + tail_text
+            sampled_text += (
+                f"\n\n[已采样 OCR: 共 {total_pages} 页, 实际识别第 1,2,{total_pages} 页. "
+                f"判定为 {doc_type}{'(LLM 降级)' if is_fallback else ''}]"
+            )
+
+            # 记一条事件,事件流可观测采样命中率
+            try:
+                event_service.log_event(
+                    event_service.INFO,
+                    event_service.CATEGORY_FILE_OCR_SAMPLED,
+                    f"文件采样 OCR:共 {total_pages} 页,识别 3 页({doc_type})",
+                    context={
+                        "filename": os.path.basename(file_path),
+                        "total_pages": total_pages,
+                        "sampled_pages": [1, 2, total_pages],
+                        "doc_type": doc_type,
+                        "llm_fallback": is_fallback,
+                        "confidence": verdict.get("confidence", 0),
+                    },
+                )
+            except Exception:
+                pass
+
+            return {
+                "text": sampled_text,
+                "source": "pdf_ocr_sampled",
+                "page_count": total_pages,
+                "char_count": len(sampled_text),
+            }
+
+        # === 6b. 不是大表类 → OCR 全文(继续把剩余页 OCR 完) ===
+        # 直接重新跑一次全 OCR(前 2 页缓存重复跑,代价小,逻辑简单)
+        pages = ocr_service.extract_image_pdf(file_path, task_id, max_ocr_pages=0)
+        text = "\n\n".join(p.get("text", "") for p in pages).strip()
+        return {
+            "text": text,
+            "source": "pdf_ocr",
+            "page_count": len(pages),
+            "char_count": len(text),
+        }
+
+    finally:
+        _cleanup_ocr_dir(task_id)
 
 
 def _extract_image(file_path: str) -> dict:
     """图片走 PaddleOCR。"""
+    import uuid
     base = os.path.splitext(os.path.basename(file_path))[0]
-    task_id = f"fetched_{base}"
-    pages = ocr_service.extract_image_file(file_path, task_id)
-    text = "\n".join(p.get("text", "") for p in pages).strip()
-    return {
-        "text": text,
-        "source": "image_ocr",
-        "page_count": len(pages),
-        "char_count": len(text),
-    }
+    task_id = f"fetched_{base}_{uuid.uuid4().hex[:8]}"
+    try:
+        pages = ocr_service.extract_image_file(file_path, task_id)
+        text = "\n".join(p.get("text", "") for p in pages).strip()
+        return {
+            "text": text,
+            "source": "image_ocr",
+            "page_count": len(pages),
+            "char_count": len(text),
+        }
+    finally:
+        _cleanup_ocr_dir(task_id)
 
 
 def _extract_gif(file_path: str) -> dict:

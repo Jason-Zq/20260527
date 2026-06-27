@@ -14,10 +14,14 @@ alembic>=1.13.0
 psycopg2-binary>=2.9.0
 python-docx>=1.1.0
 docxtpl>=0.16.7
-docx2pdf>=0.1.8
+docx2pdf>=0.1.8; sys_platform == 'win32'
 pywin32>=306; sys_platform == 'win32'
 mammoth>=1.7.0
 beautifulsoup4>=4.12.0
 openpyxl>=3.1.0
 python-pptx>=0.6.23
 xlrd==1.2.0
+# Linux/服务器部署可选:opencv-python-headless 替代 opencv-python,避开 libGL.so 系统依赖
+# 实际由 paddleocr 传递依赖拉入,如部署机装不了 mesa-libGL 取消下面注释强制 headless
+# opencv-python-headless>=4.5
+psutil>=5.9.0

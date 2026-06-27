@@ -23,19 +23,28 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 从 config.json 读取数据库连接
-config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
-with open(config_path, "r", encoding="utf-8") as f:
-    app_config = json.load(f)
-
-db_conf = app_config.get("database", {})
-db_url = "postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}".format(
-    user=db_conf.get("user", "postgres"),
-    password=db_conf.get("password", "postgres"),
-    host=db_conf.get("host", "localhost"),
-    port=db_conf.get("port", 5432),
-    dbname=db_conf.get("dbname", "doc_review"),
-)
+# 数据库连接:优先 DATABASE_URL 环境变量,否则 config.json
+env_url = os.getenv("DATABASE_URL", "").strip()
+if env_url:
+    # alembic 用 psycopg2 同步驱动,把 asyncpg 前缀换掉
+    if env_url.startswith("postgresql+asyncpg://"):
+        db_url = "postgresql+psycopg2://" + env_url[len("postgresql+asyncpg://"):]
+    elif env_url.startswith("postgresql://"):
+        db_url = "postgresql+psycopg2://" + env_url[len("postgresql://"):]
+    else:
+        db_url = env_url
+else:
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+    with open(config_path, "r", encoding="utf-8") as f:
+        app_config = json.load(f)
+    db_conf = app_config.get("database", {})
+    db_url = "postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}".format(
+        user=db_conf.get("user", "postgres"),
+        password=db_conf.get("password", "postgres"),
+        host=db_conf.get("host", "localhost"),
+        port=db_conf.get("port", 5432),
+        dbname=db_conf.get("dbname", "doc_review"),
+    )
 config.set_main_option("sqlalchemy.url", db_url)
 
 # 目标 metadata（用于 autogenerate）

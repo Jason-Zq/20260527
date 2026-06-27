@@ -1,0 +1,59 @@
+[Unit]
+Description=Doc Review API (FastAPI + Uvicorn)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=docreview
+Group=docreview
+WorkingDirectory=/opt/doc-review/backend
+Environment=PATH=/opt/doc-review/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=PYTHONUTF8=1
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+Environment=ARCHIVE_DETECT_WORKERS=2
+Environment=ARCHIVE_DETECT_QUEUE_MAX=200
+# 数据库:取 EnvironmentFile 里的 DATABASE_URL,优先级高于 config.json
+EnvironmentFile=-/opt/doc-review/deploy/linux/app.env
+
+# 注意:--workers 必须固定为 1。
+# 业务审核流程使用进程内 asyncio.Queue + 内存 _batch_status 编排;
+# 多 worker 会产生多个独立队列,同一批次的文件被随机分散,前端轮询和总报告会错乱。
+# 横向扩容必须先把队列搬到 Redis/DB(目前是 YAGNI)。
+ExecStart=/opt/doc-review/.venv/bin/python -m uvicorn main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
+
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# 资源限制(防止 OOM 拖垮整机)
+MemoryMax=4G
+MemoryHigh=3G
+LimitNOFILE=65535
+
+# 沙箱:
+# - NoNewPrivileges 防提权
+# - PrivateTmp 给本进程独立 /tmp(LibreOffice 多次启动不互锁)
+# - ProtectSystem=full 让 /usr/etc 只读
+# - ProtectHome=no:PaddleOCR 要写 ~/.paddlex/(模型缓存),LibreOffice 要写 ~/.config/libreoffice/(profile)
+#   不能用 read-only,会让 OCR 首次初始化报错
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=no
+ReadWritePaths=/opt/doc-review/output /opt/doc-review/temp
+
+# 日志走 journald,自带 rotation + ratelimit,不再写本地文件避免无限增长
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=doc-review
+
+[Install]
+WantedBy=multi-user.target

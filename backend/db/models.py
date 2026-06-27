@@ -9,8 +9,8 @@ client_info 仍保留作为没纳入强 schema 的字段的 KV 兜底。
 
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, Float, Numeric, Boolean, Date,
-    DateTime, ForeignKey, Index
+    Column, Integer, BigInteger, String, Text, Float, Numeric, Boolean, Date,
+    DateTime, ForeignKey, Index, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -572,3 +572,32 @@ class ClientProfileGenerationTask(Base):
 
     def __repr__(self):
         return f"<ClientProfileGenerationTask(id={self.id}, client_id={self.client_id}, status='{self.status}')>"
+
+
+
+class SystemEvent(Base):
+    """业务事件流。区别于 journald 中的运行日志:这里只记有业务含义的节点。
+    用于 /events 后台页面查询(批次失败、OCR 超时、DB 错误、worker 崩溃等)。
+    保留 30 天,由 _split_cleanup_loop 周期 GC。
+    """
+    __tablename__ = "system_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    occurred_at = Column(DateTime, default=datetime.now, nullable=False, comment="事件发生时间")
+    severity = Column(String(10), nullable=False, comment="info | warn | error | critical")
+    category = Column(String(40), nullable=False, comment="事件类别,见 event_service 常量")
+    message = Column(String(500), nullable=False, comment="一句话中文描述(不含堆栈)")
+    context = Column(JSONB, nullable=True, comment="结构化字段 batch_id/file_id/error_class 等")
+
+    __table_args__ = (
+        Index("ix_system_events_occurred", occurred_at.desc()),
+        Index("ix_system_events_severity_occurred", "severity", occurred_at.desc()),
+        Index("ix_system_events_category_occurred", "category", occurred_at.desc()),
+        CheckConstraint(
+            "severity IN ('info','warn','error','critical')",
+            name="system_events_severity_check",
+        ),
+    )
+
+    def __repr__(self):
+        return f"<SystemEvent(id={self.id}, severity={self.severity}, category={self.category})>"

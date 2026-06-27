@@ -35,6 +35,35 @@ cd e:/qoderproject/20260527
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe -m alembic upgrade head
 ```
 
+## 部署（Linux 生产环境）
+
+**永久部署平台：Alibaba Cloud Linux 3 / CentOS 8+ ECS。** Windows 仅作开发环境。
+
+完整方案在 [deploy/linux/](deploy/linux/)，**首次部署看 [deploy/linux/README.md](deploy/linux/README.md)**。日常流程：
+
+```bash
+# 本地：构建前端 + rsync 上传整个项目
+cd e:/qoderproject/20260527
+bash deploy/linux/05-upload.sh root@<服务器IP>
+
+# 服务器：依赖/迁移变了才需要,普通代码改动跳过
+sudo -u docreview bash /opt/doc-review/deploy/linux/02-install-app.sh
+
+# 服务器：重启
+sudo systemctl restart doc-review     # 后端代码改动
+sudo systemctl reload nginx           # 前端 dist 变化
+```
+
+关键约束：
+
+- **uvicorn `--workers=1` 不能改**：业务审核走进程内 `asyncio.Queue` + 内存 `_batch_status`；多 worker 会有多个独立队列，前端轮询和总报告会错乱。横向扩容必须先把队列搬到 Redis（YAGNI）。
+- **OCR worker 数由环境变量 `ARCHIVE_DETECT_WORKERS` 控制**（默认 1），写在 [deploy/linux/doc-review.service](deploy/linux/doc-review.service)。小内存机器保持 1。
+- **数据库连接优先用 `DATABASE_URL` 环境变量**，否则才回退到 `config.json`。生产环境 systemd unit 通过 [deploy/linux/app.env](deploy/linux/app.env)（不入库）注入。
+- **`docx2pdf` 在 Linux 上不可用**：`backend/template_service.py:_convert_docx_to_pdf` 在 Windows 走 docx2pdf（Word COM），Linux 走 LibreOffice `soffice --headless`。两条路径都已落地，本地开发不受影响。
+- **健康检查**：`GET /api/healthz` 真查 DB 和 worker，nginx 反代到 `/healthz` 给外部监控用。`/api/archive-detect/admin/queue-stats` 只看队列。
+- **Windows 专用部署脚本**（PowerShell 打包）已退役挪到 [deploy/windows/](deploy/windows/)，仅作历史保留。
+
+
 测试为简单 `assert` 脚本风格，不依赖 pytest：
 
 ```bash

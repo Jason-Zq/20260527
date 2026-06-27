@@ -39,15 +39,22 @@ import client_profile_service
 import file_fetcher
 import text_extractor
 import archive_detect_service
+import event_service
 from db import archive_detect_crud
 
 app = FastAPI(title="智能文档审核工作台", version="1.0.0")
 
 # 跨域配置
+# CORS 配置:
+# - 默认开发模式 allow_origins=["*"] + credentials=False(浏览器实际会忽略 credentials,符合规范)
+# - 生产同源部署时不需要 CORS,这里保持 *  但 credentials=False 不会有副作用
+# - 如确需 cookie 跨站,设 CORS_ALLOW_ORIGINS=https://app.example.com,https://...
+_cors_origins_env = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+_cors_origins = ["*"] if _cors_origins_env == "*" else [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=(_cors_origins != ["*"]),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,11 +86,22 @@ def _stamp_result(task_id: str, result_data) -> None:
     _task_results_ts[task_id] = time.time()
 
 
+# healthz 中 DB 错误事件的限频时间戳(每 5 分钟最多记一次,避免事件表被探针写爆)
+_last_db_error_event_ts: float = 0.0
+
+
 # ==================== 上传工具 ====================
 
 # 单文件上传大小上限,与 file_fetcher.MAX_DOWNLOAD_BYTES 保持一致(50MB)。
 UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 _UPLOAD_CHUNK_SIZE = 64 * 1024  # 64KB 流式块
+
+# 业务方批量上传的全局并发上限。multipart upload 接收阶段会持有连接 + 写盘,
+# 10 个业务方同时打过来会瞬时 IO 洪水。这里串行化"接收"阶段,
+# 真正的 OCR 处理仍在文件级队列异步消化。
+# 超过此并发数时立即返回 429,业务方应当退避重试。
+UPLOAD_CONCURRENCY = int(os.getenv("UPLOAD_CONCURRENCY", "3"))
+_UPLOAD_SEMAPHORE: asyncio.Semaphore | None = None   # startup 时初始化(必须绑事件循环)
 
 
 async def save_upload_stream(
@@ -213,12 +231,29 @@ async def startup():
     asyncio.create_task(file_fetcher.periodic_cleanup_task())
     # 启动业务审核文件级队列 worker(进程内串行/小并发消化,防止 OCR 内存击穿)
     await archive_detect_service.start_workers()
-    print("配置已加载，数据库已连接，服务启动完成")
+    # 初始化上传并发信号量(必须在 startup 内,绑当前 event loop)
+    global _UPLOAD_SEMAPHORE
+    _UPLOAD_SEMAPHORE = asyncio.Semaphore(UPLOAD_CONCURRENCY)
+    print(f"配置已加载，数据库已连接，服务启动完成(upload 并发上限={UPLOAD_CONCURRENCY})")
+    event_service.log_event(
+        event_service.INFO,
+        event_service.CATEGORY_SERVICE_START,
+        "API 服务启动完成",
+        context={
+            "queue_workers": archive_detect_service.QUEUE_WORKERS,
+            "queue_max": archive_detect_service.QUEUE_MAX_SIZE,
+        },
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown():
     """优雅关停:停止 worker,关闭长连接 httpx client。"""
+    event_service.log_event(
+        event_service.INFO,
+        event_service.CATEGORY_SERVICE_STOP,
+        "API 服务关停",
+    )
     try:
         await archive_detect_service.stop_workers()
     except Exception as e:
@@ -2076,6 +2111,14 @@ async def _split_cleanup_loop():
                 print(f"[inmem_gc] 清理 task_status={ds} task_results={dr} split_task_status={dsp}")
         except Exception as e:
             print(f"[inmem_gc] 异常(忽略): {e}")
+        # 事件流 GC:30 天保留
+        try:
+            from db import event_crud as _event_crud
+            deleted_events = await _event_crud.delete_events_older_than(days=30)
+            if deleted_events:
+                print(f"[event_gc] 清理 {deleted_events} 条 >30 天的事件")
+        except Exception as e:
+            print(f"[event_gc] 异常(忽略): {e}")
         await asyncio.sleep(inmem_gc_every)
 
 
@@ -2569,6 +2612,57 @@ async def archive_detect_history(
 # ==================== 后台管理/识别进度监控(只读) ====================
 
 @app.get(
+    "/api/healthz",
+    tags=["运维"],
+    summary="健康检查 - DB + 队列",
+)
+async def healthz():
+    """探针:DB 可达 + 队列 worker 运行中。供 nginx/k8s/外部监控调用。
+
+    任一组件异常返回 503,nginx 健康检查会摘流。
+    queue_stats 即使 worker 没起来也不抛(it returns 0),所以单独检查 worker 数。
+    """
+    from sqlalchemy import text
+    from db.engine import async_engine
+    problems = []
+
+    # 1) DB ping
+    db_error = None
+    try:
+        async with async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        db_error = f"{e.__class__.__name__}: {e}"
+        problems.append(f"db: {db_error}")
+
+    # 2) Worker 必须至少 1 个在跑
+    stats = archive_detect_service.queue_stats()
+    if stats.get("workers", 0) < 1:
+        problems.append("workers: 0(队列 worker 未启动)")
+
+    # DB 异常时记一条事件,但限频(避免 healthz 高频探针把事件表写爆)
+    # _last_db_error_event_ts 在模块级初始化为 0.0;5 分钟内同一类异常只记一次
+    if db_error is not None:
+        global _last_db_error_event_ts
+        now_ts = time.time()
+        if now_ts - _last_db_error_event_ts > 300:
+            _last_db_error_event_ts = now_ts
+            event_service.log_event(
+                event_service.ERROR,
+                event_service.CATEGORY_DB_ERROR,
+                f"healthz DB ping 失败:{db_error[:200]}",
+                context={"db_error": db_error[:300]},
+            )
+
+    if problems:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "problems": problems, "queue": stats},
+        )
+    return {"status": "ok", "queue": stats}
+
+
+@app.get(
     "/api/archive-detect/admin/queue-stats",
     tags=["文件留底检测"],
     summary="后台管理 - 文件级队列实时统计",
@@ -2593,6 +2687,83 @@ async def archive_detect_admin_queue_stats():
     except Exception:
         stats["free_memory_mb"] = None
     return stats
+
+
+# ==================== 业务事件流 ====================
+
+@app.get(
+    "/api/admin/events",
+    tags=["运维"],
+    summary="事件流查询",
+)
+async def admin_list_events(
+    severity: Optional[str] = Query(None, description="逗号分隔,如 warn,error,critical;不填查全部"),
+    category: Optional[str] = Query(None, description="逗号分隔的 category"),
+    batch_id: Optional[str] = Query(None, description="按 batch_id 查相关事件"),
+    since: Optional[str] = Query(None, description="起始时间 YYYY-MM-DD HH:MM:SS,含此时刻"),
+    until: Optional[str] = Query(None, description="结束时间 YYYY-MM-DD HH:MM:SS,不含此时刻"),
+    limit: int = Query(50, ge=1, le=200, description="单页条数 1-200"),
+    offset: int = Query(0, ge=0),
+):
+    """业务事件流查询。
+    默认返回最近 24h、所有级别;前端通常筛 severity=warn,error,critical 隐藏 info 噪声。
+    """
+    from db import event_crud as _event_crud
+
+    def _parse_csv(s: Optional[str]) -> Optional[list[str]]:
+        if not s:
+            return None
+        out = [x.strip() for x in s.split(",") if x.strip()]
+        return out or None
+
+    def _parse_dt(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        raise HTTPException(status_code=400, detail=f"非法时间格式: {s}")
+
+    items, total = await _event_crud.list_events(
+        severities=_parse_csv(severity),
+        categories=_parse_csv(category),
+        batch_id=batch_id,
+        since=_parse_dt(since),
+        until=_parse_dt(until),
+        limit=limit,
+        offset=offset,
+    )
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/admin/events/categories",
+    tags=["运维"],
+    summary="事件流 - 已出现过的 category 列表",
+)
+async def admin_event_categories():
+    """前端筛选下拉用。包括预定义常量 + 数据库里实际出现过的 category。"""
+    from db import event_crud as _event_crud
+    # 预定义常量(确保前端能看到所有可能值,即使表里还没出现过)
+    predefined = [
+        event_service.CATEGORY_SERVICE_START,
+        event_service.CATEGORY_SERVICE_STOP,
+        event_service.CATEGORY_BATCH_SUBMIT,
+        event_service.CATEGORY_BATCH_QUEUE_FULL,
+        event_service.CATEGORY_BATCH_DONE,
+        event_service.CATEGORY_FILE_FAILED,
+        event_service.CATEGORY_FILE_OCR_SLOW,
+        event_service.CATEGORY_FILE_OCR_SAMPLED,
+        event_service.CATEGORY_LLM_TIMEOUT,
+        event_service.CATEGORY_DB_ERROR,
+        event_service.CATEGORY_WORKER_CRASH,
+        event_service.CATEGORY_MEMORY_LOW,
+    ]
+    db_seen = await _event_crud.distinct_categories()
+    merged = sorted(set(predefined) | set(db_seen))
+    return {"categories": merged}
 
 
 @app.get(
@@ -2753,6 +2924,41 @@ async def archive_detect_business_batch_upload(
     """
     if stage not in ("pre_submit", "post_submit"):
         raise HTTPException(status_code=400, detail=f"非法 stage: {stage}")
+
+    # 上传并发硬上限:非阻塞抢信号量,抢不到立即 429,避免连接堆积
+    if _UPLOAD_SEMAPHORE is None:
+        raise HTTPException(status_code=503, detail="服务尚未就绪")
+    try:
+        # 非阻塞获取:能抢就立即进,抢不到立刻抛出
+        await asyncio.wait_for(_UPLOAD_SEMAPHORE.acquire(), timeout=0.01)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "upload_busy",
+                "message": f"服务繁忙(上传并发上限={UPLOAD_CONCURRENCY}),请 30 秒后重试",
+                "retry_after": 30,
+            },
+            headers={"Retry-After": "30"},
+        )
+
+    try:
+        return await _archive_detect_business_batch_upload_impl(
+            files, criteria, stage, client_payload, progress_payload, items_payload,
+        )
+    finally:
+        _UPLOAD_SEMAPHORE.release()
+
+
+async def _archive_detect_business_batch_upload_impl(
+    files: list[UploadFile],
+    criteria: str,
+    stage: str,
+    client_payload: str,
+    progress_payload: str,
+    items_payload: str,
+):
+    """实际处理逻辑,被上层 semaphore 包裹。拆出来是为了 finally release 干净。"""
     # 解析 JSON 字符串
     try:
         client_obj = json.loads(client_payload)

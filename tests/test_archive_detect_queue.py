@@ -30,6 +30,8 @@ def _new_temp_pdf() -> str:
 # 1) llm_service:在 import archive_detect_service 之前打 stub
 import llm_service
 
+import event_service
+
 llm_service.CONFIG = {"llm": {"api_key": "fake", "base_url": "http://fake", "model": "fake"}}
 llm_service.detect_archival = lambda text, criteria, stage=None: {
     "verdict": "match",
@@ -41,6 +43,9 @@ llm_service.detect_archival = lambda text, criteria, stage=None: {
     "doc_category": "其它",
 }
 llm_service.summarize_batch = lambda files_brief, criteria, verdict, score: f"stub-summary({verdict},{score})"
+
+# stub event_service.log_event 为 no-op:测试环境没 system_events 表,避免 stderr 噪声
+event_service.log_event = lambda *args, **kwargs: None
 
 
 # 2) text_extractor:返回固定文本

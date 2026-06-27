@@ -702,21 +702,51 @@ async def match_anchors_to_client(
 # ---------- PDF 渲染 ----------
 
 def _convert_docx_to_pdf(docx_path: str, pdf_path: str) -> None:
-    """
-    docx2pdf 走 Word COM；FastAPI 异步上下文需要 CoInitialize。
-    本函数应在 asyncio.to_thread 中调用。
-    """
-    import pythoncom
-    from docx2pdf import convert as docx2pdf_convert
+    """docx → pdf 转换。跨平台:
 
-    pythoncom.CoInitialize()
-    try:
-        docx2pdf_convert(docx_path, pdf_path)
-    finally:
+    - Windows + 安装了 Word: 优先用 docx2pdf(Word COM,排版最贴近原文)
+    - Linux 或 Windows 无 Word: fallback 到 soffice headless
+
+    本函数应在 asyncio.to_thread 中调用(COM 必须有自己的线程)。
+    """
+    # Windows 优先走 docx2pdf(若可用),失败再退到 soffice
+    if os.name == "nt":
         try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
+            import pythoncom
+            from docx2pdf import convert as docx2pdf_convert
+        except ImportError:
+            pythoncom = None
+            docx2pdf_convert = None
+
+        if docx2pdf_convert is not None:
+            pythoncom.CoInitialize()
+            try:
+                docx2pdf_convert(docx_path, pdf_path)
+                return
+            except Exception as e:
+                print(f"[template_service] docx2pdf 失败,回退 soffice: {e}")
+            finally:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    # Linux / Windows 无 Word: 走 soffice
+    soffice = _find_soffice()
+    if not soffice:
+        raise RuntimeError(
+            "无法转换 docx → pdf: Windows 上需要安装 Microsoft Word(docx2pdf),"
+            "Linux 上需要安装 LibreOffice(yum install libreoffice)"
+        )
+    # soffice 默认输出到 outdir/<basename>.pdf,需要重命名到目标路径
+    pdf_dir = os.path.dirname(os.path.abspath(pdf_path)) or "."
+    _docx_to_pdf_via_soffice(soffice, docx_path, pdf_path)
+    # _docx_to_pdf_via_soffice 输出文件名 = docx basename .pdf,如果与 pdf_path 不同则 rename
+    expected = os.path.join(pdf_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
+    if expected != os.path.abspath(pdf_path) and os.path.exists(expected):
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+        os.rename(expected, pdf_path)
 
 # ---------- v2 渲染：apply_value 驱动的批量渲染 ----------
 

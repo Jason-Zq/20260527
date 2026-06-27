@@ -102,9 +102,37 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
                 import time
                 wait_time = (attempt + 1) * 2  # 递增等待: 2s, 4s, 6s
                 print(f"  [LLM] 限流，等待 {wait_time}s 后重试 ({attempt + 1}/{max_retries})")
+                # 记录限流事件(避免在 _call_llm 顶部 import 造成循环 import,这里延迟 import)
+                try:
+                    import event_service
+                    event_service.log_event(
+                        event_service.WARN,
+                        event_service.CATEGORY_LLM_TIMEOUT,
+                        f"LLM 限流 429,第 {attempt + 1}/{max_retries} 次重试,等待 {wait_time}s",
+                        context={"attempt": attempt + 1, "max_retries": max_retries, "wait_sec": wait_time},
+                    )
+                except Exception:
+                    pass
                 time.sleep(wait_time)
             else:
                 # 非限流错误或最后一次重试，直接抛出
+                # 末次失败记一条事件,便于追踪
+                if attempt == max_retries - 1:
+                    try:
+                        import event_service
+                        event_service.log_event(
+                            event_service.WARN,
+                            event_service.CATEGORY_LLM_TIMEOUT,
+                            f"LLM 调用失败({max_retries} 次重试用尽):{str(e)[:200]}",
+                            context={
+                                "attempt": attempt + 1,
+                                "max_retries": max_retries,
+                                "error_class": e.__class__.__name__,
+                                "error_msg": str(e)[:300],
+                            },
+                        )
+                    except Exception:
+                        pass
                 raise
 
     raise last_error
@@ -589,6 +617,93 @@ def _build_archive_detect_prompt(
         "文件内容：\n---\n"
         f"{text}\n---\n"
     )
+
+
+def detect_large_table_doc(text: str) -> dict:
+    """判断一份文档是不是"大量表格数据为主"的材料(银行流水/社保/证券流水)。
+
+    入参 text: 文档前 2 页 OCR 文本(几百到几千字)。
+
+    返回:
+      {
+        "is_large_table": bool,
+        "doc_type": "bank_statement" | "social_security" | "securities" | "other",
+        "confidence": int 0-100,
+        "_fallback": bool   # 仅在 LLM 调用失败时为 True
+      }
+
+    设计:
+    - 失败/超时不抛错。按既定策略,LLM 抽风时**也返回 is_large_table=True**,
+      让上游 text_extractor 走采样路径(保速度,牺牲少量精度)。
+    - 走共享 _openai_client + _call_llm 的现有 429 重试机制。
+    """
+    fallback = {
+        "is_large_table": True,
+        "doc_type": "unknown",
+        "confidence": 0,
+        "_fallback": True,
+    }
+    if not text or not text.strip():
+        return fallback
+
+    # 输入限长:前 2 页文字最多取 4000 字符,够 LLM 判断
+    src = text.strip()
+    if len(src) > 4000:
+        src = src[:4000]
+
+    prompt = f"""你是文档分类助手。下面是某文件前 2 页 OCR 文本。
+判断这是不是"以大量表格数据为主"的材料,典型包括:
+  - 银行流水/银行对账单/账户明细
+  - 社保缴纳记录/公积金明细
+  - 证券账户流水/股票交易记录
+
+特征: 首页含账户号/户名/查询期间等头部信息,后续页基本是逐条交易/缴纳记录。
+
+**反例(以下情况一律 is_large_table=false,即使页数很多)**:
+  - 护照(含个人页/签证页/签证戳/出入境章)
+  - 身份证/驾照/居住证等证件扫描合集
+  - 户口本/出生证/结婚证扫描合集
+  - 学历/学位证书、成绩单、获奖证书
+  - 合同/协议/公证文书
+  - 简历/工作证明/在职证明
+  - 房产证、产权证、租赁合同
+  - 任何含多个独立成员资料的文档组(比如全家护照合集、家庭成员身份证集合)
+
+判别要点:大表类的中间页价值低(重复交易明细);
+非大表类的每一页都可能有独立关键信息(每个家庭成员、每张证件)。
+拿不准时一律 false,不要漏识别。
+
+严格输出 JSON(不要 markdown 代码块,不要任何解释):
+{{
+  "is_large_table": true/false,
+  "doc_type": "bank_statement" | "social_security" | "securities" | "other",
+  "confidence": 0-100
+}}
+
+文本:
+---
+{src}
+---"""
+
+    try:
+        raw = _call_llm(prompt, max_retries=2)   # 不重试太多,失败就降级
+        # 容错 JSON 解析
+        raw = raw.strip()
+        if raw.startswith("{") is False:
+            # 找出第一个 { 和最后一个 }
+            lb, rb = raw.find("{"), raw.rfind("}")
+            if lb >= 0 and rb > lb:
+                raw = raw[lb : rb + 1]
+        data = json.loads(raw)
+        return {
+            "is_large_table": bool(data.get("is_large_table", False)),
+            "doc_type": str(data.get("doc_type", "other")),
+            "confidence": int(data.get("confidence", 0)),
+            "_fallback": False,
+        }
+    except Exception as e:
+        print(f"[detect_large_table_doc] LLM 调用/解析失败,降级采样: {e}")
+        return fallback
 
 
 def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None) -> dict:

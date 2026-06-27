@@ -654,3 +654,22 @@ export async function deleteSplitHistory(taskId) {
   const response = await axios.delete(`${API_BASE}/split/history/${encodeURIComponent(taskId)}`)
   return response.data
 }
+
+/**
+ * 业务事件流列表查询。
+ * @param {Object} params - { severity, category, batch_id, since, until, limit, offset }
+ * @returns {Promise<{items: Array, total: number}>}
+ */
+export async function listSystemEvents(params = {}) {
+  const response = await axios.get(`${API_BASE}/admin/events`, { params })
+  return response.data
+}
+
+/**
+ * 事件流 - category 枚举(下拉用)
+ * @returns {Promise<{categories: string[]}>}
+ */
+export async function listEventCategories() {
+  const response = await axios.get(`${API_BASE}/admin/events/categories`)
+  return response.data
+}

@@ -1,8 +1,13 @@
 ﻿# =============================================================================
+# 【已退役 - 2026/06】这个脚本是 Windows 上为 Windows 部署打包的。
+# 生产环境已切换到 Linux,新流程用 deploy/linux/05-upload.sh (本地 rsync 到服务器)。
+# 本脚本仅保留给历史 Windows 部署做应急。请优先用 Linux 部署。
+# =============================================================================
+#
 # 打包后端发布包（zip）
 #
 # 用法：右键 → 用 PowerShell 运行
-#   或在 PowerShell 中：cd 项目根; .\deploy\pack-backend.ps1
+#   或在 PowerShell 中：cd 项目根; .\deploy\windows\pack-backend.ps1
 #
 # 输出：项目根\release\doc-audit-YYMMDD-HHMM.zip
 #

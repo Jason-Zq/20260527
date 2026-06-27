@@ -23,6 +23,7 @@ import llm_service
 import redactor
 from redactor import redact as _redact_text
 from db import archive_detect_crud as crud
+import event_service
 
 
 # ==================== 常量与状态 ====================
@@ -519,6 +520,18 @@ async def _queue_worker(worker_id: int) -> None:
         except Exception as e:
             # _process_one_business 内部已经处理大部分异常并写 error 态,这里兜底 print
             print(f"[archive_detect_worker:{worker_id}] batch={batch_id} idx={idx} 处理异常: {e}")
+            event_service.log_event(
+                event_service.CRITICAL,
+                event_service.CATEGORY_WORKER_CRASH,
+                f"worker {worker_id} 处理 batch={batch_id} idx={idx} 抛出未捕获异常",
+                context={
+                    "worker_id": worker_id,
+                    "batch_id": batch_id,
+                    "idx": idx,
+                    "error_class": e.__class__.__name__,
+                    "error_msg": str(e)[:300],
+                },
+            )
         finally:
             _FILE_QUEUE.task_done()
             remaining = _batch_pending.get(batch_id)
@@ -621,6 +634,18 @@ async def submit_business_batch(
     if new_count > 0 and _FILE_QUEUE is not None:
         depth = _FILE_QUEUE.qsize()
         if depth + new_count > QUEUE_MAX_SIZE:
+            event_service.log_event(
+                event_service.WARN,
+                event_service.CATEGORY_BATCH_QUEUE_FULL,
+                f"队列水位已满,拒绝新批次(深度={depth}+{new_count} > 上限={QUEUE_MAX_SIZE})",
+                context={
+                    "client_code": client_code,
+                    "progress_oid": progress_payload.get("progress_oid"),
+                    "depth": depth,
+                    "new_count": new_count,
+                    "queue_max": QUEUE_MAX_SIZE,
+                },
+            )
             raise QueueFullError(queue_depth=depth, queue_max=QUEUE_MAX_SIZE)
 
     # 4) 生成 batch_id + 创建 DB 记录(含 reuse 项直接 done)
@@ -678,6 +703,20 @@ async def submit_business_batch(
         asyncio.create_task(_finalize_business_batch(
             batch_id, criteria.strip(), progress_id,
         ))
+
+    event_service.log_event(
+        event_service.INFO,
+        event_service.CATEGORY_BATCH_SUBMIT,
+        f"接收批次 {batch_id}(共 {len(items_plan)} 文件,复用 {counts['reused_count']},新检 {counts['new_count']})",
+        context={
+            "batch_id": batch_id,
+            "client_code": client_code,
+            "progress_id": progress_id,
+            "total_files": len(items_plan),
+            "reused": counts["reused_count"],
+            "new": counts["new_count"],
+        },
+    )
 
     return {
         "batch_id": batch_id,
@@ -820,6 +859,25 @@ async def _finalize_business_batch(
     except Exception as e:
         print(f"[archive_detect:{batch_id}] DB update_batch_status 失败(忽略): {e}")
 
+    # batch.done 事件:汇总此次审核结果
+    if state:
+        total_files = len(state.get("files") or [])
+        error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
+        done_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "done")
+        event_service.log_event(
+            event_service.INFO,
+            event_service.CATEGORY_BATCH_DONE,
+            f"批次 {batch_id} 完成({overall_verdict} {overall_score}/100,共 {total_files} 文件,done={done_count},error={error_count})",
+            context={
+                "batch_id": batch_id,
+                "overall_verdict": overall_verdict,
+                "overall_score": overall_score,
+                "total_files": total_files,
+                "done_count": done_count,
+                "error_count": error_count,
+            },
+        )
+
 
 async def _process_one_business(
     batch_id: str,
@@ -939,6 +997,20 @@ async def _process_one_business(
             await crud.update_file_error(batch_id, idx, msg, elapsed, filename or None)
         except Exception as e2:
             print(f"[archive_detect:{batch_id}:{idx}] DB update_file_error 失败(忽略): {e2}")
+        event_service.log_event(
+            event_service.WARN,
+            event_service.CATEGORY_FILE_FAILED,
+            f"批次 {batch_id} 第 {idx} 个文件失败:{msg[:200]}",
+            context={
+                "batch_id": batch_id,
+                "idx": idx,
+                "file_id": plan.get("file_id"),
+                "filename": filename or None,
+                "error_class": e.__class__.__name__,
+                "error_msg": msg[:300],
+                "elapsed_sec": elapsed,
+            },
+        )
     finally:
         try:
             new_done = await crud.bump_done_count(batch_id)
