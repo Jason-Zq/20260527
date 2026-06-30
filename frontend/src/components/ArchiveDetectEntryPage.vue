@@ -62,14 +62,14 @@
             multiple
             :auto-upload="false"
             :limit="MAX_FILES"
-            accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.gif,.docx,.xls,.xlsx,.pptx"
+            accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.gif,.doc,.docx,.xls,.xlsx,.pptx"
             :on-exceed="onExceedUpload"
             :on-change="onUploadChange"
             drag
           >
             <el-icon class="upload-icon"><UploadFilled /></el-icon>
             <div class="upload-text">点击或拖拽文件到此处</div>
-            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 支持 PDF / 图片 / Word / Excel / PPT（GIF 仅识别第一帧，.doc 请转 .docx）</div>
+            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 支持 PDF / 图片 / Word / Excel / PPT（GIF 仅识别第一帧）</div>
           </el-upload>
         </div>
 
@@ -231,20 +231,16 @@
           </div>
         </section>
 
-        <!-- 文件区块:URL 或 上传 -->
+        <!-- 文件区块:URL -->
         <section class="card">
           <div class="card-head">
             <el-icon><Files /></el-icon>
             <span>文件列表</span>
-            <span class="card-sub">每个文件必填 file_id(增量复用 key)</span>
+            <span class="card-sub">每个文件必填 file_id(增量复用 key),文件需先上传 OSS 后填写 URL</span>
           </div>
-          <el-radio-group v-model="bizSourceKind" :disabled="busy" size="default" style="margin-bottom: 12px">
-            <el-radio-button label="url">OSS URL</el-radio-button>
-            <el-radio-button label="upload">上传文件</el-radio-button>
-          </el-radio-group>
 
           <!-- URL 模式 -->
-          <div v-if="bizSourceKind === 'url'" class="biz-file-rows">
+          <div class="biz-file-rows">
             <div v-for="(row, i) in bizUrlRows" :key="row.id" class="biz-file-row">
               <span class="biz-row-idx">{{ i + 1 }}</span>
               <el-input v-model="row.file_id" placeholder="file_id *" :disabled="busy" class="biz-input-id" />
@@ -260,40 +256,6 @@
                 添加文件行
               </el-button>
               <span class="hint">当前 <b>{{ bizUrlRows.length }}</b>/{{ MAX_FILES }}</span>
-            </div>
-          </div>
-
-          <!-- 上传模式 -->
-          <div v-else class="biz-file-rows">
-            <div v-for="(row, i) in bizUploadRows" :key="row.id" class="biz-file-row">
-              <span class="biz-row-idx">{{ i + 1 }}</span>
-              <el-input v-model="row.file_id" placeholder="file_id *" :disabled="busy" class="biz-input-id" />
-              <div class="biz-upload-cell">
-                <input
-                  type="file"
-                  :id="`biz-up-${row.id}`"
-                  style="display: none"
-                  :disabled="busy"
-                  accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.gif,.docx,.xls,.xlsx,.pptx"
-                  @change="bizOnFileSelect($event, i)"
-                />
-                <label :for="`biz-up-${row.id}`" class="biz-upload-btn">
-                  {{ row.file ? row.file.name : '选择文件' }}
-                </label>
-                <span v-if="row.file" class="biz-file-size">
-                  ({{ (row.file.size / 1024 / 1024).toFixed(1) }} MB)
-                </span>
-              </div>
-              <el-button :disabled="busy || bizUploadRows.length <= 1" circle size="small" @click="bizRemoveUploadRow(i)">
-                <el-icon><Close /></el-icon>
-              </el-button>
-            </div>
-            <div class="biz-actions">
-              <el-button size="small" :disabled="busy || bizUploadRows.length >= MAX_FILES" @click="bizAddUploadRow">
-                <el-icon style="margin-right: 4px"><Plus /></el-icon>
-                添加文件行
-              </el-button>
-              <span class="hint">当前 <b>{{ bizUploadRows.length }}</b>/{{ MAX_FILES }}</span>
             </div>
           </div>
 
@@ -563,7 +525,6 @@ import {
   listArchiveDetectHistory,
   deleteArchiveDetectBatch,
   submitBusinessBatch,
-  submitBusinessBatchUpload,
   pollBusinessBatch,
   recheckArchiveDetectBatch,
 } from '../api.js'
@@ -608,7 +569,6 @@ const bizProgress = ref({
   progress_name: '',
 })
 
-const bizSourceKind = ref('url')              // 业务模式 url | upload
 const bizStage = ref('post_submit')           // 业务阶段:pre_submit | post_submit
 const criteriaDirty = ref(false)              // 用户是否手改过 criteria
 
@@ -616,26 +576,26 @@ let _bizRowSeq = 0
 function makeBizUrlRow() {
   return { id: ++_bizRowSeq, file_id: '', filename: '', url: '' }
 }
-function makeBizUploadRow() {
-  return { id: ++_bizRowSeq, file_id: '', file: null }
-}
 const bizUrlRows = ref([makeBizUrlRow()])
-const bizUploadRows = ref([makeBizUploadRow()])
 
 // 用业务字段自动拼装 criteria
+// 注意：不包含客户姓名。同一客户的进度包下，文件可能属于配偶/子女/父母，名字都不一样。
+// 如需按姓名严格匹配，业务方手动在界面上改 criteria 加"必须是 XXX 的"即可。
 function buildBizCriteria() {
   const c = bizClient.value
   const p = bizProgress.value
   const stage = bizStage.value === 'pre_submit' ? '递交前' : '递交后'
 
   const parts = []
-  if (c.name) parts.push(`客户「${c.name}」`)
+  // 客户标签用 client_code 而非姓名 —— 不作为姓名硬匹配条件，仅为上下文
+  const label = c.client_code ? `客户代号${c.client_code}` : (c.name ? `客户「${c.name}」` : '')
+  if (label) parts.push(label)
   if (p.project_name) parts.push(`「${p.project_name}」项目`)
   if (p.project_detail_name) parts.push(`「${p.project_detail_name}」`)
   if (p.progress_name) parts.push(`「${p.progress_name}」进展`)
 
   const subject = parts.length ? parts.join(' / ') : '本客户'
-  return `请按公司文件留底标准,审核此文件是否为 ${subject} 在「${stage}」阶段应上传的留底文件。重点关注文件能否归入合理的分类,以及是否符合当前阶段。`
+  return `请按公司文件留底标准，审核此文件是否为 ${subject} 在「${stage}」阶段应上传的留底文件。重点判断文件类型、内容完整性和格式规范，而不是严格匹配文件上的姓名（该客户的文件可能属于其配偶/子女/父母）。`
 }
 
 function onCriteriaInput() {
@@ -711,11 +671,8 @@ const canSubmitBiz = computed(() => {
   if (!userPrompt.value.trim()) return false
   if (!bizClient.value.client_code.trim() || !bizClient.value.name.trim()) return false
   if (!bizProgress.value.progress_oid.trim()) return false
-  if (bizSourceKind.value === 'url') {
-    return bizUrlRows.value.some(r => r.file_id.trim() && r.url.trim() &&
-      /^https?:\/\//i.test(r.url.trim()))
-  }
-  return bizUploadRows.value.some(r => r.file_id.trim() && r.file)
+  return bizUrlRows.value.some(r => r.file_id.trim() && r.url.trim() &&
+    /^https?:\/\//i.test(r.url.trim()))
 })
 
 const bizSubmitButtonText = computed(() => {
@@ -738,22 +695,6 @@ function bizRemoveUrlRow(i) {
   if (bizUrlRows.value.length <= 1) return
   bizUrlRows.value.splice(i, 1)
 }
-function bizAddUploadRow() {
-  if (bizUploadRows.value.length >= MAX_FILES) {
-    ElMessage.warning(`最多 ${MAX_FILES} 个文件`)
-    return
-  }
-  bizUploadRows.value.push(makeBizUploadRow())
-}
-function bizRemoveUploadRow(i) {
-  if (bizUploadRows.value.length <= 1) return
-  bizUploadRows.value.splice(i, 1)
-}
-function bizOnFileSelect(event, i) {
-  const file = event.target.files && event.target.files[0]
-  if (file) bizUploadRows.value[i].file = file
-}
-
 async function handleSubmitBiz() {
   if (busy.value) return
 
@@ -790,51 +731,29 @@ async function handleSubmitBiz() {
   tabMode.value = 'business'
 
   try {
-    let resp
-    if (bizSourceKind.value === 'url') {
-      // URL 模式:校验每行
-      const items = []
-      const seen = new Set()
-      for (let i = 0; i < bizUrlRows.value.length; i++) {
-        const row = bizUrlRows.value[i]
-        const fid = row.file_id.trim()
-        const url = row.url.trim()
-        if (!fid && !url) continue   // 空行允许
-        if (!fid) throw new Error(`第 ${i+1} 行缺 file_id`)
-        if (seen.has(fid)) throw new Error(`重复 file_id: ${fid}`)
-        if (!/^https?:\/\//i.test(url)) throw new Error(`第 ${i+1} 行 url 不合法`)
-        seen.add(fid)
-        items.push({ file_id: fid, filename: row.filename.trim() || null, url })
-      }
-      if (!items.length) throw new Error('请至少添加一个文件')
-
-      resp = await submitBusinessBatch({
-        criteria,
-        stage: bizStage.value,
-        client: clientObj,
-        progress: progressObj,
-        items,
-      })
-    } else {
-      // upload 模式
-      const files = []
-      const perFileMeta = []
-      const seen = new Set()
-      for (let i = 0; i < bizUploadRows.value.length; i++) {
-        const row = bizUploadRows.value[i]
-        const fid = row.file_id.trim()
-        if (!fid && !row.file) continue
-        if (!fid) throw new Error(`第 ${i+1} 行缺 file_id`)
-        if (!row.file) throw new Error(`第 ${i+1} 行未选择文件`)
-        if (seen.has(fid)) throw new Error(`重复 file_id: ${fid}`)
-        seen.add(fid)
-        files.push(row.file)
-        perFileMeta.push({ file_id: fid, filename: row.file.name })
-      }
-      if (!files.length) throw new Error('请至少添加一个文件')
-
-      resp = await submitBusinessBatchUpload(criteria, clientObj, progressObj, files, perFileMeta, bizStage.value)
+    // URL 模式:校验每行
+    const items = []
+    const seen = new Set()
+    for (let i = 0; i < bizUrlRows.value.length; i++) {
+      const row = bizUrlRows.value[i]
+      const fid = row.file_id.trim()
+      const url = row.url.trim()
+      if (!fid && !url) continue   // 空行允许
+      if (!fid) throw new Error(`第 ${i+1} 行缺 file_id`)
+      if (seen.has(fid)) throw new Error(`重复 file_id: ${fid}`)
+      if (!/^https?:\/\//i.test(url)) throw new Error(`第 ${i+1} 行 url 不合法`)
+      seen.add(fid)
+      items.push({ file_id: fid, filename: row.filename.trim() || null, url })
     }
+    if (!items.length) throw new Error('请至少添加一个文件 URL')
+
+    const resp = await submitBusinessBatch({
+      criteria,
+      stage: bizStage.value,
+      client: clientObj,
+      progress: progressObj,
+      items,
+    })
 
     ElMessage.success(
       `已提交 ${resp.total_files} 个文件:${resp.reused_count} 个复用历史 + ${resp.new_count} 个新检测`

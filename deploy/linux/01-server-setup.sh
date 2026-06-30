@@ -11,7 +11,7 @@ PG_DB="${PG_DB:-doc_review}"
 PG_USER="${PG_USER:-docreview}"
 PG_PASSWORD="${PG_PASSWORD:-please_change_me}"
 
-echo "==> 1/7 安装系统依赖(Python/编译工具/OpenCV deps/中文字体)"
+echo "==> 1/7 安装系统依赖(Python/编译工具/OpenCV deps/中文字体/antiword)"
 dnf install -y --setopt=install_weak_deps=False \
     python3.12 python3.12-pip python3.12-devel \
     gcc gcc-c++ make \
@@ -20,6 +20,7 @@ dnf install -y --setopt=install_weak_deps=False \
     libreoffice libreoffice-langpack-zh-Hans \
     mesa-libGL \
     wqy-zenhei-fonts wqy-microhei-fonts \
+    antiword \
     git rsync tar
 
 echo "==> 2/7 初始化 PostgreSQL(本机)"
@@ -58,8 +59,9 @@ if systemctl is-active --quiet firewalld; then
     firewall-cmd --reload
 fi
 
-echo "==> 6/7 校验 soffice + 字体"
+echo "==> 6/7 校验 soffice + 字体 + antiword"
 which soffice
+which antiword
 fc-list :lang=zh | head -3
 
 echo "==> 7/7 完成"

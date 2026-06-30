@@ -1,0 +1,54 @@
+[Unit]
+Description=Doc Review OCR Worker %i
+After=network.target postgresql.service doc-review.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=docreview
+Group=docreview
+WorkingDirectory=/opt/doc-review/backend
+Environment=PATH=/opt/doc-review/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/doc-review/backend
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=PYTHONUTF8=1
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+# 数据库:取 EnvironmentFile 里的 DATABASE_URL,优先级高于 config.json
+EnvironmentFile=-/opt/doc-review/deploy/linux/app.env
+
+# %i 是 systemd 实例占位符(systemctl start doc-review-worker@1 → %i=1)
+ExecStart=/opt/doc-review/.venv/bin/python -m worker_runner --worker-id worker-%i
+
+# 优雅退出: SIGTERM 触发 _should_stop=True,等当前文件处理完再退,最多 3 分钟
+KillSignal=SIGTERM
+TimeoutStopSec=180
+
+# 崩了自动 restart;限制突发 restart 防止僵尸循环
+Restart=always
+RestartSec=15
+StartLimitInterval=300
+StartLimitBurst=5
+TimeoutStartSec=120          # PaddleOCR 首次加载慢,给充足启动时间
+
+# 资源硬上限(单 worker)
+MemoryMax=2G
+MemoryHigh=1.6G
+LimitNOFILE=65535
+
+# 沙箱
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=no
+ReadWritePaths=/opt/doc-review/output /opt/doc-review/temp
+
+# 日志走 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=doc-review-worker-%i
+
+[Install]
+WantedBy=multi-user.target

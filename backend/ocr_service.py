@@ -8,7 +8,7 @@ import threading
 import uuid
 import pdfplumber
 import pypdfium2
-from paddleocr import PaddleOCR
+from rapidocr_onnxruntime import RapidOCR
 
 # PDF类型检测的文字长度阈值
 TEXT_LENGTH_THRESHOLD = 100
@@ -23,8 +23,8 @@ MAX_PIXELS = 16_000_000  # ≈ 4000 × 4000
 # 全局 OCR 引擎（懒加载）
 _ocr_engine = None
 
-# PaddleOCR 2.x 单实例多线程推理不稳。所有调用 _ocr_engine.ocr(...) 的位置必须用此锁
-# 串行化,避免业务审核 worker 与拆分流程 worker 在不同线程池里同时打它。
+# RapidOCR(onnxruntime)单实例多线程推理不保证安全。所有调用都通过 run_ocr,
+# 用此锁串行化,避免业务审核 worker 与拆分流程 worker 在不同线程池里同时打它。
 _OCR_ENGINE_LOCK = threading.Lock()
 
 # 输出目录
@@ -46,22 +46,29 @@ def _downscale_if_too_large(pil_image):
 
 
 def _get_ocr_engine():
-    """懒加载 PaddleOCR 引擎。cpu_threads=2 防止默认拉满所有核心吃干内存。"""
+    """懒加载 RapidOCR 引擎(onnxruntime,CPU)。模型权重随包内置,无需联网下载。"""
     global _ocr_engine
     if _ocr_engine is None:
-        print("正在初始化 PaddleOCR 引擎...")
-        os.environ["FLAGS_use_mkldnn"] = "0"
-        _ocr_engine = PaddleOCR(
-            use_angle_cls=True, lang="ch", show_log=False, cpu_threads=2,
-        )
+        print("正在初始化 RapidOCR 引擎...")
+        _ocr_engine = RapidOCR()
     return _ocr_engine
 
 
 def run_ocr(img_path: str, cls: bool = True):
-    """对单张图片跑 OCR(线程安全)。所有模块都应通过此入口调用,避免直接拿引擎。"""
-    ocr = _get_ocr_engine()
+    """对单张图片跑 OCR(线程安全)。所有模块都应通过此入口调用,避免直接拿引擎。
+
+    返回结构兼容旧 PaddleOCR 格式:[[ [bbox, (text, confidence)], ... ]],
+    无文字时返回 [None]。这样下游 ocr_result[0] / line[0] / line[1][0] / line[1][1]
+    的解析逻辑无需任何改动。
+    cls 参数保留以兼容旧签名,RapidOCR 内部自带方向处理。
+    """
+    engine = _get_ocr_engine()
     with _OCR_ENGINE_LOCK:
-        return ocr.ocr(img_path, cls=cls)
+        result, _elapse = engine(img_path)
+    if not result:
+        return [None]
+    converted = [[box, (text, float(score))] for box, text, score in result]
+    return [converted]
 
 
 def detect_pdf_type(pdf_path: str) -> str:
@@ -107,7 +114,7 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
     """
     从图片型 PDF 中通过 OCR 识别文字，并保留坐标框信息。
     每页渲染为图片保存到 output/{task_id}/images/ 目录。
-    max_ocr_pages: 最多OCR的页数，0表示全部OCR。超出的页面只保存切图不OCR。
+    max_ocr_pages: 最多OCR的页数，0表示全部OCR。超出的页面不渲染、不保存、不OCR(降低写盘峰值)。
     返回格式: [{"page": 1, "text": "...", "image": "xxx/page_1.png", "ocr_details": [...]}]
     """
     pdf = pypdfium2.PdfDocument(pdf_path)
@@ -123,7 +130,7 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
         print(f"  智能截取: 共{total_pages}页，只OCR前{ocr_page_limit}页")
 
     results = []
-    for i in range(total_pages):
+    for i in range(ocr_page_limit):
         page = pdf[i]
         bitmap = page.render(scale=OCR_RENDER_SCALE)
         pil_image = bitmap.to_pil()
@@ -133,29 +140,23 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
         img_path = os.path.join(img_dir, img_filename)
         pil_image.save(img_path, "PNG")
 
-        # 只有前N页做OCR，剩余页面只保存切图
-        if i < ocr_page_limit:
-            ocr_result = run_ocr(img_path, cls=True)
-            page_text_lines = []
-            ocr_details = []
-            if ocr_result and ocr_result[0]:
-                for line in ocr_result[0]:
-                    bbox = line[0]
-                    text = line[1][0]
-                    confidence = float(line[1][1])
-                    if confidence > 0.3:
-                        page_text_lines.append(text)
-                        ocr_details.append({
-                            "text": text,
-                            "confidence": round(confidence, 4),
-                            "bbox": bbox
-                            })
+        ocr_result = run_ocr(img_path, cls=True)
+        page_text_lines = []
+        ocr_details = []
+        if ocr_result and ocr_result[0]:
+            for line in ocr_result[0]:
+                bbox = line[0]
+                text = line[1][0]
+                confidence = float(line[1][1])
+                if confidence > 0.3:
+                    page_text_lines.append(text)
+                    ocr_details.append({
+                        "text": text,
+                        "confidence": round(confidence, 4),
+                        "bbox": bbox
+                        })
 
-            page_text = "\n".join(page_text_lines)
-        else:
-            # 超出限制的页面，不OCR，只保存切图
-            page_text = ""
-            ocr_details = []
+        page_text = "\n".join(page_text_lines)
 
         results.append({
             "page": i + 1,
@@ -195,7 +196,7 @@ def extract_image_file(image_path: str, task_id: str) -> list:
                 shutil.copy2(image_path, dest_path)
                 ocr_input_path = image_path
     except Exception:
-        # PIL 打不开时退回到原始 copy(再交给 PaddleOCR 自行报错)
+        # PIL 打不开时退回到原始 copy(再交给 OCR 引擎自行报错)
         shutil.copy2(image_path, dest_path)
         ocr_input_path = image_path
 

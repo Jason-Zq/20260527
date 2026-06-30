@@ -31,7 +31,7 @@ DOWNLOAD_TIMEOUT_S = 300                 # 5 min 总超时
 CONNECT_TIMEOUT_S = 60
 
 # 与 OCR/解析支持的扩展名对齐
-_SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif", ".docx", ".xls", ".xlsx", ".pptx"}
+_SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif", ".doc", ".docx", ".xls", ".xlsx", ".pptx"}
 
 
 # 共享 httpx.AsyncClient,复用 TCP 连接 + DNS 缓存。
@@ -255,10 +255,7 @@ def is_supported_extension(filename: str) -> bool:
 
 
 def get_unsupported_hint(filename: str) -> str:
-    """针对常见但暂不支持的旧格式给出明确提示。"""
-    ext = os.path.splitext(filename or "")[1].lower()
-    if ext == ".doc":
-        return "暂不支持旧版 Word(.doc)，请转换为 .docx 后上传"
+    """针对不支持的文件类型给出明确提示。"""
     return f"不支持的文件类型：{filename}（支持 {', '.join(get_supported_extensions())}）"
 
 

@@ -2,6 +2,9 @@
 Description=Doc Review API (FastAPI + Uvicorn)
 After=network.target postgresql.service
 Wants=postgresql.service
+# 主服务启动时一并拉起 1 个 OCR worker(独立进程,OCR 崩溃不连累 API)。
+# 需要更多 worker:手动 systemctl enable --now doc-review-worker@2 ...
+Wants=doc-review-worker@1.service
 
 [Service]
 Type=simple
@@ -15,15 +18,13 @@ Environment=LC_ALL=C.UTF-8
 Environment=PYTHONUTF8=1
 Environment=OMP_NUM_THREADS=2
 Environment=MKL_NUM_THREADS=2
-Environment=ARCHIVE_DETECT_WORKERS=2
 Environment=ARCHIVE_DETECT_QUEUE_MAX=200
 # 数据库:取 EnvironmentFile 里的 DATABASE_URL,优先级高于 config.json
 EnvironmentFile=-/opt/doc-review/deploy/linux/app.env
 
-# 注意:--workers 必须固定为 1。
-# 业务审核流程使用进程内 asyncio.Queue + 内存 _batch_status 编排;
-# 多 worker 会产生多个独立队列,同一批次的文件被随机分散,前端轮询和总报告会错乱。
-# 横向扩容必须先把队列搬到 Redis/DB(目前是 YAGNI)。
+# 主进程(方案二 2b)只接 HTTP / 写 DB / 跑 finalize 协程 / watchdog 回收死 worker 任务
+# OCR Worker 是独立 systemd 服务: doc-review-worker@{1,2,3}.service
+# --workers=1 因为 uvicorn 主进程内有内存态 _batch_status 缓存(前端轮询 fast-path)
 ExecStart=/opt/doc-review/.venv/bin/python -m uvicorn main:app \
     --host 127.0.0.1 --port 8000 --workers 1 \
     --proxy-headers --forwarded-allow-ips=127.0.0.1
@@ -33,9 +34,9 @@ RestartSec=5
 StartLimitInterval=60
 StartLimitBurst=3
 
-# 资源限制(防止 OOM 拖垮整机)
-MemoryMax=4G
-MemoryHigh=3G
+# 资源限制(主进程很轻,2GB 足够)
+MemoryMax=2G
+MemoryHigh=1.5G
 LimitNOFILE=65535
 
 # 沙箱:

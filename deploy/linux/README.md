@@ -23,8 +23,11 @@ export PG_PASSWORD='你的强密码'
 bash /tmp/linux/01-server-setup.sh
 ```
 
-这一步装:Python 3.12 / PostgreSQL / nginx / LibreOffice + 中文字体 / OpenCV 系统依赖。
+这一步装:Python 3.12 / PostgreSQL / nginx / LibreOffice + 中文字体 / OpenCV 系统依赖 / antiword(.doc 文本抽取)。
 创建 `docreview` 用户 + `/opt/doc-review` 安装目录。
+
+> .doc 支持依赖 antiword(已在 01-server-setup.sh 安装)。如手动安装:`dnf install -y antiword`。
+> 中文 .doc 验证:`antiword -m UTF-8.txt 测试.doc`,若乱码检查 `/usr/share/antiword/` mapping 文件。
 
 ### 2. 回本地,跑上传脚本
 
@@ -104,9 +107,17 @@ curl http://127.0.0.1:8000/api/archive-detect/admin/queue-stats
 # 数据库
 sudo -u postgres psql -d doc_review
 
-# 重启
+# 重启(主服务;worker 通过 Wants= 一并就位,已 enable 的会自动拉起)
 sudo systemctl restart doc-review
+
+# 只看/重启 OCR worker
+sudo systemctl status 'doc-review-worker@*'
+sudo systemctl restart doc-review-worker@1
 ```
+
+> 说明:`doc-review.service` 用 `Wants=doc-review-worker@1.service`,启动主服务会一并拉起 1 个 worker。
+> worker 仍是独立进程(OCR 崩溃不连累 API)。需要更多 worker:`sudo systemctl enable --now doc-review-worker@2`。
+> `systemctl restart doc-review` 不会重启已在跑的 worker,要单独 `restart doc-review-worker@1`。
 
 ---
 

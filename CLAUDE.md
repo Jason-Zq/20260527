@@ -22,6 +22,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cd e:/qoderproject/20260527/backend
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ../.venv312/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
+# OCR worker：独立进程,必须单独起,否则文件留底检测只入队不识别(一直 pending)
+cd e:/qoderproject/20260527/backend
+PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ../.venv312/Scripts/python.exe -m worker_runner --worker-id worker-1
+
+# Windows 本地一键起后端 + 1 个 worker(各自独立窗口)
+start_backend.bat
+
 # 前端
 cd e:/qoderproject/20260527/frontend
 npm run dev
@@ -30,10 +37,12 @@ npm run dev
 cd e:/qoderproject/20260527/frontend
 npm run build
 
-# 数据库迁移（alembic.ini 在项目根，DSN 从 config.json 读取）
+# 数据库迁移（alembic.ini 在项目根，DSN 优先 DATABASE_URL 环境变量,否则 config.json）
 cd e:/qoderproject/20260527
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe -m alembic upgrade head
 ```
+
+> **后端和 worker 是两个独立进程,本地开发要分别启动。** 改了 OCR/抽取/LLM 相关代码,uvicorn 的 `--reload` 不会重启 worker —— 必须手动重启 worker 才生效。
 
 ## 部署（Linux 生产环境）
 
@@ -50,17 +59,21 @@ bash deploy/linux/05-upload.sh root@<服务器IP>
 sudo -u docreview bash /opt/doc-review/deploy/linux/02-install-app.sh
 
 # 服务器：重启
-sudo systemctl restart doc-review     # 后端代码改动
-sudo systemctl reload nginx           # 前端 dist 变化
+sudo systemctl restart doc-review              # 后端代码改动
+sudo systemctl restart doc-review-worker@1     # OCR/抽取/LLM/worker 代码改动(必须单独重启)
+sudo systemctl reload nginx                    # 前端 dist 变化
 ```
 
 关键约束：
 
-- **uvicorn `--workers=1` 不能改**：业务审核走进程内 `asyncio.Queue` + 内存 `_batch_status`；多 worker 会有多个独立队列，前端轮询和总报告会错乱。横向扩容必须先把队列搬到 Redis（YAGNI）。
-- **OCR worker 数由环境变量 `ARCHIVE_DETECT_WORKERS` 控制**（默认 1），写在 [deploy/linux/doc-review.service](deploy/linux/doc-review.service)。小内存机器保持 1。
+- **业务审核已改为 DB 队列 + 多进程 worker 架构(方案二 2b)**：主进程(uvicorn)只接 HTTP、写 DB、跑 finalize 轮询 + watchdog;OCR/LLM 由独立的 `worker_runner.py` 进程通过 `SELECT FOR UPDATE SKIP LOCKED` 抢 `archive_detect_files` 的 pending 任务。状态全部落 DB,进程重启不丢任务。
+- **uvicorn `--workers=1` 不能改**：主进程仍保留内存态 `_batch_status` 作为前端轮询 fast-path;多 uvicorn worker 会让该缓存分裂。worker 并发靠多起几个 `worker_runner` 进程,不是靠 uvicorn workers。
+- **OCR worker 数 = 起几个 `worker_runner` 进程**。生产用 systemd 模板 [deploy/linux/doc-review-worker@.service](deploy/linux/doc-review-worker@.service)(`doc-review-worker@1/@2/...`);`doc-review.service` 用 `Wants=doc-review-worker@1.service` 在启动主服务时一并拉起 1 个 worker(但 `restart doc-review` 不会重启已在跑的 worker,改 OCR 代码要单独 `restart doc-review-worker@1`)。**4C/8G 小机器保持 1 个 worker**,OCR 串行,稳定优先。
+- **OCR 引擎是 RapidOCR(onnxruntime)**,不是 PaddleOCR。所有 OCR 调用收口在 `ocr_service.run_ocr()`,内部把 RapidOCR 输出适配回旧 PaddleOCR 结构 `[[[bbox,(text,conf)],...]]`,下游零改动。模型权重随包内置,无需联网下载、无 libGL 依赖。
 - **数据库连接优先用 `DATABASE_URL` 环境变量**，否则才回退到 `config.json`。生产环境 systemd unit 通过 [deploy/linux/app.env](deploy/linux/app.env)（不入库）注入。
 - **`docx2pdf` 在 Linux 上不可用**：`backend/template_service.py:_convert_docx_to_pdf` 在 Windows 走 docx2pdf（Word COM），Linux 走 LibreOffice `soffice --headless`。两条路径都已落地，本地开发不受影响。
-- **健康检查**：`GET /api/healthz` 真查 DB 和 worker，nginx 反代到 `/healthz` 给外部监控用。`/api/archive-detect/admin/queue-stats` 只看队列。
+- **`.doc` 抽取靠系统 antiword**：`text_extractor._extract_doc` subprocess 调 `antiword -m UTF-8.txt`。服务器需 `dnf/apt install antiword`(已写进 01-server-setup.sh);中文 .doc 上线前必须用真实文件验证 mapping。本地 Windows 没 antiword 会返回明确 ValueError。
+- **健康检查**：`GET /api/healthz` 真查 DB 和 worker,nginx 反代到 `/healthz` 给外部监控用。`/api/archive-detect/admin/queue-stats` 只看 DB 队列深度。
 - **Windows 专用部署脚本**（PowerShell 打包）已退役挪到 [deploy/windows/](deploy/windows/)，仅作历史保留。
 
 
@@ -102,27 +115,30 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_sca
 
 ```text
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
-  frontend/src/router.js                 路由: /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /child-age-leads
+  frontend/src/router.js                 路由: /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /events, /request-logs, /child-age-leads
   frontend/src/api.js                    axios API 封装
-  frontend/src/components/*.vue          各业务页面（新增 ArchiveAdminPage.vue, ChildAgeLeadsPage.vue）
+  frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ChildAgeLeadsPage)
 
 后端: FastAPI + SQLAlchemy 2 async + Alembic
-  backend/main.py                        FastAPI 入口 + 路由聚合
-  backend/llm_service.py                 LLM 调用封装与各业务 prompt（含客户档案抽取prompt）
-  backend/ocr_service.py                 PDF/图片 OCR 通用入口
-  backend/text_extractor.py              PDF/图片/docx 统一文本抽取（文件留底检测复用）
-  backend/file_fetcher.py                httpx 下载 URL/OSS 临时签名地址到临时文件
-  backend/archive_detect_service.py      文件留底检测编排（批次、增量复用、总体报告）
-  backend/client_profile_service.py      客户档案结构化生成编排（后台任务，只补空不覆盖）
+  backend/main.py                        FastAPI 入口 + 路由聚合 + startup/shutdown + 内存态轮询缓存
+  backend/worker_runner.py               独立进程入口: SKIP LOCKED 抢 DB 任务 → OCR → LLM → 写终态(业务审核的实际执行者)
+  backend/archive_detect_service.py      文件留底检测编排(提交入队、增量复用、watchdog 回收死 worker 任务、finalize 总报告)
+  backend/llm_service.py                 LLM 调用封装与各业务 prompt(OpenAI 兼容,模型由 config.json 驱动)
+  backend/ocr_service.py                 RapidOCR 引擎封装 + PDF/图片 OCR(run_ocr 统一入口)
+  backend/text_extractor.py              PDF/图片/docx/doc/xls/pptx 统一文本抽取(文件留底检测复用)
+  backend/file_fetcher.py                httpx 下载 URL/OSS 临时签名地址到临时文件 + 延迟清理
+  backend/event_service.py + db/event_crud.py        业务事件流(批次/OCR/worker 崩溃等)写 system_events
+  backend/middleware/request_log_middleware.py       纯 ASGI 中间件,只记 POST /business/batch 请求体到 api_request_logs
+  backend/client_profile_service.py      客户档案结构化生成编排(后台任务,只补空不覆盖)
   backend/template_service.py            Word 模板解析、锚点扫描、渲染
-  backend/split_ocr_service.py           PDF 拆分专用全页 OCR（双线程、多 OCR 实例）
+  backend/split_ocr_service.py           PDF 拆分专用全页 OCR(单线程,复用 ocr_service 全局引擎)
   backend/split_service.py               PDF 页范围规整与拆分
-  backend/db/*.py                        ORM、engine、CRUD 模块（新增 client_profile_crud.py）
+  backend/db/*.py                        ORM、engine、CRUD 模块
 
 config.json                              DB + LLM + OCR/文档类型配置
 output/                                  静态挂载为 /uploads/，保存 PNG/PDF/DOCX 等产物
 temp/                                    上传/下载/模板解析临时文件
-migrations/versions/                     Alembic 迁移（当前到 011_client_profile_generation）
+migrations/versions/                     Alembic 迁移(当前到 014_api_request_logs)
 ```
 
 ## 数据库重点
@@ -135,10 +151,12 @@ migrations/versions/                     Alembic 迁移（当前到 011_client_p
 - `split_tasks`：PDF 拆分任务，持久化状态和 ranges；7 天后清理磁盘文件但保留 DB 记录。
 - `summaries`：URL 文件摘要历史。
 - `archive_detect_batches`：文件留底检测批次；包含 `overall_verdict/overall_score/overall_reason` 当次总体判断。
-- `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`。
+- `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`；DB 队列字段 `status(pending/leased/fetching/ocr/llm/done/error)`、`worker_lease_until`、`retry_count`、`local_path`(upload 模式残留,现已停用)。
 - `archive_detect_progress`：业务审核的进展包实体，`(client_id, progress_oid)` 唯一；存办理人、项目、项目详情、进展名称等。
 - `archive_detect_folder_summaries`：进展包维度滚动总报告（多版本，后续阶段使用）。
 - `client_profile_generation_tasks`：客户档案结构化生成任务；记录源文件、抽取结果、写入统计、状态。
+- `system_events`：业务事件流(severity/category/message/context),前端 `/events` 页查看,GC 保留 30 天。
+- `api_request_logs`：API 请求记录,中间件只记 `POST /api/archive-detect/business/batch` 的请求体,前端 `/request-logs` 页查看,GC 保留 30 天。
 
 ## 文件留底检测 / 业务审核
 
@@ -151,16 +169,16 @@ migrations/versions/                     Alembic 迁移（当前到 011_client_p
    - `POST /api/archive-detect/urls`
    - 前端 `ArchiveDetectEntryPage.vue` 的「快速检测」tab，保留自由判定提示词。
 
-2. **业务审核**
-   - `POST /api/archive-detect/business/batch`：JSON + OSS URL。
-   - `POST /api/archive-detect/business/batch/upload`：multipart 上传，`client_payload/progress_payload/items_payload` 为 JSON 字符串。
+2. **业务审核**（当前主线,URL/OSS 模式）
+   - `POST /api/archive-detect/business/batch`：JSON + OSS URL。接口阶段只校验 + 写 DB(pending) + 秒回 `batch_id`,不下载、不 OCR;真正下载/OCR/LLM 由 worker 串行处理。URL 过期时 worker 用 `file_id` 调 `file_fetcher.fetch_url_to_temp_with_refresh` 刷新地址。
+   - `POST /api/archive-detect/business/batch/upload`：**已停用,返回 410**。前台本地上传会让主进程瞬间写盘洪峰(4C/8G 扛不住),改为业务方先传 OSS 再提交 URL。前端业务审核 tab 已移除上传入口。
    - `GET /api/archive-detect/business/batch/{batch_id}`：轮询完整结果，返回 client/progress/files/overall。
-   - 前端 `ArchiveDetectEntryPage.vue` 的「业务审核」tab 默认打开；criteria 会根据客户姓名、项目名、项目详情、进展名、阶段自动预填，用户手改后不再覆盖。
+   - 前端 `ArchiveDetectEntryPage.vue` 的「业务审核」tab 默认打开,只接受 OSS URL;criteria 会根据客户/项目/进展/阶段自动预填，用户手改后不再覆盖。
 
 关键逻辑：
 
 - 同一进展包内 `(progress_id, file_id)` 命中历史 `done` 文件时严格复用旧结果，跳过 OCR/LLM；复用项 `elapsed_sec=0`，返回 `is_reused=true`。
-- 新文件走 `text_extractor.extract_text` → `llm_service.detect_archival` → `redactor` 脱敏 → DB 终态写入。
+- worker 处理新文件：`file_fetcher` 下载(必要时刷新 URL) → `text_extractor.extract_text` → `llm_service.detect_archival` → `redactor` 脱敏 → DB 终态写入 → 删临时文件。
 - OCR 文本只以脱敏后的 `archive_detect_files.ocr_text` 入库；默认批次查询用 `defer` 不拉该大字段，单文件详情用 `get_file_detail`。
 - 单文件 verdict 由 LLM 直接输出 `match/partial/mismatch`；`is_archival=(verdict=='match')`、`confidence=match_score` 用于向后兼容。
 - 批次总报告：所有文件完成后，规则计算 `overall_verdict/overall_score`，再调用 `llm_service.summarize_batch` 生成 `overall_reason`；失败时用规则文本兜底。
@@ -201,7 +219,7 @@ migrations/versions/                     Alembic 迁移（当前到 011_client_p
 ### PDF 拆分
 
 - `POST /api/split` 后台 `_process_split_background`。
-- 不复用 `ocr_service.process_file`，而是用 `split_ocr_service.split_extract_all_pages` 全页 OCR、200dpi、2 线程、多 OCR 实例。
+- 不复用 `ocr_service.process_file`，而是用 `split_ocr_service.split_extract_all_pages` 全页 OCR、200dpi、单线程(复用 ocr_service 全局 RapidOCR 引擎)。
 - DB `split_tasks` 是权威状态；内存 `_split_task_status` 只做轮询 fast-path。
 - `/api/split/history` 必须声明在 `/api/split/{task_id}` 之前。
 
@@ -210,6 +228,11 @@ migrations/versions/                     Alembic 迁移（当前到 011_client_p
 - 路由 `/api/archive-detect/admin/*`，前端 `ArchiveAdminPage.vue`（`/archive-admin`）。
 - 支持按状态/来源/客户/进展/日期范围筛选历史批次，详情弹窗复用 `pollBusinessBatch`（business 批次）或 `pollArchiveDetect`（快速检测批次）兜底。
 
+### 可观测性：事件流 + 请求记录
+
+- **事件流**：`event_service.log_event(severity, category, message, context)` fire-and-forget 写 `system_events`,前端 `/events`(EventsPage.vue)。category 常量在 event_service.py(batch.*/file.*/worker.crash/llm.timeout 等)。
+- **请求记录**：纯 ASGI 中间件 `request_log_middleware`(在 main.py 用 `app.add_middleware` 注册,不能用 `BaseHTTPMiddleware`——它读 body 会噎死下游 Pydantic)。只记 `POST /api/archive-detect/business/batch` 的 JSON 请求体,前端 `/request-logs`(RequestLogsPage.vue)。两张表都在 `_split_cleanup_loop` 里 GC 30 天。
+
 ### 销售线索：子女年龄
 
 - 路由 `/api/sales/child-age-leads`，逻辑在 `backend/db/sales_crud.py`。
@@ -217,7 +240,7 @@ migrations/versions/                     Alembic 迁移（当前到 011_client_p
 
 ## 临时文件清理（Windows 重要）
 
-`file_fetcher.cleanup_temp_file` 用于在文件留底检测处理完一个 URL 后删除 `temp/fetched/<uuid>_xxx.pdf`。Windows 上 pdfplumber/PaddleOCR 句柄释放有延迟，立即 `os.remove` 会报 `WinError 32 文件被占用`。
+`file_fetcher.cleanup_temp_file` 用于在文件留底检测处理完一个 URL 后删除 `temp/fetched/<uuid>_xxx.pdf`。Windows 上 pdfplumber/OCR 句柄释放有延迟，立即 `os.remove` 会报 `WinError 32 文件被占用`。
 
 实现策略：
 
@@ -230,6 +253,8 @@ migrations/versions/                     Alembic 迁移（当前到 011_client_p
 
 ## 已知遗留/注意事项
 
+- **业务审核文件卡在 `pending` 不动 = worker 没起**。worker 是独立进程,本地/服务器都要单独启动;不是 uvicorn 的一部分。
+- **`archive_detect_service.py` 里残留的 `_process_one_recheck` 等老 fan-out 函数**(重新审核路径)还没完全迁到新 worker 架构,改 recheck 时注意。
 - `archive_detect/` 独立子项目已迁出到 `E:\qoderproject\archive_detect\`；仓库内如残留空目录不要依赖。
 - 快速检测 tab 的"文件不入库、处理完即删"文案与当前 DB 双写持久化已不完全一致；改文案时要谨慎区分快速检测和业务审核。
 - `archive_detect_files.content_sha256` 列已建但当前不写值；增量复用依赖业务方传稳定 `file_id`。

@@ -3,6 +3,7 @@
 
 按文件类型分发：
   .pdf            → ocr_service.process_file（自动判断文字型/图片型）
+  .doc            → antiword 抽旧版 Word 二进制文本（不走 OCR，需系统装 antiword）
   .docx           → python-docx 抽段落+表格（不走 OCR）
   .xlsx           → openpyxl 抽 sheet/cell 文本
   .pptx           → python-pptx 抽 slide 文本
@@ -19,6 +20,8 @@
 
 import os
 import re
+import shutil
+import subprocess
 import asyncio
 from typing import Optional
 
@@ -39,6 +42,49 @@ _PPTX_EXT = ".pptx"
 _PDF_EXT = ".pdf"
 _GIF_EXT = ".gif"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
+
+
+_ANTIWORD_CACHE = {"path": None, "checked": False}
+
+
+def _find_antiword() -> Optional[str]:
+    """查找 antiword 可执行文件路径(懒缓存)。"""
+    if not _ANTIWORD_CACHE["checked"]:
+        _ANTIWORD_CACHE["path"] = shutil.which("antiword")
+        _ANTIWORD_CACHE["checked"] = True
+    return _ANTIWORD_CACHE["path"]
+
+
+def _extract_doc(file_path: str) -> dict:
+    """antiword 抽旧版 .doc 二进制文本。需要系统安装 antiword。
+
+    中文用 -m UTF-8.txt 映射避免乱码;对损坏/加密/伪装的 .doc 会失败并抛 ValueError。
+    """
+    antiword = _find_antiword()
+    if not antiword:
+        raise ValueError(
+            "服务器未安装 antiword,无法处理 .doc;"
+            "请安装(yum install antiword / apt install antiword)或改用 .docx"
+        )
+    try:
+        result = subprocess.run(
+            [antiword, "-m", "UTF-8.txt", os.path.abspath(file_path)],
+            timeout=60, check=True, capture_output=True,
+        )
+        text = result.stdout.decode("utf-8", errors="replace").strip()
+    except subprocess.TimeoutExpired:
+        raise ValueError(".doc 解析超时(文件可能过大或损坏)")
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or b"").decode("utf-8", errors="replace")[:200]
+        raise ValueError(f".doc 解析失败(可能已损坏或非标准 .doc 格式): {err}")
+    if not text.strip():
+        raise ValueError(".doc 解析后无文字(可能是扫描件转存的图片型 doc)")
+    return {
+        "text": text,
+        "source": "doc_text",
+        "page_count": 1,                 # doc 没有"页"概念，记 1
+        "char_count": len(text),
+    }
 
 
 def _extract_docx(file_path: str) -> dict:
@@ -401,8 +447,7 @@ async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
         return await asyncio.to_thread(_extract_gif, file_path)
 
     if ext == ".doc":
-        # 旧二进制 doc 格式不支持
-        raise ValueError("暂不支持旧版 Word(.doc)，请转换为 .docx 后上传")
+        return await asyncio.to_thread(_extract_doc, file_path)
 
     if ext == _PDF_EXT:
         return await asyncio.to_thread(_extract_pdf, file_path)
@@ -410,7 +455,7 @@ async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
     if ext in _IMAGE_EXTS:
         return await asyncio.to_thread(_extract_image, file_path)
 
-    raise ValueError(f"不支持的文件类型: {ext}（支持 .pdf/.docx/.xls/.xlsx/.pptx/.gif/{'/'.join(sorted(_IMAGE_EXTS))}）")
+    raise ValueError(f"不支持的文件类型: {ext}（支持 .pdf/.doc/.docx/.xls/.xlsx/.pptx/.gif/{'/'.join(sorted(_IMAGE_EXTS))}）")
 
 
 def normalize_text(text: str, max_chars: Optional[int] = None) -> str:

@@ -304,29 +304,6 @@ export async function submitBusinessBatch(payload) {
 }
 
 /**
- * 业务方批量提交(multipart 上传模式)。
- * @param {string} criteria
- * @param {Object} client {client_code, name}
- * @param {Object} progress {progress_oid, handler, project_*, progress_name}
- * @param {File[]} files
- * @param {Array<{file_id:string, filename?:string}>} perFileMeta 顺序与 files 对应
- */
-export async function submitBusinessBatchUpload(criteria, client, progress, files, perFileMeta, stage = 'post_submit') {
-  const fd = new FormData()
-  fd.append('criteria', criteria)
-  fd.append('stage', stage)
-  fd.append('client_payload', JSON.stringify(client))
-  fd.append('progress_payload', JSON.stringify(progress))
-  fd.append('items_payload', JSON.stringify(perFileMeta))
-  for (const f of files) fd.append('files', f)
-  const r = await axios.post(`${API_BASE}/archive-detect/business/batch/upload`, fd, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000,
-  })
-  return r.data
-}
-
-/**
  * 业务接口轮询。返回完整结果含 client/progress/files/overall/reused_count/new_count。
  * @param {string} batchId
  */
@@ -671,5 +648,16 @@ export async function listSystemEvents(params = {}) {
  */
 export async function listEventCategories() {
   const response = await axios.get(`${API_BASE}/admin/events/categories`)
+  return response.data
+}
+
+
+/**
+ * 请求记录列表查询。
+ * @param {Object} params - { method, path, since, until, limit, offset }
+ * @returns {Promise<{items: Array, total: number}>}
+ */
+export async function listRequestLogs(params = {}) {
+  const response = await axios.get(`${API_BASE}/admin/request-logs`, { params })
   return response.data
 }

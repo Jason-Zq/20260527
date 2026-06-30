@@ -2,8 +2,7 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 python-multipart>=0.0.6
 pdfplumber>=0.10.0
-paddlepaddle==2.6.2
-paddleocr>=2.7.0,<3
+rapidocr-onnxruntime>=1.3,<2
 pypdfium2>=5.0.0
 pypdf>=4.0.0
 Pillow>=10.0.0
@@ -22,6 +21,6 @@ openpyxl>=3.1.0
 python-pptx>=0.6.23
 xlrd==1.2.0
 # Linux/服务器部署可选:opencv-python-headless 替代 opencv-python,避开 libGL.so 系统依赖
-# 实际由 paddleocr 传递依赖拉入,如部署机装不了 mesa-libGL 取消下面注释强制 headless
+# 实际由 rapidocr-onnxruntime 传递依赖拉入,如部署机装不了 mesa-libGL 取消下面注释强制 headless
 # opencv-python-headless>=4.5
 psutil>=5.9.0

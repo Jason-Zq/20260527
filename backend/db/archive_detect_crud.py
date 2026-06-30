@@ -503,6 +503,7 @@ async def create_business_batch_with_files(
                 file_id=spec["file_id"],
                 filename=spec.get("filename"),
                 source_url=spec.get("source_url"),
+                local_path=spec.get("local_path"),  # upload 模式:主进程落盘后写 DB,worker 读取
                 version=spec.get("version") or 1,
                 deleted=False,
                 created_at=now,
@@ -833,3 +834,207 @@ async def admin_get_file_detail(record_id: int) -> Optional[dict]:
             d["progress"] = None
             d["client"] = None
         return d
+
+
+# ==================== 方案二 2b: DB 队列 Worker 调度 ====================
+
+from sqlalchemy import text as sa_text
+
+# 单 worker lease 时长(秒)。一个文件 OCR + LLM 最长 ~5 分钟,这里给 10 分钟
+# 超时未更新即被 watchdog 回收(认为 worker 进程崩了)
+DEFAULT_LEASE_SECONDS = 600
+
+# 单文件 retry 上限
+MAX_RETRY_COUNT = 1
+
+
+async def claim_one_pending_file(
+    worker_id: str,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+) -> Optional[dict]:
+    """worker 从 DB 抢一个 pending 文件,原子操作(SKIP LOCKED 防多 worker 抢同行)。
+
+    返回单文件 dict(含 batch_id/idx/source_url/filename/file_id/progress_id/version),
+    无 pending 任务时返回 None。
+
+    注:worker_id 当前只用于事件日志,不写 DB(防止 DB 表加列;后期需要观测可加 worker_id 字段)。
+    """
+    # 用 raw SQL 因为 SQLAlchemy 对 UPDATE FROM SELECT FOR UPDATE SKIP LOCKED 支持不够直接
+    sql = sa_text(f"""
+        UPDATE archive_detect_files
+        SET status = 'leased',
+            worker_lease_until = now() + interval '{int(lease_seconds)} seconds',
+            updated_at = now()
+        WHERE id = (
+            SELECT id FROM archive_detect_files
+            WHERE status = 'pending'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING
+            id, batch_id, idx, progress_id, file_id, version,
+            source_url, local_path, filename, mime_type, retry_count
+    """)
+    async with async_session_maker() as session:
+        res = await session.execute(sql)
+        row = res.mappings().first()
+        await session.commit()
+        if row is None:
+            return None
+        return dict(row)
+
+
+async def count_pending_files() -> int:
+    """submit 时查当前 pending 数,做水位线判断用。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(func.count())
+            .select_from(ArchiveDetectFile)
+            .where(ArchiveDetectFile.status.in_(["pending", "leased", "fetching", "ocr", "llm"]))
+        )
+        res = await session.execute(stmt)
+        return int(res.scalar_one())
+
+
+async def reclaim_expired_leases(
+    max_retry: int = MAX_RETRY_COUNT,
+) -> dict:
+    """watchdog 周期调用:超时的 leased 任务根据 retry_count 决定回 pending 还是终态 error。
+
+    - retry_count < max_retry:回 pending,retry_count + 1,清 lease
+    - retry_count >= max_retry:置 error,清 lease,error_msg 记原因
+
+    返回 {requeued: int, killed: int, requeued_ids: list[int], killed_ids: list[int]}
+    """
+    # 1) 先查所有过期 leased 行
+    now = datetime.now()
+    async with async_session_maker() as session:
+        stmt = select(
+            ArchiveDetectFile.id,
+            ArchiveDetectFile.batch_id,
+            ArchiveDetectFile.idx,
+            ArchiveDetectFile.retry_count,
+        ).where(
+            ArchiveDetectFile.status == "leased",
+            ArchiveDetectFile.worker_lease_until < now,
+        )
+        res = await session.execute(stmt)
+        rows = res.all()
+
+    if not rows:
+        return {"requeued": 0, "killed": 0, "requeued_ids": [], "killed_ids": []}
+
+    requeued_ids = [r.id for r in rows if r.retry_count < max_retry]
+    killed_ids = [r.id for r in rows if r.retry_count >= max_retry]
+
+    async with async_session_maker() as session:
+        # 2) 可重试的:回 pending,retry + 1
+        if requeued_ids:
+            await session.execute(sa_text(
+                "UPDATE archive_detect_files "
+                "SET status = 'pending', worker_lease_until = NULL, "
+                "    retry_count = retry_count + 1, updated_at = now() "
+                "WHERE id = ANY(:ids)"
+            ), {"ids": requeued_ids})
+
+        # 3) 不可重试的:终态 error
+        if killed_ids:
+            await session.execute(sa_text(
+                "UPDATE archive_detect_files "
+                "SET status = 'error', worker_lease_until = NULL, "
+                "    error_msg = COALESCE(error_msg, 'worker 多次失败,放弃重试'), "
+                "    updated_at = now() "
+                "WHERE id = ANY(:ids)"
+            ), {"ids": killed_ids})
+
+        await session.commit()
+
+    return {
+        "requeued": len(requeued_ids),
+        "killed": len(killed_ids),
+        "requeued_ids": requeued_ids,
+        "killed_ids": killed_ids,
+    }
+
+
+async def update_file_intermediate_status(file_id: int, status: str) -> None:
+    """worker 处理过程中更新中间状态(fetching/ocr/llm),供前端轮询看进度。
+    顺便延长 lease,防止 watchdog 误回收正在跑的任务。
+    """
+    # interval 后不接受参数化占位符,lease 秒数写死在 SQL 常量中(DEFAULT_LEASE_SECONDS=600)
+    async with async_session_maker() as session:
+        await session.execute(sa_text(f"""
+            UPDATE archive_detect_files
+            SET status = :status,
+                worker_lease_until = now() + interval '{DEFAULT_LEASE_SECONDS} seconds',
+                updated_at = now()
+            WHERE id = :id
+        """), {"id": file_id, "status": status})
+        await session.commit()
+
+
+async def get_batch_progress(batch_id: str) -> dict:
+    """主进程 finalize 轮询使用:查批次完成度。
+
+    返回 {done: int, error: int, running: int, total: int, is_complete: bool}
+    is_complete: 没有任何非终态行
+    """
+    async with async_session_maker() as session:
+        stmt = sa_text("""
+            SELECT
+              COUNT(*) FILTER (WHERE status = 'done')                 AS done,
+              COUNT(*) FILTER (WHERE status = 'error')                AS error_cnt,
+              COUNT(*) FILTER (WHERE status IN ('pending','leased','fetching','ocr','llm'))
+                                                                       AS running,
+              COUNT(*)                                                 AS total
+            FROM archive_detect_files
+            WHERE batch_id = :bid
+        """)
+        res = await session.execute(stmt, {"bid": batch_id})
+        row = res.mappings().first()
+        if row is None:
+            return {"done": 0, "error": 0, "running": 0, "total": 0, "is_complete": True}
+        d = dict(row)
+        d["error"] = d.pop("error_cnt")
+        d["is_complete"] = (d["running"] == 0 and d["total"] > 0)
+        return d
+
+
+async def list_running_batch_ids() -> list[str]:
+    """主进程启动恢复用:查所有 status='running' 的 batch_id,重新启动 finalize 轮询。"""
+    async with async_session_maker() as session:
+        stmt = select(ArchiveDetectBatch.batch_id).where(
+            ArchiveDetectBatch.status == "running"
+        )
+        res = await session.execute(stmt)
+        return [r[0] for r in res.all()]
+
+
+async def get_batch_meta(batch_id: str) -> Optional[dict]:
+    """finalize 需要的 batch 元信息:criteria/progress_id/source_kind。"""
+    async with async_session_maker() as session:
+        stmt = select(ArchiveDetectBatch).where(ArchiveDetectBatch.batch_id == batch_id)
+        res = await session.execute(stmt)
+        b = res.scalar_one_or_none()
+        if not b:
+            return None
+        return {
+            "batch_id": b.batch_id,
+            "user_prompt": b.user_prompt,
+            "source_kind": b.source_kind,
+            "progress_id": b.progress_id,
+            "status": b.status,
+        }
+
+
+async def get_batch_files_simple(batch_id: str) -> list[dict]:
+    """finalize 时读 batch 内所有文件的判定结果(不含 ocr_text),用于 compute_overall。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(ArchiveDetectFile)
+            .where(ArchiveDetectFile.batch_id == batch_id)
+            .order_by(ArchiveDetectFile.idx)
+        )
+        res = await session.execute(stmt)
+        return [_file_to_dict(f) for f in res.scalars().all()]

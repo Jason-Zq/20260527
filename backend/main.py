@@ -59,6 +59,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# API 请求记录中间件(纯 ASGI,可安全读 body 并重放给下游)
+from middleware.request_log_middleware import RequestLogMiddleware
+app.add_middleware(RequestLogMiddleware)
+
 # 输出目录（统一用 output/）
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -100,7 +104,7 @@ _UPLOAD_CHUNK_SIZE = 64 * 1024  # 64KB 流式块
 # 10 个业务方同时打过来会瞬时 IO 洪水。这里串行化"接收"阶段,
 # 真正的 OCR 处理仍在文件级队列异步消化。
 # 超过此并发数时立即返回 429,业务方应当退避重试。
-UPLOAD_CONCURRENCY = int(os.getenv("UPLOAD_CONCURRENCY", "3"))
+UPLOAD_CONCURRENCY = int(os.getenv("UPLOAD_CONCURRENCY", "1"))
 _UPLOAD_SEMAPHORE: asyncio.Semaphore | None = None   # startup 时初始化(必须绑事件循环)
 
 
@@ -229,8 +233,9 @@ async def startup():
     asyncio.create_task(archive_detect_service.gc_loop())
     # 启动 temp/fetched/ 临时文件兜底清理(Windows 句柄延迟释放导致的残留)
     asyncio.create_task(file_fetcher.periodic_cleanup_task())
-    # 启动业务审核文件级队列 worker(进程内串行/小并发消化,防止 OCR 内存击穿)
-    await archive_detect_service.start_workers()
+    # 启动业务审核 watchdog + 恢复中断的 finalize 协程(方案二 2b: Worker 是独立进程)
+    # OCR Worker 进程通过 systemd doc-review-worker@{1,2,3} 独立启动,主进程不再托管
+    await archive_detect_service.start_background_tasks()
     # 初始化上传并发信号量(必须在 startup 内,绑当前 event loop)
     global _UPLOAD_SEMAPHORE
     _UPLOAD_SEMAPHORE = asyncio.Semaphore(UPLOAD_CONCURRENCY)
@@ -240,8 +245,9 @@ async def startup():
         event_service.CATEGORY_SERVICE_START,
         "API 服务启动完成",
         context={
-            "queue_workers": archive_detect_service.QUEUE_WORKERS,
             "queue_max": archive_detect_service.QUEUE_MAX_SIZE,
+            "single_batch_ratio": archive_detect_service.SINGLE_BATCH_RATIO,
+            "upload_concurrency": UPLOAD_CONCURRENCY,
         },
     )
 
@@ -255,9 +261,9 @@ async def shutdown():
         "API 服务关停",
     )
     try:
-        await archive_detect_service.stop_workers()
+        await archive_detect_service.stop_background_tasks()
     except Exception as e:
-        print(f"[shutdown] stop_workers 失败(忽略): {e}")
+        print(f"[shutdown] stop_background_tasks 失败(忽略): {e}")
     try:
         await file_fetcher.close_http_client()
     except Exception as e:
@@ -2119,6 +2125,20 @@ async def _split_cleanup_loop():
                 print(f"[event_gc] 清理 {deleted_events} 条 >30 天的事件")
         except Exception as e:
             print(f"[event_gc] 异常(忽略): {e}")
+        # 请求记录 GC:30 天
+        try:
+            from db import request_log_crud as _rlc
+            deleted_req = await _rlc.delete_request_logs_older_than(days=30)
+            if deleted_req:
+                print(f"[request_log_gc] 清理 {deleted_req} 条 >30 天的请求记录")
+                event_service.log_event(
+                    severity="info",
+                    category="gc.cleanup",
+                    message=f"清理 {deleted_req} 条 >30 天的请求记录",
+                    context={"table": "api_request_logs", "deleted": deleted_req, "days": 30},
+                )
+        except Exception as e:
+            print(f"[request_log_gc] 异常(忽略): {e}")
         await asyncio.sleep(inmem_gc_every)
 
 
@@ -2136,8 +2156,7 @@ async def file_summary(payload: FileSummaryPayload):
     - progress_name 必填：用户描述当前进展（如"美国EB5-资金来源证明"），AI 会判断文件是否属于该进展
     - 仅支持 http/https URL
     - 下载上限 50 MB
-    - 支持 PDF/PNG/JPG/JPEG/BMP/TIFF/WEBP/DOCX
-    - .doc 不支持，需转换为 .docx
+    - 支持 PDF/PNG/JPG/JPEG/BMP/TIFF/WEBP/DOC/DOCX
     """
     url = (payload.url or "").strip()
     progress_name = (payload.progress_name or "").strip()
@@ -2617,10 +2636,11 @@ async def archive_detect_history(
     summary="健康检查 - DB + 队列",
 )
 async def healthz():
-    """探针:DB 可达 + 队列 worker 运行中。供 nginx/k8s/外部监控调用。
+    """探针:DB 可达。供 nginx/k8s/外部监控调用。
 
     任一组件异常返回 503,nginx 健康检查会摘流。
-    queue_stats 即使 worker 没起来也不抛(it returns 0),所以单独检查 worker 数。
+    OCR Worker 是独立 systemd 进程(doc-review-worker@{1,2,3}),
+    各自有独立 health,不在本主进程探针范围内。
     """
     from sqlalchemy import text
     from db.engine import async_engine
@@ -2635,10 +2655,8 @@ async def healthz():
         db_error = f"{e.__class__.__name__}: {e}"
         problems.append(f"db: {db_error}")
 
-    # 2) Worker 必须至少 1 个在跑
+    # 2) Worker 状态(独立进程,通过 DB 间接观测;只在 stats 里报告,不作为 healthz fail 条件)
     stats = archive_detect_service.queue_stats()
-    if stats.get("workers", 0) < 1:
-        problems.append("workers: 0(队列 worker 未启动)")
 
     # DB 异常时记一条事件,但限频(避免 healthz 高频探针把事件表写爆)
     # _last_db_error_event_ts 在模块级初始化为 0.0;5 分钟内同一类异常只记一次
@@ -2672,14 +2690,14 @@ async def archive_detect_admin_queue_stats():
 
     用于:监控当前积压、worker 数、LLM 信号量余量、可用内存。
     返回值字段:
-      - queue_depth: 队列中待处理文件数
+      - queue_depth: DB 中待处理(pending+leased+fetching+ocr+llm)的文件数
       - queue_max:  队列上限(超过此值 submit 会 429)
-      - workers:    后台 worker 数
-      - in_flight_batches: 还在等 worker 处理完的批次数
+      - workers:    Worker 是独立 systemd 进程,这里返回 "see-systemd-status";真实数看 doc-review-worker@{1,2,3}
+      - in_flight_batches: 还在等 worker 处理完的批次数(主进程 finalize 协程数)
       - llm_semaphore_avail: LLM 信号量剩余槽位
       - free_memory_mb: 系统可用内存 MB(若安装了 psutil)
     """
-    stats = archive_detect_service.queue_stats()
+    stats = await archive_detect_service.queue_stats_async()
     # 可用内存:有 psutil 就上报,没有就略过
     try:
         import psutil
@@ -2764,6 +2782,45 @@ async def admin_event_categories():
     db_seen = await _event_crud.distinct_categories()
     merged = sorted(set(predefined) | set(db_seen))
     return {"categories": merged}
+
+
+@app.get(
+    "/api/admin/request-logs",
+    tags=["运维"],
+    summary="请求记录查询",
+)
+async def admin_list_request_logs(
+    source: Optional[str] = Query(None, description="business/admin/poll/other"),
+    method: Optional[str] = Query(None, description="GET/POST"),
+    path: Optional[str] = Query(None, description="路径片段模糊匹配"),
+    since: Optional[str] = Query(None, description="起始时间 YYYY-MM-DD HH:MM:SS"),
+    until: Optional[str] = Query(None, description="结束时间"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import request_log_crud as _rlc
+
+    def _parse_dt(s):
+        if not s:
+            return None
+        from datetime import datetime as _dt
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return _dt.strptime(s, fmt)
+            except ValueError:
+                continue
+        raise HTTPException(status_code=400, detail=f"非法时间格式: {s}")
+
+    items, total = await _rlc.list_request_logs(
+        source=source,
+        method=method,
+        path_contains=path,
+        since=_parse_dt(since),
+        until=_parse_dt(until),
+        limit=limit,
+        offset=offset,
+    )
+    return {"items": items, "total": total}
 
 
 @app.get(
@@ -2912,42 +2969,11 @@ async def archive_detect_business_batch_upload(
     progress_payload: str = Form(..., description="进展信息 JSON 字符串,示例:{\"progress_oid\":\"POID_001\",\"handler\":\"李顾问\"}"),
     items_payload: str = Form(..., description="文件元信息 JSON 数组,顺序与 files 对应,示例:[{\"file_id\":\"F001\",\"filename\":\"护照.pdf\"}]"),
 ):
-    """业务方批量提交进展包(multipart + 本地上传模式)。
-
-    Form 字段:
-      - criteria: str
-      - stage: "pre_submit" | "post_submit" (默认 post_submit)
-      - client_payload: JSON {client_code, name}
-      - progress_payload: JSON {progress_oid, handler, ...}
-      - items_payload: JSON 数组 [{file_id, filename}, ...] 与 files 一一对应
-      - files: List[UploadFile]
-    """
-    if stage not in ("pre_submit", "post_submit"):
-        raise HTTPException(status_code=400, detail=f"非法 stage: {stage}")
-
-    # 上传并发硬上限:非阻塞抢信号量,抢不到立即 429,避免连接堆积
-    if _UPLOAD_SEMAPHORE is None:
-        raise HTTPException(status_code=503, detail="服务尚未就绪")
-    try:
-        # 非阻塞获取:能抢就立即进,抢不到立刻抛出
-        await asyncio.wait_for(_UPLOAD_SEMAPHORE.acquire(), timeout=0.01)
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "upload_busy",
-                "message": f"服务繁忙(上传并发上限={UPLOAD_CONCURRENCY}),请 30 秒后重试",
-                "retry_after": 30,
-            },
-            headers={"Retry-After": "30"},
-        )
-
-    try:
-        return await _archive_detect_business_batch_upload_impl(
-            files, criteria, stage, client_payload, progress_payload, items_payload,
-        )
-    finally:
-        _UPLOAD_SEMAPHORE.release()
+    """本地上传模式已停用。请先上传到 OSS,再调用 URL 模式提交。"""
+    raise HTTPException(
+        status_code=410,
+        detail="本地上传模式已停用，请先上传到 OSS 后调用 /api/archive-detect/business/batch 提交 URL",
+    )
 
 
 async def _archive_detect_business_batch_upload_impl(

@@ -473,6 +473,7 @@ class ArchiveDetectFile(Base):
 
     # 文件来源
     source_url = Column(Text, nullable=True, comment="URL 模式下的原始 URL")
+    local_path = Column(Text, nullable=True, comment="upload 模式下的本地文件路径(worker 直读)")
     filename = Column(String(500), nullable=True)
     mime_type = Column(String(100), nullable=True)
 
@@ -492,9 +493,15 @@ class ArchiveDetectFile(Base):
 
     # 状态机
     status = Column(String(20), default="pending", nullable=False,
-                    comment="pending|fetching|ocr|llm|done|error")
+                    comment="pending|leased|fetching|ocr|llm|done|error")
     error_msg = Column(Text, nullable=True)
     elapsed_sec = Column(Numeric(8, 2), nullable=True)
+
+    # Worker lease (方案二 2b: 多 worker 进程通过 DB 抢任务)
+    worker_lease_until = Column(DateTime, nullable=True,
+                                comment="worker 抢到后写入,超时则 watchdog 回收")
+    retry_count = Column(Integer, default=0, nullable=False,
+                         comment="worker 失败后的重试次数,>= 1 时不再 retry")
 
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
@@ -601,3 +608,23 @@ class SystemEvent(Base):
 
     def __repr__(self):
         return f"<SystemEvent(id={self.id}, severity={self.severity}, category={self.category})>"
+
+
+class ApiRequestLog(Base):
+    """API 请求记录。middleware 自动拦截 /api/archive-detect/* 写入,保留 30 天。"""
+    __tablename__ = "api_request_logs"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    source = Column(String(20), default="other", nullable=False, comment="business/admin/poll/other")
+    method = Column(String(10), nullable=False, comment="GET/POST")
+    path = Column(String(300), nullable=False, comment="请求路径")
+    client_ip = Column(String(45), nullable=True)
+    request_body = Column(JSONB, nullable=True, comment="传参 JSON(multipart 只存元数据)")
+    response_status = Column(Integer, nullable=True, comment="HTTP 状态码")
+    elapsed_ms = Column(Integer, nullable=True, comment="请求耗时毫秒")
+
+    __table_args__ = (
+        Index("ix_request_logs_created", created_at.desc()),
+        Index("ix_request_logs_path", "path", created_at.desc()),
+    )
