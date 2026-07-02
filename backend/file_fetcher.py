@@ -208,9 +208,19 @@ async def refresh_download_url(file_id: str, type_: str = None) -> tuple[str, di
     timeout_sec = int(cfg.get("timeout_sec") or 20)
     timeout = httpx.Timeout(timeout_sec, connect=min(timeout_sec, 10))
 
+    # 业务方接口要求带登录人/操作人/来源标识,否则返回"没有登陆人不可查看或者下载文件"。
+    # 值可在 config.json.file_url_service 覆盖,否则用默认值。
+    params = {
+        "file_id": file_id,
+        "type": type_value,
+        "usr_login": cfg.get("usr_login") or "Jason邹启",
+        "operation_user": cfg.get("operation_user") or "Jason邹启",
+        "url": cfg.get("url") or "batch",
+    }
+
     # 复用全局 client(它有自己的较长 timeout),刷新 URL 的请求级别 timeout 用 client.get 的 timeout 覆盖
     client = await get_http_client()
-    resp = await client.get(base_url, params={"file_id": file_id, "type": type_value}, timeout=timeout)
+    resp = await client.get(base_url, params=params, timeout=timeout)
     resp.raise_for_status()
     payload = resp.json()
 

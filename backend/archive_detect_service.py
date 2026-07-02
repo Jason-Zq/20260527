@@ -21,7 +21,6 @@ import os
 import asyncio
 import time
 import secrets
-import shutil
 from datetime import datetime
 from typing import Optional
 
@@ -40,13 +39,8 @@ MAX_FILES_PER_BATCH = int(os.getenv("ARCHIVE_DETECT_MAX_FILES_PER_BATCH", "50"))
 LLM_CONCURRENCY = 3
 RESULT_TTL_HOURS = 6                         # 内存结果保留 6 小时
 
-# 全局 pending 队列上限(查 DB 得到的 pending 数,超过即 429)
+# 全局 pending 队列深度(仅供 /admin/queue-stats、/healthz 只读监控展示)
 QUEUE_MAX_SIZE = int(os.getenv("ARCHIVE_DETECT_QUEUE_MAX", "200"))
-# 单批次最多占队列容量比例,避免一个大批次饿死其他客户
-SINGLE_BATCH_RATIO = float(os.getenv("ARCHIVE_DETECT_SINGLE_BATCH_RATIO", "0.3"))
-# 准入控制阈值
-MIN_FREE_MEMORY_MB = int(os.getenv("ARCHIVE_DETECT_MIN_FREE_MEMORY_MB", "500"))
-MIN_FREE_DISK_GB = int(os.getenv("ARCHIVE_DETECT_MIN_FREE_DISK_GB", "5"))
 
 # 内存态:供前端轮询 fast-path(数据全部在 DB,这里只是热缓存)
 _batch_status: dict[str, dict] = {}
@@ -58,19 +52,6 @@ _LLM_SEMAPHORE = asyncio.Semaphore(LLM_CONCURRENCY)
 _finalize_tasks: dict[str, asyncio.Task] = {}      # batch_id → finalize task
 _watchdog_task: Optional[asyncio.Task] = None
 _should_stop = False
-
-
-class QueueFullError(Exception):
-    """提交时队列水位超限/资源不足,业务方应稍后重试。"""
-    def __init__(self, queue_depth: int = 0, queue_max: int = 0,
-                 retry_after: int = 60, reason: str = "queue_full"):
-        super().__init__(
-            f"服务繁忙: {reason} (depth={queue_depth}/{queue_max}),请 {retry_after} 秒后重试"
-        )
-        self.queue_depth = queue_depth
-        self.queue_max = queue_max
-        self.retry_after = retry_after
-        self.reason = reason
 
 
 # ==================== 工具 ====================
@@ -496,9 +477,6 @@ WATCHDOG_INTERVAL_SECONDS = 30
 # Finalize 轮询周期(秒):查 batch 是否全部终态
 FINALIZE_POLL_INTERVAL_SECONDS = 3
 
-# Finalize 最长等待(秒):防止异常情况下协程永远跑(2 小时 = 大批次 + 慢 OCR + 重试)
-FINALIZE_MAX_WAIT_SECONDS = 2 * 3600
-
 
 async def start_background_tasks() -> None:
     """主进程 startup 调用:
@@ -593,7 +571,6 @@ async def _resume_running_batches() -> None:
 
 async def _batch_finalize_poll(batch_id: str) -> None:
     """周期查 batch 进度,所有文件终态后生成总报告并 update_batch_status('done')。"""
-    start_ts = time.time()
     try:
         while not _should_stop:
             try:
@@ -605,15 +582,6 @@ async def _batch_finalize_poll(batch_id: str) -> None:
 
             if progress["is_complete"]:
                 break
-
-            # 超时保护
-            if time.time() - start_ts > FINALIZE_MAX_WAIT_SECONDS:
-                print(f"[finalize:{batch_id}] 超 {FINALIZE_MAX_WAIT_SECONDS}s 未完成,放弃轮询")
-                try:
-                    await crud.update_batch_status(batch_id, "error", "处理超时(2小时未完成)")
-                except Exception:
-                    pass
-                return
 
             await asyncio.sleep(FINALIZE_POLL_INTERVAL_SECONDS)
 
@@ -688,12 +656,19 @@ async def _generate_batch_overall(batch_id: str) -> None:
         state["overall_verdict"] = overall_verdict
         state["overall_score"] = overall_score
         state["overall_reason"] = overall_reason
+        state["done_files"] = len(done_items)
         state["status"] = "done"
 
     try:
         await crud.update_batch_overall(batch_id, overall_verdict, overall_score, overall_reason)
     except Exception as e:
         print(f"[finalize:{batch_id}] DB update_batch_overall 失败(忽略): {e}")
+    # worker 路径不调 bump_done_count,done_files 会停在初始值(reused_count)。
+    # 这里用真实 done 数回填,保证前端"进度"列 done_files/total_files 正确。
+    try:
+        await crud.reset_done_count(batch_id, len(done_items))
+    except Exception as e:
+        print(f"[finalize:{batch_id}] DB reset_done_count 失败(忽略): {e}")
     try:
         await crud.update_batch_status(batch_id, "done")
     except Exception as e:
@@ -748,39 +723,6 @@ async def queue_stats_async() -> dict:
     }
 
 
-def _check_admission() -> None:
-    """submit 入口的资源准入检查。任一不满足抛 QueueFullError。"""
-    # 1) 内存
-    try:
-        import psutil
-        free_mb = psutil.virtual_memory().available / (1024 * 1024)
-        if free_mb < MIN_FREE_MEMORY_MB:
-            raise QueueFullError(
-                retry_after=60,
-                reason=f"low_memory({int(free_mb)}MB<{MIN_FREE_MEMORY_MB}MB)",
-            )
-    except QueueFullError:
-        raise
-    except Exception:
-        # psutil 没装或异常,不阻塞
-        pass
-
-    # 2) 磁盘(检查 output/temp 所在分区)
-    try:
-        root = os.path.dirname(os.path.abspath(__file__))
-        # 通常 backend/ 旁边的根目录就是项目根,磁盘和 output/temp 同分区
-        free_gb = shutil.disk_usage(root).free / (1024 ** 3)
-        if free_gb < MIN_FREE_DISK_GB:
-            raise QueueFullError(
-                retry_after=300,
-                reason=f"low_disk({free_gb:.1f}GB<{MIN_FREE_DISK_GB}GB)",
-            )
-    except QueueFullError:
-        raise
-    except Exception:
-        pass
-
-
 # ==================== 业务接口:提交批次 ====================
 async def submit_business_batch(
     *,
@@ -795,9 +737,6 @@ async def submit_business_batch(
     stage: pre_submit(递交前) | post_submit(递交后),透传给 LLM 用作分类阶段感知。
     返回 {batch_id, progress_id, total_files, reused_count, new_count}。
     """
-    # 0) 资源准入(内存/磁盘),不满足立即 429
-    _check_admission()
-
     # 1) 基本校验
     if not criteria or not criteria.strip():
         raise ValueError("criteria 不能为空")
@@ -853,48 +792,6 @@ async def submit_business_batch(
             "reuse_from": existing,
             "version": (existing["version"] if existing else 1),
         })
-
-    # 3.5) 水位线检查:
-    #      - 单批最多占总水位 SINGLE_BATCH_RATIO(默 30%),避免大批次饿死其他客户
-    #      - 当前 pending + new_count 超总水位也拒
-    new_count = sum(1 for p in items_plan if not p.get("reuse_from"))
-
-    single_batch_max = int(QUEUE_MAX_SIZE * SINGLE_BATCH_RATIO)
-    if new_count > single_batch_max:
-        event_service.log_event(
-            event_service.WARN,
-            event_service.CATEGORY_BATCH_QUEUE_FULL,
-            f"单批新文件数 {new_count} 超过单批上限 {single_batch_max},拒绝",
-            context={
-                "client_code": client_code,
-                "new_count": new_count,
-                "single_batch_max": single_batch_max,
-            },
-        )
-        raise QueueFullError(
-            queue_max=single_batch_max, retry_after=60, reason="batch_too_large"
-        )
-
-    if new_count > 0:
-        try:
-            pending_now = await crud.count_pending_files()
-        except Exception:
-            pending_now = 0
-        if pending_now + new_count > QUEUE_MAX_SIZE:
-            event_service.log_event(
-                event_service.WARN,
-                event_service.CATEGORY_BATCH_QUEUE_FULL,
-                f"全局水位已满(pending={pending_now}+new={new_count} > max={QUEUE_MAX_SIZE})",
-                context={
-                    "client_code": client_code,
-                    "pending": pending_now,
-                    "new_count": new_count,
-                    "queue_max": QUEUE_MAX_SIZE,
-                },
-            )
-            raise QueueFullError(
-                queue_depth=pending_now, queue_max=QUEUE_MAX_SIZE, retry_after=60,
-            )
 
     # 4) 生成 batch_id + 创建 DB 记录(含 reuse 项直接 done,new 项 status='pending')
     batch_id = gen_batch_id()
@@ -1175,7 +1072,8 @@ async def _process_one_recheck(
                 )
                 if refresh_info:
                     print(f"[archive_detect:{batch_id}:{idx}] URL 已过期,已用 file_id={item.get('file_id')} 刷新下载地址")
-                filename = fname or filename
+                # 业务方传的 filename 是权威可读名,优先保留;下载推断名仅在业务方没传时兜底
+                filename = filename or fname
                 mime_type = mtype
             except file_fetcher.FileTooLargeError:
                 raise ValueError("文件超过 50MB 上限,无法处理")
@@ -1318,3 +1216,152 @@ async def _finalize_overall_for_batch(batch_id: str, criteria: str) -> None:
         await crud.update_batch_status(batch_id, "done")
     except Exception as e:
         print(f"[archive_detect:{batch_id}] DB recheck update_batch_status 失败(忽略): {e}")
+
+
+async def rerun_batch_inplace(
+    *,
+    batch_id: str,
+    criteria: str,
+    stage: Optional[str] = None,
+    force_all: bool = False,
+) -> dict:
+    """原地重跑批次:复用已有结果,只补跑缺失的。
+
+    Args:
+        force_all: True = 无视已有 AI 结果,全部用新 criteria 重跑 AI。
+                   False = 有 AI 结果的跳过,只补跑缺失的。
+    """
+    if not criteria or not criteria.strip():
+        raise ValueError("判定提示词不能为空")
+    if stage not in (None, "pre_submit", "post_submit"):
+        raise ValueError(f"非法 stage: {stage}")
+
+    source = await crud.get_batch_files_for_recheck(batch_id)
+    if not source:
+        raise ValueError(f"批次 {batch_id} 不存在")
+    files = source.get("files") or []
+    if not files:
+        raise ValueError(f"批次 {batch_id} 没有文件")
+
+    # 筛选要重跑的文件
+    items_plan = []
+    ai_only_count = 0
+    ocr_count = 0
+    skipped_count = 0
+    for f in files:
+        has_ocr = bool(f.get("ocr_text"))
+        has_ai = bool(f.get("verdict")) and f.get("status") == "done"
+
+        if has_ai and not force_all:
+            skipped_count += 1
+            continue
+
+        needs_ocr = not has_ocr
+        if needs_ocr:
+            ocr_count += 1
+        else:
+            ai_only_count += 1
+        items_plan.append({
+            "source_file_id": f.get("id"),
+            "idx": f.get("idx"),
+            "file_id": f.get("file_id"),
+            "filename": f.get("filename"),
+            "source_url": f.get("source_url"),
+            "ocr_text": f.get("ocr_text"),
+            "needs_ocr": needs_ocr,
+            "progress_id": f.get("progress_id"),
+            "version": f.get("version") or 1,
+            "mime_type": f.get("mime_type"),
+        })
+
+    if not items_plan:
+        return {
+            "batch_id": batch_id,
+            "total_files": len(files),
+            "ai_only_count": 0,
+            "ocr_count": 0,
+            "skipped_count": skipped_count,
+            "mode": "no-op",
+        }
+
+    # 更新批次状态和提示词
+    await crud.update_batch_status(batch_id, "running")
+    await crud.update_batch_criteria(batch_id, criteria.strip())
+
+    # 重建内存态:历史批次不在内存里,必须从 DB 全量 seed,
+    # 否则 _set_file_state 找不到状态、_finalize_overall_for_batch 拿不到
+    # done 文件,总体判断会被写成默认 mismatch/0/""。
+    rerun_idxs = {p["idx"] for p in items_plan}
+    seeded_files = []
+    for f in files:
+        idx = f.get("idx")
+        is_rerun = idx in rerun_idxs
+        seeded_files.append({
+            "idx": idx,
+            "file_id": f.get("file_id"),
+            "filename": f.get("filename"),
+            "source_url": f.get("source_url"),
+            "version": f.get("version") or 1,
+            "page_count": None if is_rerun else f.get("page_count"),
+            "char_count": None if is_rerun else f.get("char_count"),
+            "elapsed_sec": None if is_rerun else f.get("elapsed_sec"),
+            "error_msg": None if is_rerun else f.get("error_msg"),
+            "mime_type": f.get("mime_type"),
+            # 重跑的文件重置为 pending,跳过的保留原终态和结果
+            "status": "pending" if is_rerun else f.get("status"),
+            "verdict": None if is_rerun else f.get("verdict"),
+            "match_score": None if is_rerun else f.get("match_score"),
+            "is_archival": None if is_rerun else f.get("is_archival"),
+            "confidence": None if is_rerun else f.get("confidence"),
+            "reason": None if is_rerun else f.get("reason"),
+            "key_points": [] if is_rerun else (f.get("key_points") or []),
+            "doc_category": None if is_rerun else f.get("doc_category"),
+            "is_reused": False,
+        })
+    done_kept = sum(1 for f in seeded_files if f["status"] == "done")
+    # DB done_files 重置为保留数,防止 bump_done_count 从旧总数继续累加
+    await crud.reset_done_count(batch_id, done_kept)
+    _batch_status[batch_id] = {
+        "batch_id": batch_id,
+        "user_prompt": criteria.strip(),
+        "criteria": criteria.strip(),
+        "stage": stage,
+        "source_kind": source.get("source_kind") or "batch",
+        "total_files": len(seeded_files),
+        "done_files": done_kept,
+        "status": "running",
+        "error": None,
+        "overall_verdict": None,
+        "overall_score": None,
+        "overall_reason": None,
+        "client": source.get("client"),
+        "progress": source.get("progress"),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "created_ts": time.time(),
+        "files": seeded_files,
+    }
+
+    # 启动重跑
+    asyncio.create_task(_orchestrate_rerun(batch_id, criteria.strip(), stage, items_plan))
+
+    mode = "business" if source.get("progress") or source.get("client") else "quick"
+    return {
+        "batch_id": batch_id,
+        "total_files": len(files),
+        "ai_only_count": ai_only_count,
+        "ocr_count": ocr_count,
+        "skipped_count": skipped_count,
+        "mode": mode,
+    }
+
+
+async def _orchestrate_rerun(batch_id: str, criteria: str, stage: Optional[str], items_plan: list[dict]):
+    """原地重跑执行编排。复用 _process_one_recheck 逻辑。"""
+    try:
+        tasks = [
+            asyncio.create_task(_process_one_recheck(batch_id, p["idx"], p, criteria, stage))
+            for p in items_plan
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await _finalize_overall_for_batch(batch_id, criteria)

@@ -75,7 +75,8 @@ async def _process_one_file(task: dict, worker_id: str) -> None:
                 local_path, fname, mtype, refresh_info = await file_fetcher.fetch_url_to_temp_with_refresh(
                     source_url, file_id=task.get("file_id"),
                 )
-                filename = fname or filename
+                # 业务方传的 filename 是权威可读名,优先保留;下载推断名仅在业务方没传时兜底
+                filename = filename or fname
                 mime_type = mtype
                 if refresh_info:
                     print(f"[{worker_id}:{batch_id}:{idx}] URL 已刷新")

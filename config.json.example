@@ -16,6 +16,9 @@
     "enabled": true,
     "base_url": "https://restful.huanqiuyimin.com/Cloud/getFileDownloadUrl",
     "default_type": "preview",
+    "usr_login": "Jason邹启",
+    "operation_user": "Jason邹启",
+    "url": "batch",
     "timeout_sec": 20
   },
   "max_ocr_pages": 5,

@@ -325,6 +325,22 @@ export async function recheckArchiveDetectBatch(batchId, criteria, stage = null)
   return r.data
 }
 
+/**
+ * 原地重跑批次：复用已有结果，只补跑缺失的
+ * @param {string} batchId 批次 ID
+ * @param {string} criteria 当前判定提示词
+ * @param {string|null} stage pre_submit | post_submit | null
+ * @param {boolean} forceAll 是否无视已有 AI 结果，全部用新 criteria 重跑
+ */
+export async function rerunArchiveDetectBatch(batchId, criteria, stage = null, forceAll = false) {
+  const r = await axios.post(
+    `${API_BASE}/archive-detect/rerun/${batchId}?force_all=${forceAll}`,
+    { criteria, stage },
+    { timeout: 60000 },
+  )
+  return r.data
+}
+
 // ==================== 客户档案结构化生成 ====================
 
 export async function listClientProfileSourceFiles(clientId) {

@@ -14,6 +14,7 @@
     <div class="admin-main">
       <section class="card filter-card">
         <div class="filter-grid">
+          <el-input v-model="filters.batch_id" clearable placeholder="批次 ID" size="small" />
           <el-select v-model="filters.status" clearable placeholder="状态" size="small">
             <el-option label="进行中" value="running" />
             <el-option label="完成" value="done" />
@@ -87,9 +88,15 @@
           <el-table-column label="创建时间" width="160">
             <template #default="{ row }"><span class="dim mono">{{ row.created_at }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="90" align="center" fixed="right">
+          <el-table-column label="操作" width="140" align="center" fixed="right">
             <template #default="{ row }">
               <el-button size="small" type="primary" link @click="selectBatch(row)">详情</el-button>
+              <el-button
+                size="small"
+                type="warning"
+                link
+                @click.stop="openRerun(row)"
+              >重审</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -187,6 +194,36 @@
         </template>
       </div>
     </el-dialog>
+
+    <el-dialog v-model="rerunDialogVisible" title="重新审核" width="560px">
+      <div v-if="rerunTarget" class="rerun-body">
+        <div class="rerun-tip">
+          原地重跑批次 <span class="mono">{{ rerunTarget.batch_id }}</span>：
+          <br />• 有 OCR 文本的跳过 OCR，无 OCR 但有 URL 的重新 OCR
+          <br />• 有 AI 结果的默认跳过（可勾选「全部重跑」强制用新标准重跑）
+          <br />• 缺少的部分补跑
+        </div>
+        <el-form label-position="top">
+          <el-form-item label="判定提示词（criteria）">
+            <el-input
+              v-model="rerunCriteria"
+              type="textarea"
+              :rows="6"
+              placeholder="重新审核使用的判定提示词，不能为空"
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="rerunForceAll">
+              全部重跑（无视已有 AI 结果，全部用新标准重跑）
+            </el-checkbox>
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="rerunDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="rerunSubmitting" @click="submitRerun">提交重跑</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -199,6 +236,7 @@ import {
   getArchiveAdminFileDetail,
   pollBusinessBatch,
   pollArchiveDetect,
+  rerunArchiveDetectBatch,
 } from '../api.js'
 
 const loading = ref(false)
@@ -214,9 +252,16 @@ const fileDetail = ref(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
 
+const rerunDialogVisible = ref(false)
+const rerunTarget = ref(null)
+const rerunCriteria = ref('')
+const rerunForceAll = ref(false)
+const rerunSubmitting = ref(false)
+
 const filters = ref({
   status: '',
   source_kind: '',
+  batch_id: '',
   client_name: '',
   client_code: '',
   progress_oid: '',
@@ -263,6 +308,7 @@ function resetFilters() {
   filters.value = {
     status: '',
     source_kind: '',
+    batch_id: '',
     client_name: '',
     client_code: '',
     progress_oid: '',
@@ -321,6 +367,44 @@ async function openFileDetail(row) {
     ElMessage.error('加载文件详情失败：' + (err.response?.data?.detail || err.message))
   } finally {
     fileLoading.value = false
+  }
+}
+
+async function openRerun(row) {
+  rerunTarget.value = row
+  rerunCriteria.value = row.user_prompt || row.criteria || ''
+  rerunForceAll.value = false
+  rerunDialogVisible.value = true
+}
+
+async function submitRerun() {
+  if (!rerunCriteria.value.trim()) {
+    ElMessage.warning('判定提示词不能为空')
+    return
+  }
+  rerunSubmitting.value = true
+  try {
+    const resp = await rerunArchiveDetectBatch(
+      rerunTarget.value.batch_id,
+      rerunCriteria.value.trim(),
+      null,  // stage
+      rerunForceAll.value || false,
+    )
+    if (resp.mode === 'no-op') {
+      ElMessage.info('所有文件已有完整结果，无需重跑')
+    } else {
+      const msg = resp.skipped_count > 0
+        ? `已启动重跑:${resp.ai_only_count} 个复用 OCR,${resp.ocr_count} 个需 OCR,${resp.skipped_count} 个跳过`
+        : `已启动重跑:${resp.ai_only_count} 个复用 OCR,${resp.ocr_count} 个需 OCR`
+      ElMessage.success(msg)
+    }
+    rerunDialogVisible.value = false
+    loadBatches()
+  } catch (err) {
+    const msg = err.response?.data?.detail || err.message || '重跑失败'
+    ElMessage.error('重跑失败:' + msg)
+  } finally {
+    rerunSubmitting.value = false
   }
 }
 

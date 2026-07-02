@@ -220,6 +220,30 @@ async def update_batch_status(batch_id: str, status: str, error: Optional[str] =
         await session.commit()
 
 
+async def update_batch_criteria(batch_id: str, criteria: str) -> None:
+    """更新批次的判定提示词（原地重审用）。"""
+    async with async_session_maker() as session:
+        stmt = (
+            sa_update(ArchiveDetectBatch)
+            .where(ArchiveDetectBatch.batch_id == batch_id)
+            .values(user_prompt=criteria, updated_at=datetime.now())
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+
+async def reset_done_count(batch_id: str, done_files: int) -> None:
+    """把 done_files 重置为绝对值（原地重审起跑时用，避免 bump 从旧总数继续累加）。"""
+    async with async_session_maker() as session:
+        stmt = (
+            sa_update(ArchiveDetectBatch)
+            .where(ArchiveDetectBatch.batch_id == batch_id)
+            .values(done_files=done_files, updated_at=datetime.now())
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+
 async def get_batch(batch_id: str) -> Optional[dict]:
     """返回 batch + 所有 files（按 idx 排序）。
 
@@ -697,6 +721,7 @@ async def admin_list_batches(
     *,
     status: Optional[str] = None,
     source_kind: Optional[str] = None,
+    batch_id: Optional[str] = None,
     client_code: Optional[str] = None,
     client_name: Optional[str] = None,
     progress_oid: Optional[str] = None,
@@ -725,6 +750,8 @@ async def admin_list_batches(
             conditions.append(ArchiveDetectBatch.status == status)
         if source_kind:
             conditions.append(ArchiveDetectBatch.source_kind == source_kind)
+        if batch_id:
+            conditions.append(ArchiveDetectBatch.batch_id.ilike(f"%{batch_id}%"))
         if client_code:
             conditions.append(Client.client_code.ilike(f"%{client_code}%"))
         if client_name:
@@ -753,6 +780,7 @@ async def admin_list_batches(
                 "batch_id": b.batch_id,
                 "source_kind": b.source_kind,
                 "status": b.status,
+                "user_prompt": b.user_prompt,
                 "total_files": b.total_files,
                 "done_files": b.done_files,
                 "overall_verdict": b.overall_verdict,

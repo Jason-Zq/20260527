@@ -246,7 +246,6 @@ async def startup():
         "API 服务启动完成",
         context={
             "queue_max": archive_detect_service.QUEUE_MAX_SIZE,
-            "single_batch_ratio": archive_detect_service.SINGLE_BATCH_RATIO,
             "upload_concurrency": UPLOAD_CONCURRENCY,
         },
     )
@@ -2459,11 +2458,22 @@ class ArchiveDetectRecheckResponse(BaseModel):
     mode: str = Field(..., description="原批次模式:business=业务审核,quick=快速检测")
 
 
+class ArchiveDetectRerunResponse(BaseModel):
+    """原地重跑提交后返回。"""
+    batch_id: str = Field(..., description="重跑的批次 ID(原地,不新建)")
+    total_files: int = Field(..., description="批次文件总数")
+    ai_only_count: int = Field(..., description="已有 OCR 文本、只重新跑 AI 的文件数")
+    ocr_count: int = Field(..., description="缺少 OCR 文本、需要重新下载/OCR 的文件数")
+    skipped_count: int = Field(..., description="已有 AI 结果、本次跳过的文件数")
+    mode: str = Field(..., description="批次模式:business=业务审核,quick=快速检测,no-op=无需重跑")
+
+
 class ArchiveDetectAdminBatchItem(BaseModel):
     """后台管理批次列表项。"""
     batch_id: str = Field(..., description="批次 ID")
     source_kind: str = Field(..., description="来源类型:upload/url/batch/recheck")
     status: str = Field(..., description="批次状态:running/done/error")
+    user_prompt: Optional[str] = Field(None, description="判定提示词/审核标准(重审预填用)")
     total_files: int = Field(..., description="文件总数")
     done_files: int = Field(..., description="已完成文件数")
     overall_verdict: Optional[str] = Field(None, description="批次总体判断")
@@ -2832,6 +2842,7 @@ async def admin_list_request_logs(
 async def archive_detect_admin_batches(
     status: Optional[str] = Query(None, description="批次状态筛选:running/done/error"),
     source_kind: Optional[str] = Query(None, description="来源筛选:upload/url/batch/recheck"),
+    batch_id: Optional[str] = Query(None, description="批次 ID 模糊查询"),
     client_code: Optional[str] = Query(None, description="客户编码模糊查询"),
     client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
     progress_oid: Optional[str] = Query(None, description="进展 OID 模糊查询"),
@@ -2851,6 +2862,7 @@ async def archive_detect_admin_batches(
     return await archive_detect_crud.admin_list_batches(
         status=status,
         source_kind=source_kind,
+        batch_id=batch_id,
         client_code=client_code,
         client_name=client_name,
         progress_oid=progress_oid,
@@ -2938,18 +2950,6 @@ async def archive_detect_business_batch(payload: BusinessBatchPayload):
             progress_payload=payload.progress.model_dump(),
             items=[it.model_dump() for it in payload.items],
         )
-    except archive_detect_service.QueueFullError as e:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "queue_full",
-                "message": str(e),
-                "queue_depth": e.queue_depth,
-                "queue_max": e.queue_max,
-                "retry_after": e.retry_after,
-            },
-            headers={"Retry-After": str(e.retry_after)},
-        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result
@@ -3029,25 +3029,6 @@ async def _archive_detect_business_batch_upload_impl(
             progress_payload=progress_obj,
             items=items_with_path,
         )
-    except archive_detect_service.QueueFullError as e:
-        # 队列满时清理已落盘文件,避免占用磁盘
-        for p in saved_paths:
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except OSError:
-                pass
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "queue_full",
-                "message": str(e),
-                "queue_depth": e.queue_depth,
-                "queue_max": e.queue_max,
-                "retry_after": e.retry_after,
-            },
-            headers={"Retry-After": str(e.retry_after)},
-        )
     except ValueError as e:
         # 校验失败时清理已落盘文件
         for p in saved_paths:
@@ -3108,6 +3089,34 @@ async def archive_detect_recheck(
             source_batch_id=batch_id,
             criteria=payload.criteria,
             stage=payload.stage,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post(
+    "/api/archive-detect/rerun/{batch_id}",
+    tags=["文件留底检测"],
+    summary="原地重跑 - 复用已有结果,只补跑缺失的",
+    response_model=ArchiveDetectRerunResponse,
+)
+async def archive_detect_rerun(
+    payload: ArchiveDetectRecheckPayload,
+    batch_id: str = Path(..., description="要重跑的批次 ID"),
+    force_all: bool = Query(False, description="是否无视已有 AI 结果,全部用新 criteria 重跑"),
+):
+    """原地重跑批次:
+    - 有 OCR 文本的跳过 OCR
+    - 有 AI 结果的默认跳过(force_all=False)
+    - 缺失的部分补跑
+    - 用新 criteria 更新批次提示词
+    """
+    try:
+        return await archive_detect_service.rerun_batch_inplace(
+            batch_id=batch_id,
+            criteria=payload.criteria,
+            stage=payload.stage,
+            force_all=force_all,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
