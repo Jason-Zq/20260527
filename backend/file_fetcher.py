@@ -51,7 +51,9 @@ async def get_http_client() -> httpx.AsyncClient:
         _http_client = httpx.AsyncClient(
             follow_redirects=True,
             timeout=httpx.Timeout(DOWNLOAD_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            # 连接池不设上限:并发保护交给上层下载信号量(archive_detect_service._DOWNLOAD_SEMAPHORE),
+            # 避免连接池排队把请求算进 connect 超时而误报"连接超时"。
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=10),
         )
         return _http_client
 
@@ -189,6 +191,22 @@ def _is_expired_url_error(exc: Exception) -> bool:
     return False
 
 
+def _log_external_api(*, service, url, params, response, status, error_msg, elapsed_ms, file_id):
+    """fire-and-forget 记录出站外部接口调用。任何异常都吞掉,绝不影响业务调用。"""
+    try:
+        from db import external_api_log_crud as _crud
+        asyncio.create_task(_crud.insert_external_api_log(
+            service=service, url=url,
+            request_params=params if isinstance(params, dict) else {"_value": params},
+            response_summary=response if isinstance(response, dict) else ({"_value": response} if response is not None else None),
+            status=status, error_msg=error_msg, elapsed_ms=elapsed_ms,
+            file_id=file_id,
+        ))
+    except Exception:
+        pass
+
+
+
 async def refresh_download_url(file_id: str, type_: str = None) -> tuple[str, dict]:
     """用业务方 file_id 获取新的 OSS 临时下载地址。
 
@@ -220,16 +238,30 @@ async def refresh_download_url(file_id: str, type_: str = None) -> tuple[str, di
 
     # 复用全局 client(它有自己的较长 timeout),刷新 URL 的请求级别 timeout 用 client.get 的 timeout 覆盖
     client = await get_http_client()
-    resp = await client.get(base_url, params=params, timeout=timeout)
-    resp.raise_for_status()
-    payload = resp.json()
+    t0 = time.time()
+    try:
+        resp = await client.get(base_url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        payload = resp.json()
 
-    if payload.get("ret") != 200 or payload.get("code") != 0:
-        raise ValueError(f"刷新下载地址失败: {payload.get('msg') or payload}")
-    data = payload.get("data") or {}
-    file_url = data.get("file_url")
-    if not file_url:
-        raise ValueError("刷新下载地址响应缺少 data.file_url")
+        if payload.get("ret") != 200 or payload.get("code") != 0:
+            raise ValueError(f"刷新下载地址失败: {payload.get('msg') or payload}")
+        data = payload.get("data") or {}
+        file_url = data.get("file_url")
+        if not file_url:
+            raise ValueError("刷新下载地址响应缺少 data.file_url")
+    except Exception as e:
+        _log_external_api(
+            service="refresh_url", url=base_url, params=params,
+            response=None, status="error", error_msg=str(e),
+            elapsed_ms=int((time.time() - t0) * 1000), file_id=file_id,
+        )
+        raise
+    _log_external_api(
+        service="refresh_url", url=base_url, params=params,
+        response=payload, status="ok", error_msg=None,
+        elapsed_ms=int((time.time() - t0) * 1000), file_id=file_id,
+    )
     return file_url, data
 
 

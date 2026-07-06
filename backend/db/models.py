@@ -418,6 +418,7 @@ class ArchiveDetectBatch(Base):
     batch_id = Column(String(40), primary_key=True, comment="任务批次ID")
     user_prompt = Column(Text, nullable=False, comment="用户输入的留底判定标准（多行）")
     source_kind = Column(String(10), nullable=False, comment="upload | url | batch")
+    stage = Column(String(20), nullable=True, comment="审核阶段 pre_submit|post_submit;worker 读取传给 LLM")
     total_files = Column(Integer, nullable=False, comment="文件总数（1-20）")
     done_files = Column(Integer, default=0, nullable=False, comment="已完成（含成功+失败）")
     status = Column(String(20), default="running", nullable=False, comment="running|done|error")
@@ -496,6 +497,10 @@ class ArchiveDetectFile(Base):
                     comment="pending|leased|fetching|ocr|llm|done|error")
     error_msg = Column(Text, nullable=True)
     elapsed_sec = Column(Numeric(8, 2), nullable=True)
+
+    # 重审/重跑入队复用: 非空时 worker 跳过下载+OCR,直接用它跑 LLM
+    reuse_ocr_text = Column(Text, nullable=True,
+                            comment="重审入队时预填的源 OCR 文本;worker 非空则跳过下载+OCR")
 
     # Worker lease (方案二 2b: 多 worker 进程通过 DB 抢任务)
     worker_lease_until = Column(DateTime, nullable=True,
@@ -627,4 +632,27 @@ class ApiRequestLog(Base):
     __table_args__ = (
         Index("ix_request_logs_created", created_at.desc()),
         Index("ix_request_logs_path", "path", created_at.desc()),
+    )
+
+
+class ExternalApiLog(Base):
+    """出站外部接口调用记录:URL 刷新(getFileDownloadUrl)/ LLM。保留 30 天。"""
+    __tablename__ = "external_api_logs"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    service = Column(String(20), nullable=False, comment="refresh_url | llm")
+    url = Column(Text, nullable=True, comment="请求地址")
+    request_params = Column(JSONB, nullable=True, comment="请求参数(LLM 存 prompt 全文)")
+    response_summary = Column(JSONB, nullable=True, comment="返回结果(LLM 存返回全文)")
+    status = Column(String(10), nullable=False, comment="ok | error")
+    error_msg = Column(Text, nullable=True)
+    elapsed_ms = Column(Integer, nullable=True, comment="耗时毫秒")
+    batch_id = Column(String(40), nullable=True, comment="关联批次(如有)")
+    file_id = Column(String(64), nullable=True, comment="关联业务文件编码(如有)")
+
+    __table_args__ = (
+        Index("ix_external_api_logs_created", created_at.desc()),
+        Index("ix_external_api_logs_service_created", "service", created_at.desc()),
+        Index("ix_external_api_logs_status_created", "status", created_at.desc()),
     )

@@ -6,7 +6,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Iterable
-from sqlalchemy import select, update as sa_update, delete as sa_delete, func
+from sqlalchemy import select, update as sa_update, delete as sa_delete, func, exists
 from sqlalchemy.orm import selectinload, defer, undefer
 
 from db.engine import async_session_maker
@@ -220,18 +220,6 @@ async def update_batch_status(batch_id: str, status: str, error: Optional[str] =
         await session.commit()
 
 
-async def update_batch_criteria(batch_id: str, criteria: str) -> None:
-    """更新批次的判定提示词（原地重审用）。"""
-    async with async_session_maker() as session:
-        stmt = (
-            sa_update(ArchiveDetectBatch)
-            .where(ArchiveDetectBatch.batch_id == batch_id)
-            .values(user_prompt=criteria, updated_at=datetime.now())
-        )
-        await session.execute(stmt)
-        await session.commit()
-
-
 async def reset_done_count(batch_id: str, done_files: int) -> None:
     """把 done_files 重置为绝对值（原地重审起跑时用，避免 bump 从旧总数继续累加）。"""
     async with async_session_maker() as session:
@@ -241,6 +229,67 @@ async def reset_done_count(batch_id: str, done_files: int) -> None:
             .values(done_files=done_files, updated_at=datetime.now())
         )
         await session.execute(stmt)
+        await session.commit()
+
+
+async def requeue_files_for_rerun(
+    *,
+    batch_id: str,
+    criteria: str,
+    stage: Optional[str],
+    rerun_items: list[dict],
+    done_kept: int,
+) -> None:
+    """原地重跑起跑:把选中的文件重置为 pending 交给 worker 队列,批次回 running。
+
+    rerun_items: [{idx, ocr_text(可空)}] —— ocr_text 非空写进 reuse_ocr_text,worker 跳过 OCR。
+    一次事务内完成:更新 batch(criteria/stage/running/done_files 重置) + 重置选中文件行。
+    """
+    now = datetime.now()
+    async with async_session_maker() as session:
+        # 1) 批次:更新提示词/阶段/状态,done_files 重置为保留数
+        await session.execute(
+            sa_update(ArchiveDetectBatch)
+            .where(ArchiveDetectBatch.batch_id == batch_id)
+            .values(
+                user_prompt=criteria,
+                stage=stage,
+                status="running",
+                done_files=done_kept,
+                overall_verdict=None,
+                overall_score=None,
+                overall_reason=None,
+                updated_at=now,
+            )
+        )
+        # 2) 选中文件:清旧结果 + 预填 reuse_ocr_text + 回 pending(清 lease/retry)
+        for it in rerun_items:
+            await session.execute(
+                sa_update(ArchiveDetectFile)
+                .where(
+                    ArchiveDetectFile.batch_id == batch_id,
+                    ArchiveDetectFile.idx == it["idx"],
+                )
+                .values(
+                    status="pending",
+                    reuse_ocr_text=(it.get("ocr_text") or None),
+                    worker_lease_until=None,
+                    retry_count=0,
+                    verdict=None,
+                    match_score=None,
+                    is_archival=None,
+                    confidence=None,
+                    reason=None,
+                    key_points=None,
+                    doc_category=None,
+                    error_msg=None,
+                    elapsed_sec=None,
+                    page_count=None,
+                    char_count=None,
+                    ocr_text=None,
+                    updated_at=now,
+                )
+            )
         await session.commit()
 
 
@@ -675,11 +724,13 @@ async def create_recheck_batch_with_files(
     new_batch_id: str,
     criteria: str,
     items_plan: list[dict],
+    stage: Optional[str] = None,
 ) -> dict:
-    """创建 recheck batch + N 个 pending file。
+    """创建 recheck batch + N 个 pending file(交给 worker 队列消化)。
 
     recheck 的 source_kind='recheck'。progress_id 沿用原 batch(如果有)。
-    所有 file 初始 pending,由 _process_one_recheck 决定 AI-only 或重新 OCR。
+    所有 file 初始 pending;items_plan 里有 ocr_text 的写进 reuse_ocr_text,
+    worker 抢到后见 reuse_ocr_text 非空则跳过下载+OCR,直接跑 LLM。
     """
     now = datetime.now()
     progress_id = source_batch.get("progress_id")
@@ -688,6 +739,7 @@ async def create_recheck_batch_with_files(
             batch_id=new_batch_id,
             user_prompt=criteria,
             source_kind="recheck",
+            stage=stage,
             total_files=len(items_plan),
             done_files=0,
             status="running",
@@ -706,6 +758,7 @@ async def create_recheck_batch_with_files(
                 source_url=spec.get("source_url"),
                 filename=spec.get("filename"),
                 mime_type=spec.get("mime_type"),
+                reuse_ocr_text=spec.get("ocr_text") or None,
                 status="pending",
                 deleted=False,
                 created_at=now,
@@ -722,6 +775,8 @@ async def admin_list_batches(
     status: Optional[str] = None,
     source_kind: Optional[str] = None,
     batch_id: Optional[str] = None,
+    overall_verdict: Optional[list[str]] = None,
+    has_error_file: Optional[bool] = None,
     client_code: Optional[str] = None,
     client_name: Optional[str] = None,
     progress_oid: Optional[str] = None,
@@ -752,6 +807,15 @@ async def admin_list_batches(
             conditions.append(ArchiveDetectBatch.source_kind == source_kind)
         if batch_id:
             conditions.append(ArchiveDetectBatch.batch_id.ilike(f"%{batch_id}%"))
+        if overall_verdict:
+            conditions.append(ArchiveDetectBatch.overall_verdict.in_(overall_verdict))
+        if has_error_file:
+            conditions.append(
+                exists().where(
+                    ArchiveDetectFile.batch_id == ArchiveDetectBatch.batch_id,
+                    ArchiveDetectFile.status == "error",
+                )
+            )
         if client_code:
             conditions.append(Client.client_code.ilike(f"%{client_code}%"))
         if client_name:
@@ -902,7 +966,7 @@ async def claim_one_pending_file(
         )
         RETURNING
             id, batch_id, idx, progress_id, file_id, version,
-            source_url, local_path, filename, mime_type, retry_count
+            source_url, local_path, filename, mime_type, retry_count, reuse_ocr_text
     """)
     async with async_session_maker() as session:
         res = await session.execute(sql)
@@ -1039,6 +1103,22 @@ async def list_running_batch_ids() -> list[str]:
         return [r[0] for r in res.all()]
 
 
+async def list_batch_ids_for_rejudge(verdicts: list[str]) -> list[str]:
+    """批量重判总体:查 status='done' 且 overall_verdict 在给定集合内的 batch_id。
+
+    verdicts 为空则返回所有 done 批次。按 created_at 升序(老的先刷)。
+    """
+    async with async_session_maker() as session:
+        stmt = select(ArchiveDetectBatch.batch_id).where(
+            ArchiveDetectBatch.status == "done"
+        )
+        if verdicts:
+            stmt = stmt.where(ArchiveDetectBatch.overall_verdict.in_(verdicts))
+        stmt = stmt.order_by(ArchiveDetectBatch.created_at.asc())
+        res = await session.execute(stmt)
+        return [r[0] for r in res.all()]
+
+
 async def get_batch_meta(batch_id: str) -> Optional[dict]:
     """finalize 需要的 batch 元信息:criteria/progress_id/source_kind。"""
     async with async_session_maker() as session:
@@ -1051,6 +1131,7 @@ async def get_batch_meta(batch_id: str) -> Optional[dict]:
             "batch_id": b.batch_id,
             "user_prompt": b.user_prompt,
             "source_kind": b.source_kind,
+            "stage": b.stage,
             "progress_id": b.progress_id,
             "status": b.status,
         }

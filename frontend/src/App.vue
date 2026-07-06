@@ -12,6 +12,7 @@
         <button class="nav-item" :class="{ active: isActive('/archive-admin') }" @click="go('/archive-admin')">审核任务管理</button>
         <button class="nav-item" :class="{ active: isActive('/events') }" @click="go('/events')">事件流</button>
         <button class="nav-item" :class="{ active: isActive('/request-logs') }" @click="go('/request-logs')">请求记录</button>
+        <button class="nav-item" :class="{ active: isActive('/external-api-logs') }" @click="go('/external-api-logs')">外部接口记录</button>
         <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button>
         <el-dropdown trigger="click">
           <button class="nav-item more">更多工具</button>

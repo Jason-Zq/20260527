@@ -3,7 +3,7 @@
 
 按文件类型分发：
   .pdf            → ocr_service.process_file（自动判断文字型/图片型）
-  .doc            → antiword 抽旧版 Word 二进制文本（不走 OCR，需系统装 antiword）
+  .doc            → olefile 纯 Python 解析 OLE2 文本（零系统依赖；soffice/antiword 仅作兜底，不走 OCR）
   .docx           → python-docx 抽段落+表格（不走 OCR）
   .xlsx           → openpyxl 抽 sheet/cell 文本
   .pptx           → python-pptx 抽 slide 文本
@@ -45,6 +45,16 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
 
 
 _ANTIWORD_CACHE = {"path": None, "checked": False}
+_SOFFICE_CACHE = {"path": None, "checked": False}
+
+# soffice 常见安装路径(与 template_service 对齐)
+_SOFFICE_CANDIDATE_PATHS = [
+    r"C:\Program Files\LibreOffice\program\soffice.exe",
+    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    "/usr/bin/soffice",
+    "/usr/bin/libreoffice",
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+]
 
 
 def _find_antiword() -> Optional[str]:
@@ -55,36 +65,246 @@ def _find_antiword() -> Optional[str]:
     return _ANTIWORD_CACHE["path"]
 
 
-def _extract_doc(file_path: str) -> dict:
-    """antiword 抽旧版 .doc 二进制文本。需要系统安装 antiword。
+def _find_soffice() -> Optional[str]:
+    """查找 LibreOffice soffice 可执行文件路径(懒缓存)。"""
+    if _SOFFICE_CACHE["checked"]:
+        return _SOFFICE_CACHE["path"]
+    for name in ("soffice", "soffice.exe", "libreoffice", "libreoffice.exe"):
+        found = shutil.which(name)
+        if found:
+            _SOFFICE_CACHE["path"] = found
+            break
+    if not _SOFFICE_CACHE["path"]:
+        for cand in _SOFFICE_CANDIDATE_PATHS:
+            if os.path.exists(cand):
+                _SOFFICE_CACHE["path"] = cand
+                break
+    _SOFFICE_CACHE["checked"] = True
+    return _SOFFICE_CACHE["path"]
 
-    中文用 -m UTF-8.txt 映射避免乱码;对损坏/加密/伪装的 .doc 会失败并抛 ValueError。
+
+def _extract_doc_via_soffice(soffice: str, file_path: str) -> dict:
+    """用 LibreOffice 把旧版 .doc 转成 .docx 到临时目录,再复用 _extract_docx 抽文本。
+
+    转 docx(而非 txt)能保留表格结构,和 .docx 抽取逻辑一致。
     """
-    antiword = _find_antiword()
-    if not antiword:
-        raise ValueError(
-            "服务器未安装 antiword,无法处理 .doc;"
-            "请安装(yum install antiword / apt install antiword)或改用 .docx"
+    import tempfile
+    src = os.path.abspath(file_path)
+    with tempfile.TemporaryDirectory(prefix="doc2docx_") as tmpdir:
+        cmd = [
+            soffice, "--headless",
+            "--convert-to", "docx:MS Word 2007 XML",
+            "--outdir", tmpdir, src,
+        ]
+        try:
+            subprocess.run(cmd, timeout=90, check=True, capture_output=True)
+        except subprocess.TimeoutExpired:
+            raise ValueError(".doc 转换超时(文件可能过大或损坏)")
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or b"").decode("utf-8", errors="replace")[:200]
+            raise ValueError(f".doc 转换失败(可能已损坏或非标准 .doc 格式): {err}")
+        out_docx = os.path.join(
+            tmpdir, os.path.splitext(os.path.basename(src))[0] + ".docx"
         )
+        if not os.path.exists(out_docx):
+            raise ValueError(".doc 转换未生成 docx(LibreOffice 可能无法识别该文件)")
+        result = _extract_docx(out_docx)
+    result["source"] = "doc_text"
+    return result
+
+
+def _extract_doc_via_olefile(file_path: str) -> dict:
+    """纯 Python 解析旧版 .doc(OLE2 复合文档)文本,零系统依赖。
+
+    按 [MS-DOC] 规范:读 WordDocument 流的 FIB 定位 piece table(在 Table 流里),
+    逐片按 fCompressed 标志位解码(0=UTF-16LE, 1=CP1252 8-bit)。
+    这是 antiword/textract 用的标准算法,比"扫可读字符"干净得多。
+    """
+    import struct
+    import olefile
+
+    if not olefile.isOleFile(file_path):
+        raise ValueError(".doc 不是有效的 OLE2 文件(可能已损坏或实为其他格式)")
+
+    ole = olefile.OleFileIO(file_path)
     try:
-        result = subprocess.run(
-            [antiword, "-m", "UTF-8.txt", os.path.abspath(file_path)],
-            timeout=60, check=True, capture_output=True,
-        )
-        text = result.stdout.decode("utf-8", errors="replace").strip()
-    except subprocess.TimeoutExpired:
-        raise ValueError(".doc 解析超时(文件可能过大或损坏)")
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or b"").decode("utf-8", errors="replace")[:200]
-        raise ValueError(f".doc 解析失败(可能已损坏或非标准 .doc 格式): {err}")
-    if not text.strip():
-        raise ValueError(".doc 解析后无文字(可能是扫描件转存的图片型 doc)")
+        if not ole.exists("WordDocument"):
+            raise ValueError(".doc 缺少 WordDocument 流(非标准 Word 文档)")
+        with ole.openstream("WordDocument") as s:
+            doc = s.read()
+
+        # FIB: fComplex/fWhichTblStm 在 base 的 flags(offset 10, 2字节 little-endian)
+        # bit 9 (0x0200) = fWhichTblStm: 1→用 1Table, 0→用 0Table
+        flags = struct.unpack_from("<H", doc, 0x000A)[0]
+        table_name = "1Table" if (flags & 0x0200) else "0Table"
+
+        # fcClx / lcbClx 在 FibRgFcLcb97:fcMin=..., fcClx 位于 offset 0x01A2, lcbClx 0x01A6
+        fc_clx = struct.unpack_from("<I", doc, 0x01A2)[0]
+        lcb_clx = struct.unpack_from("<I", doc, 0x01A6)[0]
+        # ccpText: 正文字符数,FIB offset 0x004C
+        ccp_text = struct.unpack_from("<I", doc, 0x004C)[0]
+
+        text = ""
+        if ole.exists(table_name) and lcb_clx > 0:
+            with ole.openstream(table_name) as ts:
+                table = ts.read()
+            clx = table[fc_clx:fc_clx + lcb_clx]
+            text = _parse_doc_piece_table(doc, clx, ccp_text)
+
+        # 兜底:piece table 解析不出内容时,直接从 fcMin 起按 CP1252 粗提
+        if not text.strip():
+            text = _doc_fallback_scan(doc, ccp_text)
+    finally:
+        ole.close()
+
+    text = text.strip()
+    if not text:
+        raise ValueError(".doc 解析后无文字(可能是扫描件转存的图片型 doc,或加密文档)")
     return {
         "text": text,
         "source": "doc_text",
-        "page_count": 1,                 # doc 没有"页"概念，记 1
+        "page_count": 1,
         "char_count": len(text),
     }
+
+
+def _parse_doc_piece_table(doc: bytes, clx: bytes, ccp_text: int) -> str:
+    """从 Clx(复杂格式区)解析 piece table,拼出正文文本。"""
+    import struct
+
+    # Clx = 可选的 RgPrc(0x01 开头) + Pcdt(0x02 开头)
+    i = 0
+    n = len(clx)
+    while i < n and clx[i] == 0x01:
+        # Prc: 0x01 + cbGrpprl(2字节) + grpprl
+        if i + 3 > n:
+            break
+        cb = struct.unpack_from("<H", clx, i + 1)[0]
+        i += 3 + cb
+    if i >= n or clx[i] != 0x02:
+        return ""
+    # Pcdt: 0x02 + lcb(4字节) + PlcPcd
+    lcb = struct.unpack_from("<I", clx, i + 1)[0]
+    plc = clx[i + 5: i + 5 + lcb]
+
+    # PlcPcd = (n+1) 个 CP(4字节) + n 个 Pcd(8字节);由此反推 n
+    # lcb = 4*(n+1) + 8*n = 12n + 4  → n = (lcb-4)/12
+    if lcb < 4:
+        return ""
+    n_pieces = (lcb - 4) // 12
+    cps = [struct.unpack_from("<I", plc, k * 4)[0] for k in range(n_pieces + 1)]
+    pcd_base = (n_pieces + 1) * 4
+
+    parts = []
+    for k in range(n_pieces):
+        pcd = plc[pcd_base + k * 8: pcd_base + k * 8 + 8]
+        fc_field = struct.unpack_from("<I", pcd, 2)[0]
+        # fc 的 bit30 = fCompressed:1→CP1252 8-bit(fc>>1 为字节偏移),0→UTF-16LE
+        f_compressed = (fc_field & 0x40000000) != 0
+        fc = fc_field & 0x3FFFFFFF
+        cp_start, cp_end = cps[k], cps[k + 1]
+        char_cnt = cp_end - cp_start
+        if char_cnt <= 0:
+            continue
+        if f_compressed:
+            off = fc // 2
+            raw = doc[off: off + char_cnt]
+            parts.append(raw.decode("cp1252", errors="replace"))
+        else:
+            off = fc
+            raw = doc[off: off + char_cnt * 2]
+            parts.append(raw.decode("utf-16-le", errors="replace"))
+
+    text = "".join(parts)
+    return _clean_doc_text(text)
+
+
+def _doc_fallback_scan(doc: bytes, ccp_text: int) -> str:
+    """piece table 不可用时的兜底:从 fcMin 起按 UTF-16/CP1252 粗解。"""
+    import struct
+    fc_min = struct.unpack_from("<I", doc, 0x0018)[0]
+    chunk = doc[fc_min: fc_min + max(ccp_text, 0) * 2] if ccp_text else doc[fc_min:]
+    # 先试 UTF-16LE,失败再 CP1252
+    try:
+        text = chunk.decode("utf-16-le", errors="ignore")
+    except Exception:
+        text = chunk.decode("cp1252", errors="ignore")
+    return _clean_doc_text(text)
+
+
+def _clean_doc_text(text: str) -> str:
+    """清洗 .doc 提取出的控制字符:Word 特殊码 → 换行/制表/空;删其余控制符。"""
+    if not text:
+        return ""
+    # Word 特殊字符映射
+    trans = {
+        0x0007: "\n",   # 单元格/行结束
+        0x000D: "\n",   # 段落结束
+        0x000B: "\n",   # 手动换行
+        0x000C: "\n",   # 分页
+        0x001E: "-",    # 不间断连字符
+        0x001F: "",     # 可选连字符
+        0x00A0: " ",    # 不间断空格
+        0x2002: " ", 0x2003: " ", 0x2009: " ",
+        0xFC01: "", 0xF020: "",
+    }
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if o in trans:
+            out.append(trans[o])
+        elif o == 0x09 or o == 0x0A:
+            out.append(ch)
+        elif o < 0x20:
+            continue          # 其余控制字符丢弃
+        elif o == 0xFFFF or o == 0xFFFE:
+            continue
+        else:
+            out.append(ch)
+    # 规整多余空行
+    cleaned = "\n".join(line.rstrip() for line in "".join(out).split("\n"))
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return cleaned.strip()
+
+
+def _extract_doc(file_path: str) -> dict:
+    """旧版 .doc 二进制文本抽取。
+
+    优先用纯 Python 的 olefile 解析(零系统依赖);失败再尝试 soffice / antiword;
+    都不行才抛 ValueError。
+    """
+    # 1) 纯 Python olefile(首选,服务器无需装任何系统包)
+    last_err = None
+    try:
+        return _extract_doc_via_olefile(file_path)
+    except Exception as e:
+        last_err = e
+
+    # 2) soffice 兜底(装了 LibreOffice 的环境)
+    soffice = _find_soffice()
+    if soffice:
+        try:
+            return _extract_doc_via_soffice(soffice, file_path)
+        except Exception as e:
+            last_err = e
+
+    # 3) antiword 兜底(装了 antiword 的环境,如本地 Windows)
+    antiword = _find_antiword()
+    if antiword:
+        try:
+            result = subprocess.run(
+                [antiword, "-m", "UTF-8.txt", os.path.abspath(file_path)],
+                timeout=60, check=True, capture_output=True,
+            )
+            text = result.stdout.decode("utf-8", errors="replace").strip()
+            if text.strip():
+                return {"text": text, "source": "doc_text",
+                        "page_count": 1, "char_count": len(text)}
+        except Exception as e:
+            last_err = e
+
+    raise ValueError(f".doc 解析失败(文件可能已损坏、加密或为图片型): {last_err}")
 
 
 def _extract_docx(file_path: str) -> dict:

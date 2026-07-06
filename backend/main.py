@@ -2138,6 +2138,20 @@ async def _split_cleanup_loop():
                 )
         except Exception as e:
             print(f"[request_log_gc] 异常(忽略): {e}")
+        # 外部接口调用记录 GC:30 天
+        try:
+            from db import external_api_log_crud as _ealc
+            deleted_ext = await _ealc.delete_external_api_logs_older_than(days=30)
+            if deleted_ext:
+                print(f"[external_api_log_gc] 清理 {deleted_ext} 条 >30 天的外部接口记录")
+                event_service.log_event(
+                    severity="info",
+                    category="gc.cleanup",
+                    message=f"清理 {deleted_ext} 条 >30 天的外部接口记录",
+                    context={"table": "external_api_logs", "deleted": deleted_ext, "days": 30},
+                )
+        except Exception as e:
+            print(f"[external_api_log_gc] 异常(忽略): {e}")
         await asyncio.sleep(inmem_gc_every)
 
 
@@ -2834,6 +2848,41 @@ async def admin_list_request_logs(
 
 
 @app.get(
+    "/api/admin/external-api-logs",
+    tags=["运维"],
+    summary="外部接口调用记录查询",
+)
+async def admin_list_external_api_logs(
+    service: Optional[str] = Query(None, description="refresh_url | llm"),
+    status: Optional[str] = Query(None, description="ok | error"),
+    batch_id: Optional[str] = Query(None, description="关联批次 ID 模糊匹配"),
+    since: Optional[str] = Query(None, description="起始时间 YYYY-MM-DD HH:MM:SS"),
+    until: Optional[str] = Query(None, description="结束时间"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import external_api_log_crud as _ealc
+
+    def _parse_dt(s):
+        if not s:
+            return None
+        from datetime import datetime as _dt
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return _dt.strptime(s, fmt)
+            except ValueError:
+                continue
+        raise HTTPException(status_code=400, detail=f"非法时间格式: {s}")
+
+    items, total = await _ealc.list_external_api_logs(
+        service=service, status=status, batch_id=batch_id,
+        since=_parse_dt(since), until=_parse_dt(until),
+        limit=limit, offset=offset,
+    )
+    return {"items": items, "total": total}
+
+
+@app.get(
     "/api/archive-detect/admin/batches",
     tags=["文件留底检测"],
     summary="后台管理 - 批次列表",
@@ -2843,6 +2892,8 @@ async def archive_detect_admin_batches(
     status: Optional[str] = Query(None, description="批次状态筛选:running/done/error"),
     source_kind: Optional[str] = Query(None, description="来源筛选:upload/url/batch/recheck"),
     batch_id: Optional[str] = Query(None, description="批次 ID 模糊查询"),
+    overall_verdict: Optional[str] = Query(None, description="总体判断筛选,多值用逗号分隔:match,partial,mismatch"),
+    has_error_file: Optional[bool] = Query(None, description="是否只看含识别失败文件的批次"),
     client_code: Optional[str] = Query(None, description="客户编码模糊查询"),
     client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
     progress_oid: Optional[str] = Query(None, description="进展 OID 模糊查询"),
@@ -2859,10 +2910,19 @@ async def archive_detect_admin_batches(
                 datetime.strptime(value, "%Y-%m-%d")
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"{label} 日期格式必须是 YYYY-MM-DD")
+    verdict_list = None
+    if overall_verdict:
+        verdict_list = [v.strip() for v in overall_verdict.split(",") if v.strip()]
+        allowed = {"match", "partial", "mismatch"}
+        bad = [v for v in verdict_list if v not in allowed]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"非法 overall_verdict: {bad}")
     return await archive_detect_crud.admin_list_batches(
         status=status,
         source_kind=source_kind,
         batch_id=batch_id,
+        overall_verdict=verdict_list,
+        has_error_file=has_error_file,
         client_code=client_code,
         client_name=client_name,
         progress_oid=progress_oid,
@@ -2872,6 +2932,81 @@ async def archive_detect_admin_batches(
         limit=limit,
         offset=offset,
     )
+
+
+class RejudgeOverallPayload(BaseModel):
+    """批量重判总体请求体。"""
+    verdicts: Optional[list[str]] = Field(
+        default=["partial", "mismatch"],
+        description="要重判的 overall_verdict 集合;默认只刷 partial/mismatch。传 [] 或省略含义见默认值",
+    )
+
+
+@app.post(
+    "/api/archive-detect/admin/rejudge-overall",
+    tags=["文件留底检测"],
+    summary="后台管理 - 按新规则批量重判总体",
+)
+async def archive_detect_rejudge_overall(payload: RejudgeOverallPayload = RejudgeOverallPayload()):
+    """按新规则(judge_batch_overall)批量重判批次总体。
+
+    只重跑总体判定,不碰单文件结果、不 OCR、不下载。默认只刷 partial/mismatch 的 done 批次。
+    异步执行,前端轮询 GET /admin/rejudge-overall/progress。
+    """
+    verdicts = payload.verdicts
+    if verdicts:
+        allowed = {"match", "partial", "mismatch"}
+        bad = [v for v in verdicts if v not in allowed]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"非法 verdict: {bad}")
+    try:
+        return await archive_detect_service.start_rejudge_overall(verdicts)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.get(
+    "/api/archive-detect/admin/rejudge-overall/progress",
+    tags=["文件留底检测"],
+    summary="后台管理 - 批量重判进度",
+)
+async def archive_detect_rejudge_progress():
+    """查询批量重判总体的进度。"""
+    return archive_detect_service.get_rejudge_progress()
+
+
+@app.post(
+    "/api/archive-detect/admin/rerun-files-batch",
+    tags=["文件留底检测"],
+    summary="后台管理 - 批量重审(重跑单文件)",
+)
+async def archive_detect_rerun_files_batch(payload: RejudgeOverallPayload = RejudgeOverallPayload()):
+    """批量重审:对目标批次逐个原地重跑(force_all),复用 ocr_text 重判单文件 verdict/score,
+    不重新 OCR、不下载。各批沿用自身原 criteria。默认只重审 partial/mismatch 的 done 批次。
+
+    注意:成本高(每文件 1 次 LLM),由 worker 队列串行消化。进度只反映"已触发重跑的批次数"。
+    异步执行,前端轮询 GET /admin/rerun-files-batch/progress。
+    """
+    verdicts = payload.verdicts
+    if verdicts:
+        allowed = {"match", "partial", "mismatch"}
+        bad = [v for v in verdicts if v not in allowed]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"非法 verdict: {bad}")
+    try:
+        return await archive_detect_service.start_rerun_files_batch(verdicts)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.get(
+    "/api/archive-detect/admin/rerun-files-batch/progress",
+    tags=["文件留底检测"],
+    summary="后台管理 - 批量重审进度",
+)
+async def archive_detect_rerun_files_progress():
+    """查询批量重审的进度(done=已触发重跑的批次数)。"""
+    return archive_detect_service.get_rerun_batch_progress()
 
 
 @app.get(

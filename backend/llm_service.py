@@ -6,6 +6,7 @@ LLM 服务模块
 import os
 import json
 import re
+import time
 import threading
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -67,22 +68,45 @@ def _get_client() -> OpenAI:
         return _client
 
 
+def _log_llm_api(url, model, prompt, response_raw, status, error_msg, elapsed_ms):
+    """记录一次 LLM 出站调用(prompt/返回全文)。任何异常都吞掉,绝不影响判定。
+
+    _call_llm 在 worker 线程(asyncio.to_thread)里跑,没有可用的 async loop,
+    async 引擎的连接池绑定在主 loop 上,不能用。故使用同步 psycopg2 直写。
+    """
+    try:
+        from db import external_api_log_crud as _crud
+        params = {"model": model, "prompt": prompt}
+        response = {"raw": response_raw} if response_raw is not None else None
+        _crud.insert_external_api_log_sync(
+            service="llm", url=url,
+            request_params=params, response_summary=response,
+            status=status, error_msg=error_msg, elapsed_ms=elapsed_ms,
+        )
+    except Exception as _e:
+        print(f"[llm_log] 记录 LLM 调用日志失败(忽略): {_e}", file=__import__('sys').stderr)
+
+
 def _call_llm(prompt: str, max_retries: int = 3) -> str:
     """调用大模型 API，返回原始响应文本。支持重试机制。"""
     llm = CONFIG.get("llm", {})
     client = _get_client()
+    model = llm.get("model", "")
+    url = llm.get("base_url", "")
 
     last_error = None
+    t0 = time.time()
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
-                model=llm.get("model", ""),
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=llm.get("temperature", 0.1),
                 extra_body={"reasoning_split": True},
             )
 
-            result_text = response.choices[0].message.content.strip()
+            raw = response.choices[0].message.content
+            result_text = raw.strip()
 
             # 容错：去除 markdown 代码块标记
             if result_text.startswith("```"):
@@ -93,16 +117,16 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
             # 容错：去除 MiniMax 模型可能残留的思考标签
             result_text = re.sub(r'<tool_call>.*?⋩', '', result_text, flags=re.DOTALL).strip()
 
+            elapsed_ms = int((time.time() - t0) * 1000)
+            _log_llm_api(url, model, prompt, raw, "ok", None, elapsed_ms)
             return result_text
 
         except Exception as e:
             last_error = e
             if "429" in str(e) and attempt < max_retries - 1:
                 # 429 限流错误，等待后重试
-                import time
                 wait_time = (attempt + 1) * 2  # 递增等待: 2s, 4s, 6s
                 print(f"  [LLM] 限流，等待 {wait_time}s 后重试 ({attempt + 1}/{max_retries})")
-                # 记录限流事件(避免在 _call_llm 顶部 import 造成循环 import,这里延迟 import)
                 try:
                     import event_service
                     event_service.log_event(
@@ -115,8 +139,9 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
                     pass
                 time.sleep(wait_time)
             else:
-                # 非限流错误或最后一次重试，直接抛出
-                # 末次失败记一条事件,便于追踪
+                # 末次失败:记日志 + 抛出
+                elapsed_ms = int((time.time() - t0) * 1000)
+                _log_llm_api(url, model, prompt, None, "error", str(e), elapsed_ms)
                 if attempt == max_retries - 1:
                     try:
                         import event_service
@@ -135,6 +160,8 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
                         pass
                 raise
 
+    elapsed_ms = int((time.time() - t0) * 1000)
+    _log_llm_api(url, model, prompt, None, "error", str(last_error), elapsed_ms)
     raise last_error
 
 
@@ -858,6 +885,93 @@ def summarize_batch(
             out = out.split("\n", 1)[1]
         out = out.strip()
     return out
+
+
+def _build_judge_batch_overall_prompt(
+    files_brief: list,
+    user_prompt: str,
+    stage: Optional[str] = None,
+) -> str:
+    """批次总体判定 prompt:让 LLM 综合所有文件,理解关键件 vs 附件,输出 verdict/score/reason。"""
+    lines = []
+    for i, f in enumerate(files_brief, 1):
+        kp = " | ".join(f.get("key_points") or [])
+        lines.append(
+            f"- 文件{i} 「{f.get('filename') or '?'}」: "
+            f"verdict={f.get('verdict')}, score={f.get('match_score')}, "
+            f"类别={f.get('doc_category') or '?'}, "
+            f"reason={f.get('reason') or ''}"
+            + (f", 要点={kp}" if kp else "")
+        )
+    detail = "\n".join(lines) if lines else "（无符合 done 状态的文件）"
+
+    stage_hint = ""
+    if stage == "pre_submit":
+        stage_hint = "\n当前审核阶段:递交前(pre_submit)——关注申请前需备齐的材料。\n"
+    elif stage == "post_submit":
+        stage_hint = "\n当前审核阶段:递交后(post_submit)——关注证明已递交/已受理的官方回执类材料。\n"
+
+    return (
+        "你是文档留底审核的总体判定助手。请综合一个批次内所有文件的检测结果,"
+        "对**整个批次是否满足该进展的留底要求**给出总体判断。\n\n"
+        f"用户判定标准(该进展要求):\n{user_prompt}\n"
+        f"{stage_hint}\n"
+        f"各文件检测明细(共 {len(files_brief)} 条):\n{detail}\n\n"
+        "判定原则(重要):\n"
+        "1. 一个批次通常包含**关键文件**(直接证明该进展成立,如批复函/受理回执/递交确认)"
+        "和**附带文件**(身份证、护照等辅助材料)。\n"
+        "2. **只要存在确凿命中该进展要求的关键文件,整批即判为 match**,"
+        "不因附带文件与进展不完全相关而降级——附带文件的低分不应拉低整体结论。\n"
+        "3. 但要判断命中的文件**是否真的是该进展的关键证明**:若命中的只是无关紧要的附件、"
+        "而真正的关键文件缺失,则判 partial(材料不齐),不能仅因'有文件 match'就判 match。\n"
+        "4. 完全没有任何文件与进展相关 → mismatch。\n\n"
+        "请输出严格 JSON(不要 markdown、不要多余文字):\n"
+        '{"verdict":"match|partial|mismatch","score":0-100整数,"reason":"80-200字中文总体说明"}\n'
+        "score 与 verdict 需一致:match≥80,partial 50-79,mismatch<50。\n"
+        "reason 需说明:整体结论依据、关键文件命中情况、缺失或问题点。\n"
+        "**脱敏**:不要泄露金额/电话/身份证号/银行卡号,用 [金额]/[手机号]/[身份证]/[银行卡] 占位。\n"
+    )
+
+
+def judge_batch_overall(
+    files_brief: list,
+    user_prompt: str,
+    stage: Optional[str] = None,
+) -> dict:
+    """LLM 综合判定批次总体结论。返回 {verdict, score, reason}。
+
+    理解关键件 vs 附件:有关键文件命中即整批 match,不被附带文件拉低。
+    解析失败或字段非法时抛 ValueError,由调用方回退规则平均分。
+    """
+    prompt = _build_judge_batch_overall_prompt(files_brief, user_prompt, stage)
+    raw = _call_llm(prompt)
+    try:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        data = json.loads(raw[start:end + 1] if start >= 0 and end > start else raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError(f"批次总判 LLM 返回非合法 JSON：{raw[:200]}") from e
+
+    verdict = str(data.get("verdict", "")).strip().lower()
+    if verdict not in ("match", "partial", "mismatch"):
+        raise ValueError(f"批次总判 verdict 非法：{data.get('verdict')!r}")
+
+    try:
+        score = int(data.get("score", -1))
+    except (TypeError, ValueError):
+        raise ValueError(f"批次总判 score 非法：{data.get('score')!r}")
+    score = max(0, min(100, score))
+
+    # verdict 与 score 档位一致性:以 verdict 为准,把 score 归一到对应区间
+    if verdict == "match" and score < 80:
+        score = 80
+    elif verdict == "partial" and not (50 <= score <= 79):
+        score = 65
+    elif verdict == "mismatch" and score >= 50:
+        score = 49
+
+    reason = str(data.get("reason", "")).strip()
+    return {"verdict": verdict, "score": score, "reason": reason}
 
 
 # ==================== 客户资料结构化抽取 ====================

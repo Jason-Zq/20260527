@@ -37,6 +37,9 @@ import event_service
 
 MAX_FILES_PER_BATCH = int(os.getenv("ARCHIVE_DETECT_MAX_FILES_PER_BATCH", "50"))
 LLM_CONCURRENCY = 3
+# 快速检测 fan-out 下载并发上限:一批最多 50 文件 asyncio.gather 全并发。
+# httpx 连接池不设上限,并发保护交给这个信号量,避免瞬间轰爆业务方/OSS。
+DOWNLOAD_CONCURRENCY = int(os.getenv("ARCHIVE_DETECT_DOWNLOAD_CONCURRENCY", "10"))
 RESULT_TTL_HOURS = 6                         # 内存结果保留 6 小时
 
 # 全局 pending 队列深度(仅供 /admin/queue-stats、/healthz 只读监控展示)
@@ -48,10 +51,25 @@ _batch_status: dict[str, dict] = {}
 # LLM 限流:主进程的 finalize 阶段调 summarize_batch 时用;worker 进程不依赖这个
 _LLM_SEMAPHORE = asyncio.Semaphore(LLM_CONCURRENCY)
 
+# 下载限流:快速检测 fan-out 的下载环节用,主动排队而非靠连接池满超时
+_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
+
 # 主进程的后台协程引用(startup 创建,shutdown cancel)
 _finalize_tasks: dict[str, asyncio.Task] = {}      # batch_id → finalize task
 _watchdog_task: Optional[asyncio.Task] = None
 _should_stop = False
+
+# 批量重判总体的进度(单例,后台管理触发;前端轮询)
+_rejudge_progress: dict = {
+    "running": False, "total": 0, "done": 0, "failed": 0,
+    "started_at": None, "finished_at": None, "verdicts": None,
+}
+
+# 批量重审单文件的进度(单例,后台管理触发;前端轮询)
+_rerun_batch_progress: dict = {
+    "running": False, "total": 0, "done": 0, "failed": 0,
+    "started_at": None, "finished_at": None, "verdicts": None,
+}
 
 
 # ==================== 工具 ====================
@@ -201,57 +219,82 @@ async def _orchestrate(batch_id: str, user_prompt: str, source_kind: str, items:
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        # ---- 生成批次总报告（混合方案:规则推 verdict/score + LLM 写 reason）----
+        # ---- 生成批次总报告(LLM 综合判定 verdict/score/reason;失败回退规则平均分)----
         state = _batch_status.get(batch_id)
         overall_verdict = "mismatch"
         overall_score = 0
         overall_reason = ""
         if state:
-            done_items = [f for f in (state.get("files") or []) if f.get("status") == "done"]
+            done_all = [f for f in (state.get("files") or []) if f.get("status") == "done"]
+            no_text_count = sum(1 for f in done_all if f.get("verdict") == "no_text")
+            done_items = [f for f in done_all if f.get("verdict") != "no_text"]
             error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
 
-            # 1) 规则推 overall_verdict + overall_score
-            if not done_items:
-                overall_verdict, overall_score = "mismatch", 0
-            else:
+            files_brief = [
+                {
+                    "filename": f.get("filename"),
+                    "verdict": f.get("verdict"),
+                    "match_score": f.get("match_score"),
+                    "doc_category": f.get("doc_category"),
+                    "reason": (f.get("reason") or "")[:80],
+                    "key_points": (f.get("key_points") or [])[:3],
+                }
+                for f in done_items
+            ]
+
+            def _rule_avg():
+                if not done_items:
+                    return "mismatch", 0
                 scores = [int(f.get("match_score") or 0) for f in done_items]
                 avg = round(sum(scores) / len(scores))
                 if avg >= 80:
-                    overall_verdict = "match"
+                    return "match", avg
                 elif avg >= 50:
-                    overall_verdict = "partial"
-                else:
-                    overall_verdict = "mismatch"
-                overall_score = avg
+                    return "partial", avg
+                return "mismatch", avg
 
-            # 2) LLM 生成 overall_reason，失败兜底为规则文本
-            try:
-                files_brief = [
-                    {
-                        "filename": f.get("filename"),
-                        "verdict": f.get("verdict"),
-                        "match_score": f.get("match_score"),
-                        "doc_category": f.get("doc_category"),
-                        "reason": (f.get("reason") or "")[:80],
-                        "key_points": (f.get("key_points") or [])[:3],
-                    }
-                    for f in done_items
-                ]
-                async with _LLM_SEMAPHORE:
-                    overall_reason = await asyncio.to_thread(
-                        llm_service.summarize_batch,
-                        files_brief, user_prompt, overall_verdict, overall_score,
-                    )
-                overall_reason = redactor.redact(overall_reason or "")
-            except Exception as e:
-                print(f"[archive_detect:{batch_id}] LLM summarize_batch 失败,用规则文本兜底: {e}")
-                cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
-                cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
-                cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
-                overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
+            llm_ok = False
+            if done_items:
+                # 1) 优先 LLM 综合判定(理解关键件 vs 附件)
+                try:
+                    async with _LLM_SEMAPHORE:
+                        judged = await asyncio.to_thread(
+                            llm_service.judge_batch_overall, files_brief, user_prompt, None,
+                        )
+                    overall_verdict = judged["verdict"]
+                    overall_score = judged["score"]
+                    overall_reason = redactor.redact(judged.get("reason") or "")
+                    llm_ok = True
+                except Exception as e:
+                    print(f"[archive_detect:{batch_id}] LLM judge_batch_overall 失败,回退规则平均分: {e}")
 
+            # 2) 兜底:规则平均分 + summarize_batch 文本
+            if not llm_ok:
+                overall_verdict, overall_score = _rule_avg()
+                if done_items:
+                    try:
+                        async with _LLM_SEMAPHORE:
+                            overall_reason = await asyncio.to_thread(
+                                llm_service.summarize_batch,
+                                files_brief, user_prompt, overall_verdict, overall_score,
+                            )
+                        overall_reason = redactor.redact(overall_reason or "")
+                    except Exception as e:
+                        print(f"[archive_detect:{batch_id}] LLM summarize_batch 也失败,用规则文本: {e}")
+                        cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
+                        cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
+                        cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
+                        overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
+                elif no_text_count > 0:
+                    overall_reason = f"共 {no_text_count} 个文件均无有效文字(图片型/扫描件/空白),无法判定留底符合度。"
+
+            extra = []
+            if no_text_count > 0:
+                extra.append(f"{no_text_count} 个文件无有效文字(未参与判定)")
             if error_count > 0:
-                overall_reason = (overall_reason or "").rstrip() + f" 另有 {error_count} 个文件处理失败。"
+                extra.append(f"{error_count} 个文件处理失败")
+            if extra:
+                overall_reason = (overall_reason or "").rstrip() + " 另有 " + "、".join(extra) + "。"
 
             # 3) 写内存
             state["overall_verdict"] = overall_verdict
@@ -295,7 +338,8 @@ async def _process_one(
             if not url.strip():
                 raise ValueError("文件地址为空")
             try:
-                local_path, filename, mime_type = await file_fetcher.fetch_url_to_temp(url)
+                async with _DOWNLOAD_SEMAPHORE:
+                    local_path, filename, mime_type = await file_fetcher.fetch_url_to_temp(url)
             except file_fetcher.FileTooLargeError:
                 raise ValueError("文件超过 50MB 上限，无法处理")
             except ValueError as e:
@@ -330,7 +374,28 @@ async def _process_one(
         page_count = extracted.get("page_count")
         char_count = extracted.get("char_count")
         if not text.strip():
-            raise ValueError("OCR/抽取后无文字")
+            # 无有效文字:不算失败,标 done + verdict=no_text,由总体判定排除在外。
+            elapsed = round(time.time() - t0, 2)
+            no_text_result = {
+                "verdict": "no_text", "match_score": 0, "is_archival": False,
+                "confidence": 0, "doc_category": "无文字",
+                "reason": "OCR/抽取后无有效文字(可能为图片型/扫描件/空白文档)",
+                "key_points": [],
+            }
+            _set_file_state(
+                batch_id, idx, status="done", filename=filename, mime_type=mime_type,
+                page_count=page_count, char_count=char_count, elapsed_sec=elapsed,
+                **no_text_result,
+            )
+            try:
+                await crud.update_file_done(batch_id, idx, {
+                    "filename": filename, "mime_type": mime_type,
+                    "page_count": page_count, "char_count": char_count,
+                    "ocr_text": "", "elapsed_sec": elapsed, **no_text_result,
+                })
+            except Exception as e:
+                print(f"[archive_detect:{batch_id}:{idx}] DB update_file_done(no_text) 失败（忽略）: {e}")
+            return
 
         # 3) LLM 判定（限流 3 并发）
         _set_file_state(batch_id, idx, status="llm",
@@ -603,52 +668,82 @@ async def _generate_batch_overall(batch_id: str) -> None:
         return
 
     criteria = meta.get("user_prompt") or ""
+    stage = meta.get("stage")
     files = await crud.get_batch_files_simple(batch_id)
-    done_items = [f for f in files if f.get("status") == "done"]
+    done_all = [f for f in files if f.get("status") == "done"]
+    # no_text 文件算处理完成,但不参与总体判定
+    no_text_count = sum(1 for f in done_all if f.get("verdict") == "no_text")
+    done_items = [f for f in done_all if f.get("verdict") != "no_text"]
     error_count = sum(1 for f in files if f.get("status") == "error")
 
-    if not done_items:
-        overall_verdict, overall_score = "mismatch", 0
-    else:
+    # 规则平均分(作为 LLM 判定的兜底)
+    def _rule_avg():
+        if not done_items:
+            return "mismatch", 0
         scores = [int(f.get("match_score") or 0) for f in done_items]
         avg = round(sum(scores) / len(scores))
         if avg >= 80:
-            overall_verdict = "match"
+            return "match", avg
         elif avg >= 50:
-            overall_verdict = "partial"
-        else:
-            overall_verdict = "mismatch"
-        overall_score = avg
+            return "partial", avg
+        return "mismatch", avg
 
-    # 调 LLM 写 reason,失败用规则文本兜底
+    files_brief = [
+        {
+            "filename": f.get("filename"),
+            "verdict": f.get("verdict"),
+            "match_score": f.get("match_score"),
+            "doc_category": f.get("doc_category"),
+            "reason": (f.get("reason") or "")[:80],
+            "key_points": (f.get("key_points") or [])[:3],
+        }
+        for f in done_items
+    ]
+
+    overall_verdict = overall_score = None
     overall_reason = ""
-    try:
-        files_brief = [
-            {
-                "filename": f.get("filename"),
-                "verdict": f.get("verdict"),
-                "match_score": f.get("match_score"),
-                "doc_category": f.get("doc_category"),
-                "reason": (f.get("reason") or "")[:80],
-                "key_points": (f.get("key_points") or [])[:3],
-            }
-            for f in done_items
-        ]
-        async with _LLM_SEMAPHORE:
-            overall_reason = await asyncio.to_thread(
-                llm_service.summarize_batch,
-                files_brief, criteria, overall_verdict, overall_score,
-            )
-        overall_reason = redactor.redact(overall_reason or "")
-    except Exception as e:
-        print(f"[finalize:{batch_id}] LLM summarize_batch 失败,用规则文本兜底: {e}")
-        cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
-        cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
-        cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
-        overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
+    if done_items:
+        # 优先 LLM 综合判定(理解关键件 vs 附件);失败回退规则平均分 + summarize_batch 文本
+        try:
+            async with _LLM_SEMAPHORE:
+                judged = await asyncio.to_thread(
+                    llm_service.judge_batch_overall, files_brief, criteria, stage,
+                )
+            overall_verdict = judged["verdict"]
+            overall_score = judged["score"]
+            overall_reason = redactor.redact(judged.get("reason") or "")
+        except Exception as e:
+            print(f"[finalize:{batch_id}] LLM judge_batch_overall 失败,回退规则平均分: {e}")
 
+    if overall_verdict is None:
+        # 兜底:规则平均分 + (可选)summarize_batch 文本
+        overall_verdict, overall_score = _rule_avg()
+        if done_items:
+            try:
+                async with _LLM_SEMAPHORE:
+                    overall_reason = await asyncio.to_thread(
+                        llm_service.summarize_batch,
+                        files_brief, criteria, overall_verdict, overall_score,
+                    )
+                overall_reason = redactor.redact(overall_reason or "")
+            except Exception as e:
+                print(f"[finalize:{batch_id}] LLM summarize_batch 也失败,用规则文本: {e}")
+                cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
+                cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
+                cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
+                overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
+        elif no_text_count > 0:
+            # 没有可参与判定的文件,但全是无文字文件
+            overall_reason = f"共 {no_text_count} 个文件均无有效文字(图片型/扫描件/空白),无法判定留底符合度。"
+
+    # no_text / error 提示追加
+    extra = []
+    if no_text_count > 0:
+        extra.append(f"{no_text_count} 个文件无有效文字(未参与判定)")
     if error_count > 0:
-        overall_reason = (overall_reason or "").rstrip() + f" 另有 {error_count} 个文件处理失败。"
+        extra.append(f"{error_count} 个文件处理失败")
+    if extra:
+        overall_reason = (overall_reason or "").rstrip() + " 另有 " + "、".join(extra) + "。"
 
     # 同步到内存 _batch_status(如果还在)
     state = _batch_status.get(batch_id)
@@ -656,7 +751,7 @@ async def _generate_batch_overall(batch_id: str) -> None:
         state["overall_verdict"] = overall_verdict
         state["overall_score"] = overall_score
         state["overall_reason"] = overall_reason
-        state["done_files"] = len(done_items)
+        state["done_files"] = len(done_all)
         state["status"] = "done"
 
     try:
@@ -666,7 +761,7 @@ async def _generate_batch_overall(batch_id: str) -> None:
     # worker 路径不调 bump_done_count,done_files 会停在初始值(reused_count)。
     # 这里用真实 done 数回填,保证前端"进度"列 done_files/total_files 正确。
     try:
-        await crud.reset_done_count(batch_id, len(done_items))
+        await crud.reset_done_count(batch_id, len(done_all))
     except Exception as e:
         print(f"[finalize:{batch_id}] DB reset_done_count 失败(忽略): {e}")
     try:
@@ -692,6 +787,102 @@ async def _generate_batch_overall(batch_id: str) -> None:
         )
     except Exception:
         pass
+
+
+def get_rejudge_progress() -> dict:
+    """返回批量重判进度快照(前端轮询)。"""
+    return dict(_rejudge_progress)
+
+
+async def start_rejudge_overall(verdicts: Optional[list[str]] = None) -> dict:
+    """按新规则批量重判总体(只重跑 judge_batch_overall,不碰单文件/不 OCR/不下载)。
+
+    verdicts: 要重判的 overall_verdict 集合,如 ['partial','mismatch'];None/空=所有 done 批次。
+    单例:已有重判在跑则拒绝。后台异步执行,前端轮询 get_rejudge_progress。
+    """
+    if _rejudge_progress["running"]:
+        raise ValueError("已有批量重判任务在进行中,请等待其完成")
+
+    batch_ids = await crud.list_batch_ids_for_rejudge(verdicts or [])
+    _rejudge_progress.update({
+        "running": True, "total": len(batch_ids), "done": 0, "failed": 0,
+        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "finished_at": None, "verdicts": verdicts or None,
+    })
+    asyncio.create_task(_run_rejudge_overall(batch_ids))
+    return {"total": len(batch_ids), "batch_ids": batch_ids}
+
+
+async def _run_rejudge_overall(batch_ids: list[str]) -> None:
+    """逐个重判(串行,复用 _generate_batch_overall);单次 LLM 调用的并发由内部 _LLM_SEMAPHORE 控。"""
+    try:
+        for bid in batch_ids:
+            if _should_stop:
+                break
+            try:
+                await _generate_batch_overall(bid)
+                _rejudge_progress["done"] += 1
+            except Exception as e:
+                _rejudge_progress["failed"] += 1
+                print(f"[rejudge:{bid}] 重判失败(忽略): {e}")
+    finally:
+        _rejudge_progress["running"] = False
+        _rejudge_progress["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_rerun_batch_progress() -> dict:
+    """返回批量重审进度快照(前端轮询)。"""
+    return dict(_rerun_batch_progress)
+
+
+async def start_rerun_files_batch(verdicts: Optional[list[str]] = None) -> dict:
+    """批量重审单文件:对目标批次逐个原地重跑(force_all,复用 ocr_text,不重新 OCR/下载)。
+
+    每个批次沿用它自己原本的 criteria/stage。verdicts=要重审的 overall 集合;None/空=所有 done。
+    单例;后台异步执行,前端轮询 get_rerun_batch_progress。
+    """
+    if _rerun_batch_progress["running"]:
+        raise ValueError("已有批量重审任务在进行中,请等待其完成")
+    if _rejudge_progress["running"]:
+        raise ValueError("批量重判总体正在进行中,请等待其完成后再批量重审")
+
+    batch_ids = await crud.list_batch_ids_for_rejudge(verdicts or [])
+    _rerun_batch_progress.update({
+        "running": True, "total": len(batch_ids), "done": 0, "failed": 0,
+        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "finished_at": None, "verdicts": verdicts or None,
+    })
+    asyncio.create_task(_run_rerun_files_batch(batch_ids))
+    return {"total": len(batch_ids), "batch_ids": batch_ids}
+
+
+async def _run_rerun_files_batch(batch_ids: list[str]) -> None:
+    """逐批触发原地重跑(force_all)。各批沿用自身 criteria/stage;单文件由 worker 队列串行消化。"""
+    try:
+        for bid in batch_ids:
+            if _should_stop:
+                break
+            try:
+                meta = await crud.get_batch_meta(bid)
+                if not meta:
+                    _rerun_batch_progress["failed"] += 1
+                    continue
+                criteria = meta.get("user_prompt") or ""
+                stage = meta.get("stage")
+                if not criteria.strip():
+                    _rerun_batch_progress["failed"] += 1
+                    print(f"[rerun_batch:{bid}] 原 criteria 为空,跳过")
+                    continue
+                await rerun_batch_inplace(
+                    batch_id=bid, criteria=criteria, stage=stage, force_all=True,
+                )
+                _rerun_batch_progress["done"] += 1
+            except Exception as e:
+                _rerun_batch_progress["failed"] += 1
+                print(f"[rerun_batch:{bid}] 批量重审触发失败(忽略): {e}")
+    finally:
+        _rerun_batch_progress["running"] = False
+        _rerun_batch_progress["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def queue_stats() -> dict:
@@ -969,9 +1160,10 @@ async def submit_recheck_batch(
         new_batch_id=new_batch_id,
         criteria=criteria.strip(),
         items_plan=items_plan,
+        stage=stage,
     )
 
-    # 内存态:文件都先 pending,由 _process_one_recheck 逐个置 done/error
+    # 内存态:文件都先 pending,worker 进程逐个置 done/error(前端仍走 DB 轮询)
     _batch_status[new_batch_id] = {
         "batch_id": new_batch_id,
         "source_batch_id": source_batch_id,
@@ -1018,7 +1210,10 @@ async def submit_recheck_batch(
         ],
     }
 
-    asyncio.create_task(_orchestrate_recheck(new_batch_id, criteria.strip(), stage, items_plan))
+    # 交给 worker DB 队列串行消化(不再主进程 fan-out),启动 finalize 轮询等全部终态生成总报告
+    task = asyncio.create_task(_batch_finalize_poll(new_batch_id),
+                               name=f"finalize-{new_batch_id}")
+    _finalize_tasks[new_batch_id] = task
 
     mode = "business" if source.get("progress") or source.get("client") else "quick"
     return {
@@ -1029,193 +1224,6 @@ async def submit_recheck_batch(
         "ocr_count": ocr_count,
         "mode": mode,
     }
-
-
-async def _orchestrate_recheck(batch_id: str, criteria: str, stage: Optional[str], items_plan: list[dict]):
-    try:
-        tasks = [
-            asyncio.create_task(_process_one_recheck(batch_id, p["idx"], p, criteria, stage))
-            for p in items_plan
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        await _finalize_overall_for_batch(batch_id, criteria)
-
-
-async def _process_one_recheck(
-    batch_id: str,
-    idx: int,
-    item: dict,
-    criteria: str,
-    stage: Optional[str],
-):
-    """重新审核单文件:有 ocr_text 则 AI-only;否则尝试用 source_url 重新 OCR。"""
-    t0 = time.time()
-    fetched_temp_path = None
-    filename = item.get("filename") or ""
-    mime_type = item.get("mime_type")
-    page_count = char_count = None
-
-    try:
-        text = item.get("ocr_text") or ""
-        if text:
-            _set_file_state(batch_id, idx, status="llm")
-        else:
-            source_url = item.get("source_url")
-            if not source_url:
-                raise ValueError("缺少 OCR 文本且无可重新下载的 source_url")
-            _set_file_state(batch_id, idx, status="fetching")
-            try:
-                local_path, fname, mtype, refresh_info = await file_fetcher.fetch_url_to_temp_with_refresh(
-                    source_url,
-                    file_id=item.get("file_id"),
-                )
-                if refresh_info:
-                    print(f"[archive_detect:{batch_id}:{idx}] URL 已过期,已用 file_id={item.get('file_id')} 刷新下载地址")
-                # 业务方传的 filename 是权威可读名,优先保留;下载推断名仅在业务方没传时兜底
-                filename = filename or fname
-                mime_type = mtype
-            except file_fetcher.FileTooLargeError:
-                raise ValueError("文件超过 50MB 上限,无法处理")
-            except ValueError as e:
-                raise ValueError(f"文件地址无效或刷新失败:{e}")
-            except Exception as e:
-                msg = _humanize_fetch_error(e)
-                raise ValueError(f"无法下载文件:{msg}")
-            fetched_temp_path = local_path
-            if not file_fetcher.is_supported_extension(filename):
-                raise ValueError(file_fetcher.get_unsupported_hint(filename))
-
-            _set_file_state(batch_id, idx, status="ocr", filename=filename, mime_type=mime_type)
-            extracted = await text_extractor.extract_text(local_path, mime_type)
-            text = extracted.get("text") or ""
-            page_count = extracted.get("page_count")
-            char_count = extracted.get("char_count")
-            if not text.strip():
-                raise ValueError("OCR/抽取后无文字")
-            text = _redact_text(text)
-            _set_file_state(batch_id, idx, status="llm", page_count=page_count, char_count=char_count)
-
-        async with _LLM_SEMAPHORE:
-            verdict = await asyncio.to_thread(llm_service.detect_archival, text, criteria, stage)
-        verdict = redactor.redact_dict(verdict)
-
-        elapsed = round(time.time() - t0, 2)
-        _set_file_state(
-            batch_id, idx,
-            status="done",
-            filename=filename,
-            mime_type=mime_type,
-            page_count=page_count,
-            char_count=char_count,
-            elapsed_sec=elapsed,
-            is_reused=False,
-            **verdict,
-        )
-        try:
-            await crud.update_file_done(batch_id, idx, {
-                "filename": filename,
-                "mime_type": mime_type,
-                "page_count": page_count,
-                "char_count": char_count,
-                "is_archival": verdict.get("is_archival"),
-                "confidence": verdict.get("confidence"),
-                "verdict": verdict.get("verdict"),
-                "match_score": verdict.get("match_score"),
-                "reason": verdict.get("reason"),
-                "key_points": verdict.get("key_points"),
-                "doc_category": verdict.get("doc_category"),
-                "ocr_text": text,
-                "elapsed_sec": elapsed,
-            })
-        except Exception as e:
-            print(f"[archive_detect:{batch_id}:{idx}] DB recheck update_file_done 失败(忽略): {e}")
-
-    except Exception as e:
-        elapsed = round(time.time() - t0, 2)
-        msg = str(e) or e.__class__.__name__
-        _set_file_state(batch_id, idx, status="error", error_msg=msg, elapsed_sec=elapsed,
-                        filename=filename or None)
-        try:
-            await crud.update_file_error(batch_id, idx, msg, elapsed, filename or None)
-        except Exception as e2:
-            print(f"[archive_detect:{batch_id}:{idx}] DB recheck update_file_error 失败(忽略): {e2}")
-    finally:
-        try:
-            new_done = await crud.bump_done_count(batch_id)
-            state = _batch_status.get(batch_id)
-            if state:
-                state["done_files"] = new_done
-        except Exception as e:
-            state = _batch_status.get(batch_id)
-            if state:
-                state["done_files"] = (state.get("done_files") or 0) + 1
-            print(f"[archive_detect:{batch_id}] DB recheck bump_done_count 失败(回退内存): {e}")
-        if fetched_temp_path:
-            file_fetcher.cleanup_temp_file(fetched_temp_path)
-
-
-async def _finalize_overall_for_batch(batch_id: str, criteria: str) -> None:
-    """为内存态 batch 生成 overall_* 并写 DB。
-
-    recheck 使用;后续可抽给匿名/business 共用。
-    """
-    state = _batch_status.get(batch_id)
-    overall_verdict = "mismatch"
-    overall_score = 0
-    overall_reason = ""
-    if state:
-        done_items = [f for f in (state.get("files") or []) if f.get("status") == "done"]
-        error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
-        if done_items:
-            scores = [int(f.get("match_score") or 0) for f in done_items]
-            avg = round(sum(scores) / len(scores))
-            if avg >= 80:
-                overall_verdict = "match"
-            elif avg >= 50:
-                overall_verdict = "partial"
-            else:
-                overall_verdict = "mismatch"
-            overall_score = avg
-        try:
-            files_brief = [
-                {
-                    "filename": f.get("filename"),
-                    "verdict": f.get("verdict"),
-                    "match_score": f.get("match_score"),
-                    "doc_category": f.get("doc_category"),
-                    "reason": (f.get("reason") or "")[:80],
-                    "key_points": (f.get("key_points") or [])[:3],
-                }
-                for f in done_items
-            ]
-            async with _LLM_SEMAPHORE:
-                overall_reason = await asyncio.to_thread(
-                    llm_service.summarize_batch,
-                    files_brief, criteria, overall_verdict, overall_score,
-                )
-            overall_reason = redactor.redact(overall_reason or "")
-        except Exception as e:
-            print(f"[archive_detect:{batch_id}] LLM recheck summarize_batch 失败,用规则文本兜底: {e}")
-            cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
-            cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
-            cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
-            overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
-        if error_count > 0:
-            overall_reason = (overall_reason or "").rstrip() + f" 另有 {error_count} 个文件处理失败。"
-        state["overall_verdict"] = overall_verdict
-        state["overall_score"] = overall_score
-        state["overall_reason"] = overall_reason
-        state["status"] = "done"
-
-    try:
-        await crud.update_batch_overall(batch_id, overall_verdict, overall_score, overall_reason)
-    except Exception as e:
-        print(f"[archive_detect:{batch_id}] DB recheck update_batch_overall 失败(忽略): {e}")
-    try:
-        await crud.update_batch_status(batch_id, "done")
-    except Exception as e:
-        print(f"[archive_detect:{batch_id}] DB recheck update_batch_status 失败(忽略): {e}")
 
 
 async def rerun_batch_inplace(
@@ -1284,65 +1292,25 @@ async def rerun_batch_inplace(
             "mode": "no-op",
         }
 
-    # 更新批次状态和提示词
-    await crud.update_batch_status(batch_id, "running")
-    await crud.update_batch_criteria(batch_id, criteria.strip())
+    done_kept = len(files) - len(items_plan)
+    # 重置选中文件为 pending(有 ocr_text 的写进 reuse_ocr_text 供 worker 跳过 OCR)+
+    # 批次回 running、更新 criteria/stage、done_files 重置为保留数。一次事务完成。
+    await crud.requeue_files_for_rerun(
+        batch_id=batch_id,
+        criteria=criteria.strip(),
+        stage=stage,
+        rerun_items=[{"idx": p["idx"], "ocr_text": p.get("ocr_text")} for p in items_plan],
+        done_kept=done_kept,
+    )
 
-    # 重建内存态:历史批次不在内存里,必须从 DB 全量 seed,
-    # 否则 _set_file_state 找不到状态、_finalize_overall_for_batch 拿不到
-    # done 文件,总体判断会被写成默认 mismatch/0/""。
-    rerun_idxs = {p["idx"] for p in items_plan}
-    seeded_files = []
-    for f in files:
-        idx = f.get("idx")
-        is_rerun = idx in rerun_idxs
-        seeded_files.append({
-            "idx": idx,
-            "file_id": f.get("file_id"),
-            "filename": f.get("filename"),
-            "source_url": f.get("source_url"),
-            "version": f.get("version") or 1,
-            "page_count": None if is_rerun else f.get("page_count"),
-            "char_count": None if is_rerun else f.get("char_count"),
-            "elapsed_sec": None if is_rerun else f.get("elapsed_sec"),
-            "error_msg": None if is_rerun else f.get("error_msg"),
-            "mime_type": f.get("mime_type"),
-            # 重跑的文件重置为 pending,跳过的保留原终态和结果
-            "status": "pending" if is_rerun else f.get("status"),
-            "verdict": None if is_rerun else f.get("verdict"),
-            "match_score": None if is_rerun else f.get("match_score"),
-            "is_archival": None if is_rerun else f.get("is_archival"),
-            "confidence": None if is_rerun else f.get("confidence"),
-            "reason": None if is_rerun else f.get("reason"),
-            "key_points": [] if is_rerun else (f.get("key_points") or []),
-            "doc_category": None if is_rerun else f.get("doc_category"),
-            "is_reused": False,
-        })
-    done_kept = sum(1 for f in seeded_files if f["status"] == "done")
-    # DB done_files 重置为保留数,防止 bump_done_count 从旧总数继续累加
-    await crud.reset_done_count(batch_id, done_kept)
-    _batch_status[batch_id] = {
-        "batch_id": batch_id,
-        "user_prompt": criteria.strip(),
-        "criteria": criteria.strip(),
-        "stage": stage,
-        "source_kind": source.get("source_kind") or "batch",
-        "total_files": len(seeded_files),
-        "done_files": done_kept,
-        "status": "running",
-        "error": None,
-        "overall_verdict": None,
-        "overall_score": None,
-        "overall_reason": None,
-        "client": source.get("client"),
-        "progress": source.get("progress"),
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "created_ts": time.time(),
-        "files": seeded_files,
-    }
+    # 内存态失效(历史批次重跑,前端走 DB 轮询);清掉旧缓存避免 fast-path 返回陈旧结果
+    _batch_status.pop(batch_id, None)
 
-    # 启动重跑
-    asyncio.create_task(_orchestrate_rerun(batch_id, criteria.strip(), stage, items_plan))
+    # 交给 worker DB 队列串行消化,启动 finalize 轮询等全部终态生成总报告
+    if batch_id not in _finalize_tasks:
+        task = asyncio.create_task(_batch_finalize_poll(batch_id),
+                                   name=f"finalize-{batch_id}")
+        _finalize_tasks[batch_id] = task
 
     mode = "business" if source.get("progress") or source.get("client") else "quick"
     return {
@@ -1353,15 +1321,3 @@ async def rerun_batch_inplace(
         "skipped_count": skipped_count,
         "mode": mode,
     }
-
-
-async def _orchestrate_rerun(batch_id: str, criteria: str, stage: Optional[str], items_plan: list[dict]):
-    """原地重跑执行编排。复用 _process_one_recheck 逻辑。"""
-    try:
-        tasks = [
-            asyncio.create_task(_process_one_recheck(batch_id, p["idx"], p, criteria, stage))
-            for p in items_plan
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        await _finalize_overall_for_batch(batch_id, criteria)

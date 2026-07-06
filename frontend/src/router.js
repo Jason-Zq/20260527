@@ -22,6 +22,7 @@ const routes = [
   { path: '/archive-admin', component: () => import('./components/ArchiveAdminPage.vue') },
   { path: '/events', component: () => import('./components/EventsPage.vue') },
   { path: '/request-logs', component: () => import('./components/RequestLogsPage.vue') },
+  { path: '/external-api-logs', component: () => import('./components/ExternalApiLogsPage.vue') },
   { path: '/child-age-leads', component: () => import('./components/ChildAgeLeadsPage.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

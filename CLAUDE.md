@@ -181,7 +181,7 @@ migrations/versions/                     Alembic 迁移(当前到 014_api_reques
 - worker 处理新文件：`file_fetcher` 下载(必要时刷新 URL) → `text_extractor.extract_text` → `llm_service.detect_archival` → `redactor` 脱敏 → DB 终态写入 → 删临时文件。
 - OCR 文本只以脱敏后的 `archive_detect_files.ocr_text` 入库；默认批次查询用 `defer` 不拉该大字段，单文件详情用 `get_file_detail`。
 - 单文件 verdict 由 LLM 直接输出 `match/partial/mismatch`；`is_archival=(verdict=='match')`、`confidence=match_score` 用于向后兼容。
-- 批次总报告：所有文件完成后，规则计算 `overall_verdict/overall_score`，再调用 `llm_service.summarize_batch` 生成 `overall_reason`；失败时用规则文本兜底。
+- 批次总报告：所有文件完成后，优先调用 `llm_service.judge_batch_overall`（把全部文件明细 + criteria + stage 交给 LLM），让其综合判定 `overall_verdict/overall_score/overall_reason`——核心是**理解"关键件 vs 附带件"**：有关键文件确凿命中进展即整批 `match`，不被附带文件的低分拉低；只有无关附件命中、关键件缺失则 `partial`。LLM 调用失败时回退旧的**规则平均分**（avg≥80→match / ≥50→partial / <50→mismatch）+ `summarize_batch` 文本兜底。两处 finalize（worker 路径 `_generate_batch_overall`、快速检测路径 `_orchestrate`）逻辑一致。
 - 公司售后留底分类体系硬编码在 `llm_service.py` 的 `ARCHIVE_CATEGORIES_FULL/SIMPLE`，业务模式会传 `stage=pre_submit|post_submit` 让 LLM 感知递交前/后分类。
 
 ## 客户档案结构化生成

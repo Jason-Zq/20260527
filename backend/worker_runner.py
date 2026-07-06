@@ -61,59 +61,79 @@ async def _process_one_file(task: dict, worker_id: str) -> None:
     idx = task["idx"]
     source_url = task.get("source_url")
     upload_local_path = task.get("local_path")
+    reuse_ocr_text = task.get("reuse_ocr_text")
     filename = task.get("filename") or ""
     mime_type = task.get("mime_type")
     fetched_temp_path: Optional[str] = None
 
     try:
-        # 1) 拿本地文件路径
-        if source_url:
-            await crud.update_file_intermediate_status(file_db_id, "fetching")
-            if not source_url.strip():
-                raise ValueError("文件地址为空")
-            try:
-                local_path, fname, mtype, refresh_info = await file_fetcher.fetch_url_to_temp_with_refresh(
-                    source_url, file_id=task.get("file_id"),
-                )
-                # 业务方传的 filename 是权威可读名,优先保留;下载推断名仅在业务方没传时兜底
-                filename = filename or fname
-                mime_type = mtype
-                if refresh_info:
-                    print(f"[{worker_id}:{batch_id}:{idx}] URL 已刷新")
-            except file_fetcher.FileTooLargeError:
-                raise ValueError("文件超过 50MB 上限,无法处理")
-            except ValueError as e:
-                raise ValueError(f"文件地址无效或刷新失败:{e}")
-            except Exception as e:
-                from archive_detect_service import _humanize_fetch_error
-                msg = _humanize_fetch_error(e)
-                raise ValueError(f"无法下载文件:{msg}")
-            fetched_temp_path = local_path
-            if not file_fetcher.is_supported_extension(filename):
-                raise ValueError(file_fetcher.get_unsupported_hint(filename))
-        elif upload_local_path:
-            # upload 模式: 主进程已落盘,worker 进程直读
-            local_path = upload_local_path
-            if not os.path.exists(local_path):
-                raise ValueError("上传文件丢失(可能已被清理或路径错误)")
-            try:
-                size = os.path.getsize(local_path)
-            except OSError:
-                size = 0
-            if size > file_fetcher.MAX_DOWNLOAD_BYTES:
-                mb = size / 1024 / 1024
-                raise ValueError(f"文件体积 {mb:.1f}MB 超过 50MB 上限")
+        page_count = None
+        char_count = None
+        # 0) 重审复用: reuse_ocr_text 非空则跳过下载+OCR,直接用它跑 LLM(AI-only)
+        if reuse_ocr_text and reuse_ocr_text.strip():
+            text = reuse_ocr_text
         else:
-            raise ValueError("文件来源缺失(既无 source_url 也无 local_path)")
+            # 1) 拿本地文件路径
+            if source_url:
+                await crud.update_file_intermediate_status(file_db_id, "fetching")
+                if not source_url.strip():
+                    raise ValueError("文件地址为空")
+                try:
+                    local_path, fname, mtype, refresh_info = await file_fetcher.fetch_url_to_temp_with_refresh(
+                        source_url, file_id=task.get("file_id"),
+                    )
+                    # 业务方传的 filename 是权威可读名,优先保留;下载推断名仅在业务方没传时兜底
+                    filename = filename or fname
+                    mime_type = mtype
+                    if refresh_info:
+                        print(f"[{worker_id}:{batch_id}:{idx}] URL 已刷新")
+                except file_fetcher.FileTooLargeError:
+                    raise ValueError("文件超过 50MB 上限,无法处理")
+                except ValueError as e:
+                    raise ValueError(f"文件地址无效或刷新失败:{e}")
+                except Exception as e:
+                    from archive_detect_service import _humanize_fetch_error
+                    msg = _humanize_fetch_error(e)
+                    raise ValueError(f"无法下载文件:{msg}")
+                fetched_temp_path = local_path
+                if not file_fetcher.is_supported_extension(filename):
+                    raise ValueError(file_fetcher.get_unsupported_hint(filename))
+            elif upload_local_path:
+                # upload 模式: 主进程已落盘,worker 进程直读
+                local_path = upload_local_path
+                if not os.path.exists(local_path):
+                    raise ValueError("上传文件丢失(可能已被清理或路径错误)")
+                try:
+                    size = os.path.getsize(local_path)
+                except OSError:
+                    size = 0
+                if size > file_fetcher.MAX_DOWNLOAD_BYTES:
+                    mb = size / 1024 / 1024
+                    raise ValueError(f"文件体积 {mb:.1f}MB 超过 50MB 上限")
+            else:
+                raise ValueError("文件来源缺失(既无 source_url 也无 local_path)")
 
-        # 2) OCR / 抽取
-        await crud.update_file_intermediate_status(file_db_id, "ocr")
-        extracted = await text_extractor.extract_text(local_path, mime_type)
-        text = extracted.get("text") or ""
-        page_count = extracted.get("page_count")
-        char_count = extracted.get("char_count")
-        if not text.strip():
-            raise ValueError("OCR/抽取后无文字")
+            # 2) OCR / 抽取
+            await crud.update_file_intermediate_status(file_db_id, "ocr")
+            extracted = await text_extractor.extract_text(local_path, mime_type)
+            text = extracted.get("text") or ""
+            page_count = extracted.get("page_count")
+            char_count = extracted.get("char_count")
+            if not text.strip():
+                # 无有效文字:不算处理失败(不 error、不重试),标 done + verdict=no_text,
+                # 由总体判定阶段排除在外。
+                elapsed = round(time.time() - t0, 2)
+                await crud.update_file_done(batch_id, idx, {
+                    "filename": filename, "mime_type": mime_type,
+                    "page_count": page_count, "char_count": char_count,
+                    "is_archival": False, "confidence": 0,
+                    "verdict": "no_text", "match_score": 0,
+                    "reason": "OCR/抽取后无有效文字(可能为图片型/扫描件/空白文档)",
+                    "key_points": [], "doc_category": "无文字",
+                    "ocr_text": "", "elapsed_sec": elapsed,
+                })
+                print(f"[{worker_id}:{batch_id}:{idx}] OCR 无文字,标 done(no_text)")
+                return
 
         # 3) LLM 判定
         await crud.update_file_intermediate_status(file_db_id, "llm")
@@ -122,8 +142,8 @@ async def _process_one_file(task: dict, worker_id: str) -> None:
         if not batch_meta:
             raise ValueError(f"批次 {batch_id} 元信息已丢失")
         criteria = batch_meta.get("user_prompt") or ""
-        # stage 当前 DB 没存,从内存约定走默认 post_submit;后续可以加 batch.stage 字段
-        verdict = await asyncio.to_thread(llm_service.detect_archival, text, criteria, "post_submit")
+        stage = batch_meta.get("stage") or "post_submit"
+        verdict = await asyncio.to_thread(llm_service.detect_archival, text, criteria, stage)
         verdict = redactor.redact_dict(verdict)
         ocr_text_redacted = _redact_text(text)
 

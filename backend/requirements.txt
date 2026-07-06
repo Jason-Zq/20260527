@@ -20,6 +20,7 @@ beautifulsoup4>=4.12.0
 openpyxl>=3.1.0
 python-pptx>=0.6.23
 xlrd==1.2.0
+olefile>=0.47
 # Linux/服务器部署可选:opencv-python-headless 替代 opencv-python,避开 libGL.so 系统依赖
 # 实际由 rapidocr-onnxruntime 传递依赖拉入,如部署机装不了 mesa-libGL 取消下面注释强制 headless
 # opencv-python-headless>=4.5

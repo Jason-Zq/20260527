@@ -341,6 +341,30 @@ export async function rerunArchiveDetectBatch(batchId, criteria, stage = null, f
   return r.data
 }
 
+/** 按新规则批量重判批次总体（默认只刷 partial/mismatch） */
+export async function startRejudgeOverall(verdicts = ['partial', 'mismatch']) {
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/rejudge-overall`, { verdicts })
+  return r.data
+}
+
+/** 查询批量重判进度 */
+export async function getRejudgeProgress() {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/rejudge-overall/progress`)
+  return r.data
+}
+
+/** 批量重审单文件（重跑，复用 ocr_text，默认只刷 partial/mismatch） */
+export async function startRerunFilesBatch(verdicts = ['partial', 'mismatch']) {
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/rerun-files-batch`, { verdicts })
+  return r.data
+}
+
+/** 查询批量重审进度 */
+export async function getRerunFilesProgress() {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/rerun-files-batch/progress`)
+  return r.data
+}
+
 // ==================== 客户档案结构化生成 ====================
 
 export async function listClientProfileSourceFiles(clientId) {
@@ -675,5 +699,10 @@ export async function listEventCategories() {
  */
 export async function listRequestLogs(params = {}) {
   const response = await axios.get(`${API_BASE}/admin/request-logs`, { params })
+  return response.data
+}
+
+export async function listExternalApiLogs(params = {}) {
+  const response = await axios.get(`${API_BASE}/admin/external-api-logs`, { params })
   return response.data
 }
