@@ -656,3 +656,32 @@ class ExternalApiLog(Base):
         Index("ix_external_api_logs_service_created", "service", created_at.desc()),
         Index("ix_external_api_logs_status_created", "status", created_at.desc()),
     )
+
+
+class AiApiCall(Base):
+    """AI/LLM API 调用记录。持久化所有大模型调用，用于审计、排查和成本分析。保留 30 天。"""
+    __tablename__ = "ai_api_calls"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="调用时间")
+    operation = Column(String(64), nullable=True, comment="LLM wrapper/操作名,如 detect_archival")
+    model = Column(String(64), nullable=True, comment="模型 ID")
+    prompt = Column(Text, nullable=True, comment="prompt 全文")
+    response_raw = Column(Text, nullable=True, comment="原始返回文本")
+    status = Column(String(10), nullable=False, comment="ok | error")
+    error_msg = Column(Text, nullable=True, comment="错误信息")
+    elapsed_ms = Column(Integer, nullable=True, comment="耗时毫秒")
+    batch_id = Column(String(40), nullable=True, comment="关联批次")
+    file_id = Column(String(64), nullable=True, comment="关联业务文件编码")
+    client_code = Column(String(40), nullable=True, comment="关联客户编码")
+    task_id = Column(String(64), nullable=True, comment="关联任务/摘要 ID")
+
+    __table_args__ = (
+        Index("ix_ai_api_calls_created", created_at.desc()),
+        Index("ix_ai_api_calls_operation_created", "operation", created_at.desc()),
+        Index("ix_ai_api_calls_model_created", "model", created_at.desc()),
+        Index("ix_ai_api_calls_batch_id_created", "batch_id", created_at.desc()),
+        Index("ix_ai_api_calls_file_id_created", "file_id", created_at.desc()),
+        Index("ix_ai_api_calls_client_code_created", "client_code", created_at.desc()),
+        Index("ix_ai_api_calls_status_created", "status", created_at.desc()),
+    )

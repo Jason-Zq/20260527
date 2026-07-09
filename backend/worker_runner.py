@@ -143,7 +143,10 @@ async def _process_one_file(task: dict, worker_id: str) -> None:
             raise ValueError(f"批次 {batch_id} 元信息已丢失")
         criteria = batch_meta.get("user_prompt") or ""
         stage = batch_meta.get("stage") or "post_submit"
-        verdict = await asyncio.to_thread(llm_service.detect_archival, text, criteria, stage)
+        verdict = await asyncio.to_thread(
+            llm_service.detect_archival, text, criteria, stage,
+            batch_id=batch_id, file_id=task.get("file_id"),
+        )
         verdict = redactor.redact_dict(verdict)
         ocr_text_redacted = _redact_text(text)
 

@@ -595,7 +595,16 @@ function buildBizCriteria() {
   if (p.progress_name) parts.push(`「${p.progress_name}」进展`)
 
   const subject = parts.length ? parts.join(' / ') : '本客户'
-  return `请按公司文件留底标准，审核此文件是否为 ${subject} 在「${stage}」阶段应上传的留底文件。重点判断文件类型、内容完整性和格式规范，而不是严格匹配文件上的姓名（该客户的文件可能属于其配偶/子女/父母）。`
+
+  // 关联人关键词:客户姓名、办理人。文件中若出现这些人名(含拼音/英文转写)即视为强关联信号。
+  const relatedNames = []
+  if (c.name) relatedNames.push(c.name)
+  if (p.handler) relatedNames.push(p.handler)
+  const relatedHint = relatedNames.length
+    ? `\n关联人关键词：${relatedNames.join('、')}。文件内容中若出现上述任一姓名（含其拼音或英文转写，如「关晓晓」对应「GUAN Xiaoxiao」），即视为与本进展强关联，可支持判定为符合，不要因文件当事人姓名与客户不一致而判为不符合——授权委托书/公证认证等文件的委托人可能是客户的家属或本进展的办理人。`
+    : ''
+
+  return `请按公司文件留底标准，审核此文件是否为 ${subject} 在「${stage}」阶段应上传的留底文件。重点判断文件类型、内容完整性和格式规范，而不是严格匹配文件上的姓名（该客户的文件可能属于其配偶/子女/父母）。留底的核心是证明该进展对应的服务已启动或发生：只要合同中约定的任意一项服务内容有对应凭证即视为服务启动，证据可以是官方文件，也可以是服务合同 + 聊天记录/邮件/确认截图等软证据组合（如客户确认转卖房产即视为该项服务已启动），软证据同样有效。${relatedHint}`
 }
 
 function onCriteriaInput() {
@@ -612,6 +621,7 @@ function resetCriteria() {
 watch(
   () => [
     bizClient.value.name,
+    bizProgress.value.handler,
     bizProgress.value.project_name,
     bizProgress.value.project_detail_name,
     bizProgress.value.progress_name,

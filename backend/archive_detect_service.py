@@ -260,6 +260,7 @@ async def _orchestrate(batch_id: str, user_prompt: str, source_kind: str, items:
                     async with _LLM_SEMAPHORE:
                         judged = await asyncio.to_thread(
                             llm_service.judge_batch_overall, files_brief, user_prompt, None,
+                            batch_id=batch_id,
                         )
                     overall_verdict = judged["verdict"]
                     overall_score = judged["score"]
@@ -277,6 +278,7 @@ async def _orchestrate(batch_id: str, user_prompt: str, source_kind: str, items:
                             overall_reason = await asyncio.to_thread(
                                 llm_service.summarize_batch,
                                 files_brief, user_prompt, overall_verdict, overall_score,
+                                batch_id=batch_id,
                             )
                         overall_reason = redactor.redact(overall_reason or "")
                     except Exception as e:
@@ -401,7 +403,10 @@ async def _process_one(
         _set_file_state(batch_id, idx, status="llm",
                         page_count=page_count, char_count=char_count)
         async with _LLM_SEMAPHORE:
-            verdict = await asyncio.to_thread(llm_service.detect_archival, text, user_prompt)
+            verdict = await asyncio.to_thread(
+                llm_service.detect_archival, text, user_prompt,
+                batch_id=batch_id, file_id=item.get("file_id"),
+            )
 
         # 4) 脱敏（防御层）
         verdict = redactor.redact_dict(verdict)
@@ -708,6 +713,7 @@ async def _generate_batch_overall(batch_id: str) -> None:
             async with _LLM_SEMAPHORE:
                 judged = await asyncio.to_thread(
                     llm_service.judge_batch_overall, files_brief, criteria, stage,
+                    batch_id=batch_id,
                 )
             overall_verdict = judged["verdict"]
             overall_score = judged["score"]
@@ -724,6 +730,7 @@ async def _generate_batch_overall(batch_id: str) -> None:
                     overall_reason = await asyncio.to_thread(
                         llm_service.summarize_batch,
                         files_brief, criteria, overall_verdict, overall_score,
+                        batch_id=batch_id,
                     )
                 overall_reason = redactor.redact(overall_reason or "")
             except Exception as e:
@@ -732,9 +739,18 @@ async def _generate_batch_overall(batch_id: str) -> None:
                 cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
                 cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
                 overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
-        elif no_text_count > 0:
-            # 没有可参与判定的文件,但全是无文字文件
-            overall_reason = f"共 {no_text_count} 个文件均无有效文字(图片型/扫描件/空白),无法判定留底符合度。"
+        elif no_text_count > 0 or error_count > 0:
+            # 没有可参与判定的文件:全是无文字文件 / 检测失败文件(如加密、损坏)
+            # 判定为无法判定而非内容不符,措辞上明确区分"检测失败"与"内容不符"
+            causes = []
+            if no_text_count > 0:
+                causes.append(f"{no_text_count} 个文件无有效文字(图片型/扫描件/空白)")
+            if error_count > 0:
+                causes.append(f"{error_count} 个文件检测失败(如加密、损坏、无法读取)")
+            overall_reason = (
+                "本批次无可参与判定的文件:" + "、".join(causes)
+                + "。此为检测未成功,非文件内容与留底标准不符。"
+            )
 
     # no_text / error 提示追加
     extra = []

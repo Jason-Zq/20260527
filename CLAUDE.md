@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> 另有 [AGENTS.md](AGENTS.md)：面向 AI 助手的结构化总览（项目结构/技术栈/命令/陷阱），与本文互补。本文侧重各流水线的设计决策与遗留注意事项；两份文档内容有重叠，改动任一时注意保持一致。
+
 ## 项目定位
 
 智能文档审核工作台，面向移民/售后客户材料处理。当前主线是**文件留底检测/业务审核**，同时保留材料解析、Word 模板填写、PDF 拆分、URL 文件摘要等能力。
@@ -72,7 +74,7 @@ sudo systemctl reload nginx                    # 前端 dist 变化
 - **OCR 引擎是 RapidOCR(onnxruntime)**,不是 PaddleOCR。所有 OCR 调用收口在 `ocr_service.run_ocr()`,内部把 RapidOCR 输出适配回旧 PaddleOCR 结构 `[[[bbox,(text,conf)],...]]`,下游零改动。模型权重随包内置,无需联网下载、无 libGL 依赖。
 - **数据库连接优先用 `DATABASE_URL` 环境变量**，否则才回退到 `config.json`。生产环境 systemd unit 通过 [deploy/linux/app.env](deploy/linux/app.env)（不入库）注入。
 - **`docx2pdf` 在 Linux 上不可用**：`backend/template_service.py:_convert_docx_to_pdf` 在 Windows 走 docx2pdf（Word COM），Linux 走 LibreOffice `soffice --headless`。两条路径都已落地，本地开发不受影响。
-- **`.doc` 抽取靠系统 antiword**：`text_extractor._extract_doc` subprocess 调 `antiword -m UTF-8.txt`。服务器需 `dnf/apt install antiword`(已写进 01-server-setup.sh);中文 .doc 上线前必须用真实文件验证 mapping。本地 Windows 没 antiword 会返回明确 ValueError。
+- **`.doc` 抽取优先纯 Python olefile**：`text_extractor._extract_doc` 优先用 `olefile` 解析 OLE2 复合文档(按 [MS-DOC] piece table 逐片解码,零系统依赖),失败再回退 `soffice`(LibreOffice 转 docx)→ `antiword`。生产 RHEL 系源里没有 antiword/libreoffice 也能靠 olefile 处理 .doc。三者全无才抛 ValueError。
 - **健康检查**：`GET /api/healthz` 真查 DB 和 worker,nginx 反代到 `/healthz` 给外部监控用。`/api/archive-detect/admin/queue-stats` 只看 DB 队列深度。
 - **Windows 专用部署脚本**（PowerShell 打包）已退役挪到 [deploy/windows/](deploy/windows/)，仅作历史保留。
 
@@ -115,9 +117,9 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_sca
 
 ```text
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
-  frontend/src/router.js                 路由: /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /events, /request-logs, /child-age-leads
+  frontend/src/router.js                 路由: /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads
   frontend/src/api.js                    axios API 封装
-  frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ChildAgeLeadsPage)
+  frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ExternalApiLogsPage / ChildAgeLeadsPage)
 
 后端: FastAPI + SQLAlchemy 2 async + Alembic
   backend/main.py                        FastAPI 入口 + 路由聚合 + startup/shutdown + 内存态轮询缓存
@@ -138,7 +140,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_sca
 config.json                              DB + LLM + OCR/文档类型配置
 output/                                  静态挂载为 /uploads/，保存 PNG/PDF/DOCX 等产物
 temp/                                    上传/下载/模板解析临时文件
-migrations/versions/                     Alembic 迁移(当前到 014_api_request_logs)
+migrations/versions/                     Alembic 迁移(当前到 017_ai_api_calls)
 ```
 
 ## 数据库重点
@@ -150,13 +152,15 @@ migrations/versions/                     Alembic 迁移(当前到 014_api_reques
 - `templates` / `template_fills`：Word 模板和填充历史。
 - `split_tasks`：PDF 拆分任务，持久化状态和 ranges；7 天后清理磁盘文件但保留 DB 记录。
 - `summaries`：URL 文件摘要历史。
-- `archive_detect_batches`：文件留底检测批次；包含 `overall_verdict/overall_score/overall_reason` 当次总体判断。
-- `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`；DB 队列字段 `status(pending/leased/fetching/ocr/llm/done/error)`、`worker_lease_until`、`retry_count`、`local_path`(upload 模式残留,现已停用)。
+- `archive_detect_batches`：文件留底检测批次；包含 `overall_verdict/overall_score/overall_reason` 当次总体判断、`stage(pre_submit/post_submit)`。
+- `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`；DB 队列字段 `status(pending/leased/fetching/ocr/llm/done/error)`、`worker_lease_until`、`retry_count`、`local_path`(upload 模式残留,现已停用)、`reuse_ocr_text`(重审入队预填的源 OCR 文本,非空则 worker 跳过下载+OCR)。`verdict` 除 match/partial/mismatch 外还有 **`no_text`**(OCR/抽取后无有效文字,标 done 不算失败、不参与总体判定)。
 - `archive_detect_progress`：业务审核的进展包实体，`(client_id, progress_oid)` 唯一；存办理人、项目、项目详情、进展名称等。
 - `archive_detect_folder_summaries`：进展包维度滚动总报告（多版本，后续阶段使用）。
 - `client_profile_generation_tasks`：客户档案结构化生成任务；记录源文件、抽取结果、写入统计、状态。
 - `system_events`：业务事件流(severity/category/message/context),前端 `/events` 页查看,GC 保留 30 天。
 - `api_request_logs`：API 请求记录,中间件只记 `POST /api/archive-detect/business/batch` 的请求体,前端 `/request-logs` 页查看,GC 保留 30 天。
+- `external_api_logs`：出站外部接口调用记录(`service=refresh_url`),记地址/请求参数/返回全文/耗时/成败,前端 `/external-api-logs` 页,GC 保留 30 天。URL 刷新在 `file_fetcher.refresh_download_url` 埋点(async create_task)。
+- `ai_api_calls`：AI/LLM API 调用记录,记 operation/model/prompt/response/耗时/成败/业务上下文(batch_id/file_id/client_code/task_id),前端 `/ai-api-calls` 页,GC 保留 30 天。LLM 在 `llm_service._call_llm` 埋点--**注意用同步 `insert_ai_api_call_sync`**,因为它跑在 worker 线程(asyncio.to_thread)里,async 引擎连接池绑主 loop 不能跨线程用。**LLM 的 prompt/response 原文直存未脱敏**(业务决策,含脱敏前 OCR)。**入库前在 CRUD 层统一清洗**:去 NUL/控制字符(PG text 列不接受 ` `,OCR 文本易混入,此前被 `except` 静默吞掉丢日志)、prompt/response 截断 50KB、error_msg 截断 2KB;列表接口只回 500 字预览,详情走单独的 `GET /api/admin/ai-api-calls/{row_id}` 拉全文。引擎层(asyncpg/psycopg2)已显式 `client_encoding=utf8`。
 
 ## 文件留底检测 / 业务审核
 
@@ -173,15 +177,21 @@ migrations/versions/                     Alembic 迁移(当前到 014_api_reques
    - `POST /api/archive-detect/business/batch`：JSON + OSS URL。接口阶段只校验 + 写 DB(pending) + 秒回 `batch_id`,不下载、不 OCR;真正下载/OCR/LLM 由 worker 串行处理。URL 过期时 worker 用 `file_id` 调 `file_fetcher.fetch_url_to_temp_with_refresh` 刷新地址。
    - `POST /api/archive-detect/business/batch/upload`：**已停用,返回 410**。前台本地上传会让主进程瞬间写盘洪峰(4C/8G 扛不住),改为业务方先传 OSS 再提交 URL。前端业务审核 tab 已移除上传入口。
    - `GET /api/archive-detect/business/batch/{batch_id}`：轮询完整结果，返回 client/progress/files/overall。
-   - 前端 `ArchiveDetectEntryPage.vue` 的「业务审核」tab 默认打开,只接受 OSS URL;criteria 会根据客户/项目/进展/阶段自动预填，用户手改后不再覆盖。
+   - 前端 `ArchiveDetectEntryPage.vue` 的「业务审核」tab 默认打开,只接受 OSS URL;criteria 会根据客户/项目/进展/阶段自动预填(默认模板已注入 PSD 标准:服务启动即留底、软证据有效,以及客户姓名+办理人作为关联人关键词,支持拼音/英文转写匹配),用户手改后不再覆盖。
 
 关键逻辑：
 
 - 同一进展包内 `(progress_id, file_id)` 命中历史 `done` 文件时严格复用旧结果，跳过 OCR/LLM；复用项 `elapsed_sec=0`，返回 `is_reused=true`。
-- worker 处理新文件：`file_fetcher` 下载(必要时刷新 URL) → `text_extractor.extract_text` → `llm_service.detect_archival` → `redactor` 脱敏 → DB 终态写入 → 删临时文件。
+- worker 处理新文件：`file_fetcher` 下载(必要时刷新 URL) -> `text_extractor.extract_text` -> `llm_service.detect_archival` -> `redactor` 脱敏 -> DB 终态写入 -> 删临时文件。业务方传的 `filename` 是权威可读名,优先保留;下载推断名仅在业务方没传时兜底(`filename = filename or fname`)。
+- **URL 刷新接口**(`file_fetcher.refresh_download_url`)调业务方 `getFileDownloadUrl`,除 `file_id/type` 外还需带 `usr_login/operation_user/url` 三个身份参数(否则对方返回"没有登陆人不可查看"),值在 `config.json.file_url_service` 可配,默认 `Jason邹启/Jason邹启/batch`。
+- **提交接口无限流**:业务审核提交只校验+写 DB(pending)+秒回,不再有队列水位/内存/磁盘的 429 准入(已移除)。快速检测 fan-out 下载用 `_DOWNLOAD_SEMAPHORE`(默认 10,env `ARCHIVE_DETECT_DOWNLOAD_CONCURRENCY`)限并发;httpx 连接池 `max_connections=None` 不设上限。
 - OCR 文本只以脱敏后的 `archive_detect_files.ocr_text` 入库；默认批次查询用 `defer` 不拉该大字段，单文件详情用 `get_file_detail`。
-- 单文件 verdict 由 LLM 直接输出 `match/partial/mismatch`；`is_archival=(verdict=='match')`、`confidence=match_score` 用于向后兼容。
-- 批次总报告：所有文件完成后，优先调用 `llm_service.judge_batch_overall`（把全部文件明细 + criteria + stage 交给 LLM），让其综合判定 `overall_verdict/overall_score/overall_reason`——核心是**理解"关键件 vs 附带件"**：有关键文件确凿命中进展即整批 `match`，不被附带文件的低分拉低；只有无关附件命中、关键件缺失则 `partial`。LLM 调用失败时回退旧的**规则平均分**（avg≥80→match / ≥50→partial / <50→mismatch）+ `summarize_batch` 文本兜底。两处 finalize（worker 路径 `_generate_batch_overall`、快速检测路径 `_orchestrate`）逻辑一致。
+- 单文件 verdict 由 LLM 直接输出 `match/partial/mismatch`；`is_archival=(verdict=='match')`、`confidence=match_score` 用于向后兼容。OCR/抽取后无有效文字的文件不再标 error,而是 `verdict=no_text` + status=done(不重试),总体判定时从 done_items 排除;全批 no_text 则 overall=mismatch/0 + 说明。
+- **重审/重跑/批量操作**(后台管理 `ArchiveAdminPage.vue`):
+  - 单批「重审」-> `POST /api/archive-detect/rerun/{batch_id}?force_all=` -> `rerun_batch_inplace` 原地重跑(force_all 无视已有 AI 结果全跑,否则只补缺失)。
+  - 「按新规则批量重判」-> `POST /admin/rejudge-overall` -> 只重跑 `judge_batch_overall`(每批 1 次 LLM),**不碰单文件、不 OCR/下载**;默认只刷 partial/mismatch,进度 `GET /admin/rejudge-overall/progress`。
+  - 「批量重审」-> `POST /admin/rerun-files-batch` -> 对目标批次逐个 `rerun_batch_inplace(force_all)`,**重跑每个单文件**(复用 ocr_text,成本高、worker 串行),各批沿用自身 criteria;进度 `GET /admin/rerun-files-batch/progress`。生产别一次刷太多,会压垮 LLM。
+- 批次总报告：所有文件完成后，优先调用 `llm_service.judge_batch_overall`（把全部文件明细 + criteria + stage 交给 LLM），让其综合判定 `overall_verdict/overall_score/overall_reason`。**判定核心口径遵循 PSD 业务标准(适用于所有进展)**:留底的本质是证明该进展对应的服务确已启动或发生,不是必须有官方回执类关键件。证据可以是官方文件(批复函/受理回执/递交确认),也可以是软证据组合(服务合同 + 聊天记录/邮件/确认截图,如客户确认转卖房产即视为该项服务已启动)。只要存在能证明服务已启动的证据(官方件或软证据组合任一即可)整批即 match;只有辅助性附件、无任何服务启动证据才 partial;完全无服务痕迹才 mismatch。该原则及衍生业务规则(转款凭证以金额币种为准不强制客户姓名、银行开户类项目账户核心材料属隐私有账户/开户/转款凭证任一即符合且银行通用材料属正常附带件、阶段错配最多 partial 不硬性否决、单份文件检测失败/加密只影响该文件不拖垮整批)已固化在单文件 prompt(`_build_archive_detect_prompt`)和总判 prompt(`_build_judge_batch_overall_prompt`)的判定指南中。LLM 调用失败时回退旧的**规则平均分**（avg≥80->match / ≥50->partial / <50->mismatch）+ `summarize_batch` 文本兜底。两处 finalize（worker 路径 `_generate_batch_overall`、快速检测路径 `_orchestrate`）逻辑一致。
 - 公司售后留底分类体系硬编码在 `llm_service.py` 的 `ARCHIVE_CATEGORIES_FULL/SIMPLE`，业务模式会传 `stage=pre_submit|post_submit` 让 LLM 感知递交前/后分类。
 
 ## 客户档案结构化生成
@@ -223,15 +233,20 @@ migrations/versions/                     Alembic 迁移(当前到 014_api_reques
 - DB `split_tasks` 是权威状态；内存 `_split_task_status` 只做轮询 fast-path。
 - `/api/split/history` 必须声明在 `/api/split/{task_id}` 之前。
 
-### 审核任务管理后台（只读）
+### 审核任务管理后台
 
 - 路由 `/api/archive-detect/admin/*`，前端 `ArchiveAdminPage.vue`（`/archive-admin`）。
-- 支持按状态/来源/客户/进展/日期范围筛选历史批次，详情弹窗复用 `pollBusinessBatch`（business 批次）或 `pollArchiveDetect`（快速检测批次）兜底。
+- 筛选:状态/来源/批次ID/客户/进展/日期范围 + **总体判断多选(match/partial/mismatch)** + **仅看有失败文件**(EXISTS 子查询)。
+- 详情弹窗展示批次全量信息(批次/客户/进展/办理人/项目/判定标准/总体/识别完成时间等),文件表含「文件编码(file_id)」列;数据源 `pollBusinessBatch`(business)或 `pollArchiveDetect`(快速检测)兜底。
+- 写操作:单批重审(`rerun/{batch_id}`)、按新规则批量重判(`admin/rejudge-overall`)、批量重审(`admin/rerun-files-batch`)—— 见上文「重审/重跑/批量操作」。
 
-### 可观测性：事件流 + 请求记录
+### 可观测性：事件流 + 请求记录 + 外部接口记录
 
 - **事件流**：`event_service.log_event(severity, category, message, context)` fire-and-forget 写 `system_events`,前端 `/events`(EventsPage.vue)。category 常量在 event_service.py(batch.*/file.*/worker.crash/llm.timeout 等)。
-- **请求记录**：纯 ASGI 中间件 `request_log_middleware`(在 main.py 用 `app.add_middleware` 注册,不能用 `BaseHTTPMiddleware`——它读 body 会噎死下游 Pydantic)。只记 `POST /api/archive-detect/business/batch` 的 JSON 请求体,前端 `/request-logs`(RequestLogsPage.vue)。两张表都在 `_split_cleanup_loop` 里 GC 30 天。
+- **请求记录**：纯 ASGI 中间件 `request_log_middleware`(在 main.py 用 `app.add_middleware` 注册,不能用 `BaseHTTPMiddleware`——它读 body 会噎死下游 Pydantic)。只记 `POST /api/archive-detect/business/batch` 的 JSON 请求体,前端 `/request-logs`(RequestLogsPage.vue)。
+- **外部接口记录**：URL 刷新等非 AI 出站调用记 `external_api_logs`,前端 `/external-api-logs`(ExternalApiLogsPage.vue)。
+- **AI/LLM 调用记录**：所有 LLM 调用记 `ai_api_calls`,前端 `/ai-api-calls`(AiApiCallsPage.vue),支持按 operation/model/batch_id/file_id/client_code/task_id 筛选。见「数据库重点」里的埋点说明。
+- 四张表(system_events / api_request_logs / external_api_logs / ai_api_calls)都在 `_split_cleanup_loop` 里 GC 30 天。
 
 ### 销售线索：子女年龄
 
@@ -254,7 +269,7 @@ migrations/versions/                     Alembic 迁移(当前到 014_api_reques
 ## 已知遗留/注意事项
 
 - **业务审核文件卡在 `pending` 不动 = worker 没起**。worker 是独立进程,本地/服务器都要单独启动;不是 uvicorn 的一部分。
-- **`archive_detect_service.py` 里残留的 `_process_one_recheck` 等老 fan-out 函数**(重新审核路径)还没完全迁到新 worker 架构,改 recheck 时注意。
+- **重审/重跑已统一走 worker DB 队列**：`submit_recheck_batch`(新建 recheck 批次)、`rerun_batch_inplace`(原地重跑)都是写 `status='pending'` 行(有 ocr_text 的写进 `reuse_ocr_text` 让 worker 跳过下载+OCR、只重跑 LLM)→ worker 消化 → 主进程 `_batch_finalize_poll` 轮询生成 overall。老的主进程 fan-out 函数(`_orchestrate_recheck`/`_process_one_recheck`/`_finalize_overall_for_batch`/`_orchestrate_rerun`)已删除,不要再引用。
 - `archive_detect/` 独立子项目已迁出到 `E:\qoderproject\archive_detect\`；仓库内如残留空目录不要依赖。
 - 快速检测 tab 的"文件不入库、处理完即删"文案与当前 DB 双写持久化已不完全一致；改文案时要谨慎区分快速检测和业务审核。
 - `archive_detect_files.content_sha256` 列已建但当前不写值；增量复用依赖业务方传稳定 `file_id`。

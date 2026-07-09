@@ -3,7 +3,7 @@
     <div class="events-header">
       <div class="events-title">
         <span class="title-indicator"></span>
-        事件流
+        系统日志
       </div>
       <div class="header-actions">
         <span class="dim" style="font-size: 12px; margin-right: 12px">
@@ -47,7 +47,7 @@
           <el-select v-model="filters.categories" multiple collapse-tags collapse-tags-tooltip placeholder="类别" size="small" class="category-filter" filterable>
             <el-option v-for="c in availableCategories" :key="c" :label="c" :value="c" />
           </el-select>
-          <el-input v-model="filters.batchId" clearable placeholder="batch_id 查相关事件" size="small" />
+          <el-input v-model="filters.batchId" clearable placeholder="batch_id 查相关日志" size="small" />
           <el-button type="primary" size="small" @click="handleSearch">查询</el-button>
           <el-button size="small" @click="resetFilters">重置</el-button>
         </div>
@@ -55,12 +55,12 @@
 
       <section class="card">
         <div class="table-head">
-          <span>事件列表</span>
+          <span>日志列表</span>
           <span class="dim" style="font-size: 12px">
             默认显示最近 24 小时的 warn / error / critical(隐藏 info 噪声)
           </span>
         </div>
-        <el-table :data="events" v-loading="loading" stripe empty-text="暂无事件" size="default">
+        <el-table :data="events" v-loading="loading" stripe empty-text="暂无日志" size="default">
           <el-table-column label="时间" width="170">
             <template #default="{ row }">
               <span class="mono dim">{{ row.occurred_at }}</span>
@@ -104,7 +104,7 @@
       </section>
     </div>
 
-    <el-dialog v-model="detailVisible" title="事件详情" width="60%" top="8vh">
+    <el-dialog v-model="detailVisible" title="日志详情" width="60%" top="8vh">
       <div v-if="selected" class="detail-body">
         <div class="detail-meta">
           <div><b>时间：</b><span class="mono">{{ selected.occurred_at }}</span></div>
@@ -114,7 +114,7 @@
             </el-tag>
           </div>
           <div><b>类别：</b><span class="mono">{{ selected.category }}</span></div>
-          <div><b>事件 ID：</b><span class="mono">{{ selected.id }}</span></div>
+          <div><b>日志 ID：</b><span class="mono">{{ selected.id }}</span></div>
         </div>
         <el-divider content-position="left">消息</el-divider>
         <p class="message-text">{{ selected.message }}</p>
@@ -177,7 +177,7 @@ async function loadEvents() {
     events.value = resp.items || []
     total.value = resp.total || 0
   } catch (err) {
-    ElMessage.error('加载事件失败：' + (err.response?.data?.detail || err.message))
+    ElMessage.error('加载日志失败：' + (err.response?.data?.detail || err.message))
   } finally {
     loading.value = false
   }

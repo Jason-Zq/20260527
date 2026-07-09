@@ -23,6 +23,7 @@ const routes = [
   { path: '/events', component: () => import('./components/EventsPage.vue') },
   { path: '/request-logs', component: () => import('./components/RequestLogsPage.vue') },
   { path: '/external-api-logs', component: () => import('./components/ExternalApiLogsPage.vue') },
+  { path: '/ai-api-calls', component: () => import('./components/AiApiCallsPage.vue') },
   { path: '/child-age-leads', component: () => import('./components/ChildAgeLeadsPage.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

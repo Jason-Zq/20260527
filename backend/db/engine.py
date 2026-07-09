@@ -53,6 +53,8 @@ async_engine = create_async_engine(
     max_overflow=20,
     pool_pre_ping=True,
     pool_recycle=1800,
+    # 强制 UTF-8,避免中文 prompt/OCR 文本在某些 locale 下编码异常
+    connect_args={"server_settings": {"client_encoding": "utf8"}},
 )
 
 # 异步 session 工厂
@@ -62,10 +64,12 @@ async_session_maker = async_sessionmaker(
     expire_on_commit=False,
 )
 
-# 同步引擎（Alembic 迁移使用）
+# 同步引擎（Alembic 迁移使用;AI 调用日志也走它）
 sync_engine = create_engine(
     _build_dsn("postgresql+psycopg2"),
     echo=False,
+    # psycopg2 显式 UTF-8,与异步引擎一致
+    connect_args={"client_encoding": "utf8"},
 )
 
 

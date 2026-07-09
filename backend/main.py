@@ -410,7 +410,7 @@ async def _process_file_background(task_id: str, file_path: str, filename: str, 
         # Step 2: LLM 合并调用（类型检测+结构化提取，支持多证件）
         _task_status[task_id] = {"status": "llm", "progress": "分析中...", "error": ""}
         print(f"[{task_id}] 调用大模型分析...")
-        llm_result = await asyncio.to_thread(llm_service.detect_and_extract, ocr_texts)
+        llm_result = await asyncio.to_thread(llm_service.detect_and_extract, ocr_texts, task_id=task_id)
 
         # 处理多证件 items
         items = llm_result.get("items", [])
@@ -1813,7 +1813,7 @@ async def _process_split_background(task_id: str, pdf_path: str, t_started: floa
         _split_task_status[task_id] = {"status": "llm", "progress": "分析页边界...", "error": "", "result": None}
         await split_crud.update_status(task_id, "llm", total_pages=total_pages)
         print(f"[split:{task_id}] 调用 LLM 判断页边界")
-        raw_ranges = await asyncio.to_thread(llm_service.detect_page_ranges, per_page_texts)
+        raw_ranges = await asyncio.to_thread(llm_service.detect_page_ranges, per_page_texts, task_id=task_id)
 
         # Step 3: 规整 + 拆分
         _split_task_status[task_id] = {"status": "splitting", "progress": "拆分中...", "error": "", "result": None}
@@ -2152,6 +2152,20 @@ async def _split_cleanup_loop():
                 )
         except Exception as e:
             print(f"[external_api_log_gc] 异常(忽略): {e}")
+        # AI/LLM 调用记录 GC:30 天
+        try:
+            from db import ai_api_call_crud as _ai_crud
+            deleted_ai = await _ai_crud.delete_ai_api_calls_older_than(days=30)
+            if deleted_ai:
+                print(f"[ai_api_call_gc] 清理 {deleted_ai} 条 >30 天的 AI 调用记录")
+                event_service.log_event(
+                    severity="info",
+                    category="gc.cleanup",
+                    message=f"清理 {deleted_ai} 条 >30 天的 AI 调用记录",
+                    context={"table": "ai_api_calls", "deleted": deleted_ai, "days": 30},
+                )
+        except Exception as e:
+            print(f"[ai_api_call_gc] 异常(忽略): {e}")
         await asyncio.sleep(inmem_gc_every)
 
 
@@ -2223,7 +2237,7 @@ async def file_summary(payload: FileSummaryPayload):
         # 3) LLM 摘要 + 相关性判断
         try:
             summary_result = await asyncio.to_thread(
-                llm_service.summarize_text, text, progress_name
+                llm_service.summarize_text, text, progress_name, task_id=f"summary:{progress_name}"
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"AI 分析失败: {e}")
@@ -2880,6 +2894,59 @@ async def admin_list_external_api_logs(
         limit=limit, offset=offset,
     )
     return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/admin/ai-api-calls",
+    tags=["运维"],
+    summary="AI/LLM API 调用记录查询",
+)
+async def admin_list_ai_api_calls(
+    operation: Optional[str] = Query(None, description="LLM wrapper/操作名,如 detect_archival"),
+    model: Optional[str] = Query(None, description="模型 ID 模糊匹配"),
+    status: Optional[str] = Query(None, description="ok | error"),
+    batch_id: Optional[str] = Query(None, description="关联批次 ID 模糊匹配"),
+    file_id: Optional[str] = Query(None, description="关联文件编码模糊匹配"),
+    client_code: Optional[str] = Query(None, description="客户编码模糊匹配"),
+    task_id: Optional[str] = Query(None, description="任务/摘要 ID 模糊匹配"),
+    since: Optional[str] = Query(None, description="起始时间 YYYY-MM-DD HH:MM:SS"),
+    until: Optional[str] = Query(None, description="结束时间"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import ai_api_call_crud as _crud
+
+    def _parse_dt(s):
+        if not s:
+            return None
+        from datetime import datetime as _dt
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return _dt.strptime(s, fmt)
+            except ValueError:
+                continue
+        raise HTTPException(status_code=400, detail=f"非法时间格式: {s}")
+
+    items, total = await _crud.list_ai_api_calls(
+        operation=operation, model=model, status=status,
+        batch_id=batch_id, file_id=file_id, client_code=client_code, task_id=task_id,
+        since=_parse_dt(since), until=_parse_dt(until),
+        limit=limit, offset=offset,
+    )
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/admin/ai-api-calls/{row_id}",
+    tags=["运维"],
+    summary="AI/LLM API 调用记录详情(prompt/response 全文)",
+)
+async def admin_get_ai_api_call(row_id: int):
+    from db import ai_api_call_crud as _crud
+    detail = await _crud.get_ai_api_call_detail(row_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return detail
 
 
 @app.get(

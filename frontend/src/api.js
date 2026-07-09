@@ -673,7 +673,7 @@ export async function deleteSplitHistory(taskId) {
 }
 
 /**
- * 业务事件流列表查询。
+ * 系统日志列表查询。
  * @param {Object} params - { severity, category, batch_id, since, until, limit, offset }
  * @returns {Promise<{items: Array, total: number}>}
  */
@@ -683,7 +683,7 @@ export async function listSystemEvents(params = {}) {
 }
 
 /**
- * 事件流 - category 枚举(下拉用)
+ * 系统日志 - category 枚举(下拉用)
  * @returns {Promise<{categories: string[]}>}
  */
 export async function listEventCategories() {
@@ -704,5 +704,18 @@ export async function listRequestLogs(params = {}) {
 
 export async function listExternalApiLogs(params = {}) {
   const response = await axios.get(`${API_BASE}/admin/external-api-logs`, { params })
+  return response.data
+}
+
+/**
+ * AI/LLM API 调用记录查询
+ */
+export async function listAiApiCalls(params = {}) {
+  const response = await axios.get(`${API_BASE}/admin/ai-api-calls`, { params })
+  return response.data
+}
+
+export async function getAiApiCallDetail(rowId) {
+  const response = await axios.get(`${API_BASE}/admin/ai-api-calls/${rowId}`)
   return response.data
 }

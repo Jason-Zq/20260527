@@ -68,27 +68,62 @@ def _get_client() -> OpenAI:
         return _client
 
 
-def _log_llm_api(url, model, prompt, response_raw, status, error_msg, elapsed_ms):
-    """记录一次 LLM 出站调用(prompt/返回全文)。任何异常都吞掉,绝不影响判定。
+def _log_llm_api(
+    url, model, prompt, response_raw, status, error_msg, elapsed_ms,
+    *, operation=None, batch_id=None, file_id=None, client_code=None, task_id=None
+):
+    """记录一次 LLM 出站调用(prompt/返回全文)到 ai_api_calls 表。
 
     _call_llm 在 worker 线程(asyncio.to_thread)里跑,没有可用的 async loop,
-    async 引擎的连接池绑定在主 loop 上,不能用。故使用同步 psycopg2 直写。
+    async 引擎的连接池绑定在主 loop 上,不能用。故使用同步写入。
+    任何异常都吞掉,绝不影响判定。
     """
     try:
-        from db import external_api_log_crud as _crud
-        params = {"model": model, "prompt": prompt}
-        response = {"raw": response_raw} if response_raw is not None else None
-        _crud.insert_external_api_log_sync(
-            service="llm", url=url,
-            request_params=params, response_summary=response,
+        from db import ai_api_call_crud as _crud
+        _crud.insert_ai_api_call_sync(
+            operation=operation, model=model, prompt=prompt, response_raw=response_raw,
             status=status, error_msg=error_msg, elapsed_ms=elapsed_ms,
+            batch_id=batch_id, file_id=file_id, client_code=client_code, task_id=task_id,
         )
     except Exception as _e:
         print(f"[llm_log] 记录 LLM 调用日志失败(忽略): {_e}", file=__import__('sys').stderr)
+        try:
+            import event_service
+            event_service.log_event(
+                event_service.WARN,
+                event_service.CATEGORY_DB_ERROR,
+                f"AI 调用日志写入失败:{_e.__class__.__name__}",
+                context={
+                    "operation": operation,
+                    "batch_id": batch_id,
+                    "file_id": file_id,
+                    "client_code": client_code,
+                    "task_id": task_id,
+                    "model": model,
+                    "status": status,
+                    "error": str(_e)[:200],
+                },
+            )
+        except Exception:
+            pass
 
 
-def _call_llm(prompt: str, max_retries: int = 3) -> str:
-    """调用大模型 API，返回原始响应文本。支持重试机制。"""
+def _call_llm(
+    prompt: str,
+    max_retries: int = 3,
+    *,
+    operation: str = None,
+    batch_id: str = None,
+    file_id: str = None,
+    client_code: str = None,
+    task_id: str = None,
+) -> str:
+    """调用大模型 API，返回原始响应文本。支持重试机制。
+
+    可选关键字参数用于写入 ai_api_calls 审计表：
+    - operation: LLM wrapper/操作名
+    - batch_id/file_id/client_code/task_id: 业务上下文
+    """
     llm = CONFIG.get("llm", {})
     client = _get_client()
     model = llm.get("model", "")
@@ -118,7 +153,11 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
             result_text = re.sub(r'<tool_call>.*?⋩', '', result_text, flags=re.DOTALL).strip()
 
             elapsed_ms = int((time.time() - t0) * 1000)
-            _log_llm_api(url, model, prompt, raw, "ok", None, elapsed_ms)
+            _log_llm_api(
+                url, model, prompt, raw, "ok", None, elapsed_ms,
+                operation=operation, batch_id=batch_id, file_id=file_id,
+                client_code=client_code, task_id=task_id,
+            )
             return result_text
 
         except Exception as e:
@@ -141,7 +180,11 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
             else:
                 # 末次失败:记日志 + 抛出
                 elapsed_ms = int((time.time() - t0) * 1000)
-                _log_llm_api(url, model, prompt, None, "error", str(e), elapsed_ms)
+                _log_llm_api(
+                    url, model, prompt, None, "error", str(e), elapsed_ms,
+                    operation=operation, batch_id=batch_id, file_id=file_id,
+                    client_code=client_code, task_id=task_id,
+                )
                 if attempt == max_retries - 1:
                     try:
                         import event_service
@@ -161,11 +204,15 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
                 raise
 
     elapsed_ms = int((time.time() - t0) * 1000)
-    _log_llm_api(url, model, prompt, None, "error", str(last_error), elapsed_ms)
+    _log_llm_api(
+        url, model, prompt, None, "error", str(last_error), elapsed_ms,
+        operation=operation, batch_id=batch_id, file_id=file_id,
+        client_code=client_code, task_id=task_id,
+    )
     raise last_error
 
 
-def detect_and_extract(ocr_texts: list) -> dict:
+def detect_and_extract(ocr_texts: list, **context) -> dict:
     """
     一次LLM调用同时完成证件类型检测 + 结构化提取（含置信度）。
     支持多张证件：返回 items 数组，每项包含 doc_type + fields。
@@ -200,7 +247,7 @@ def detect_and_extract(ocr_texts: list) -> dict:
 
     print("正在调用大模型（类型检测+结构化提取，支持多证件）...")
     try:
-        result_text = _call_llm(prompt)
+        result_text = _call_llm(prompt, operation="detect_and_extract", **context)
         data = json.loads(result_text)
 
         # 兼容：如果LLM返回的是单证件格式（doc_type + fields），自动转为items数组
@@ -289,7 +336,7 @@ def _normalize_doc_type(raw: str) -> str:
     return line
 
 
-def classify_one_page(page_text: str, page_no: int) -> str:
+def classify_one_page(page_text: str, page_no: int, **context) -> str:
     """单页分类:把 1 页 OCR 文本送给 LLM,返回 LLM 给出的证件类型名。
 
     设计目的:绕开 LLM 输入侧内容安全审核 —— 一次只送 1 页,敏感数字密度低,
@@ -329,7 +376,7 @@ def classify_one_page(page_text: str, page_no: int) -> str:
         )
 
     try:
-        result = _call_llm(prompt)
+        result = _call_llm(prompt, operation="classify_one_page", **context)
         normalized = _normalize_doc_type(result)
         print(f"[classify_one_page] page {page_no}: raw={result!r} -> {normalized!r}")
         return normalized
@@ -338,7 +385,7 @@ def classify_one_page(page_text: str, page_no: int) -> str:
         return "未知"
 
 
-def detect_page_ranges(per_page_texts: list) -> list:
+def detect_page_ranges(per_page_texts: list, **context) -> list:
     """逐页独立调 LLM 分类 -> 单点'未知'修正 -> 合并相邻同类为 ranges。
 
     v2 设计(避开 minimax 内容安全):每页独立调用,4 并发,
@@ -359,7 +406,7 @@ def detect_page_ranges(per_page_texts: list) -> list:
     per_page_types: list[str] = ["未知"] * n
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
-            pool.submit(classify_one_page, t, i + 1): i
+            pool.submit(classify_one_page, t, i + 1, **context): i
             for i, t in enumerate(per_page_texts)
         }
         for future in futures:
@@ -488,7 +535,7 @@ def _build_summary_prompt(text: str, progress_name: str | None) -> str:
     )
 
 
-def summarize_text(text: str, progress_name: str | None = None) -> dict:
+def summarize_text(text: str, progress_name: str | None = None, **context) -> dict:
     """用 LLM 给一段文字写摘要，可选附带"是否相关于 progress_name"判断。
 
     入参：
@@ -525,7 +572,7 @@ def summarize_text(text: str, progress_name: str | None = None) -> dict:
         )
 
     prompt = _build_summary_prompt(src, progress_name)
-    raw = _call_llm(prompt)
+    raw = _call_llm(prompt, operation="summarize_text", **context)
 
     # 解析 JSON。容错：模型偶尔返回前后有空白或多余说明
     try:
@@ -633,8 +680,30 @@ def _build_archive_detect_prompt(
         "- 同一客户的文件集合中,属于该客户配偶、子女、父母、共同申请人的文件也视为相关。"
         "不要因为文件上的人名与客户姓名不一致而判为 mismatch。"
         "只要文件内容与项目类型、进展阶段匹配,且可归入分类体系,即视为符合。\n"
+        "- **文件中出现的姓名若匹配用户判定标准里列出的任一关联人(客户/家庭成员/办理人),"
+        "包括其拼音或英文转写(如「关晓晓」对应「GUAN Xiaoxiao」、「邓士凯」对应「Deng Shikai」),"
+        "即视为与本进展强关联,应判 match 或 partial,不要因当事人姓名与客户本人不一致就判 mismatch。**"
+        "授权委托书(Power of Attorney)、公证认证文件(如附海牙认证 Apostille)等,"
+        "其委托人/当事人常为客户的家属或本进展的办理人,属有效留底。\n"
         "- 如果一份文件明显是某类证件的标准格式(如身份证、护照、房产证),"
-        "即使 OCR 提取质量差、部分文字乱码,也应判为 match 或 partial,不要因 OCR 噪声判 mismatch。\n\n"
+        "即使 OCR 提取质量差、部分文字乱码,也应判为 match 或 partial,不要因 OCR 噪声判 mismatch。\n"
+        "- **服务合同(写明具体服务内容)、客户确认类聊天记录/邮件/截图属于有效留底证据**,"
+        "它们能证明服务已启动(如客户确认转卖房产=该项服务已启动)。"
+        "合同归入 C 类,客户确认/放弃类沟通归入对应分类(如 I 类或备注为服务启动凭证),"
+        "**不要因为它们不是标准证件格式就判 mismatch**。\n"
+        "- 若文件体现了服务已启动或客户已确认某项服务内容,请在 key_points 中明确标注"
+        "(如「体现服务已启动」「客户确认转卖房产」),供总体判定参考。\n"
+        "- **转账/汇款凭证等以金额+币种为核心证据的文件**:只要金额、币种与项目投资标准吻合"
+        "(如泰币 650000 符合泰国精英签青铜卡投资金额),即视为有效留底,判 match,"
+        "**不强制要求转款凭证上体现客户姓名**——转账凭证常以金额币种本身作为匹配依据。\n"
+        "- **银行开户类项目(如美国/新加坡个人账户开户)**:账户核心材料属客户隐私,"
+        "银行常在开户后直接通过邮件等联系客户,文案侧未必持有核心原件。"
+        "因此只要识别到客户账户信息/开户信息表/账户开通/转款等任一凭证,即视为符合(判 match)。"
+        "银行通用材料(隐私通知、网点列表、汇款模板、防诈骗指南等)属正常附带件,"
+        "不因其内容通用、未直接体现客户信息就判 mismatch。\n"
+        "- **阶段错配不作硬性否决**:某文件更适用于其他阶段(如递交前的身份证/资产证明出现在递交后批次),"
+        "只要文件本身可归入分类体系且与客户/项目相关,最多判 partial,不要仅因阶段不符就判 mismatch;"
+        "银行开户等隐私类项目对阶段匹配不作强制要求。\n\n"
         "请输出:\n"
         "1. verdict: 三选一\n"
         "   - \"match\"   : 文件可明确归入上述某个分类,且符合用户判定标准\n"
@@ -652,7 +721,7 @@ def _build_archive_detect_prompt(
     )
 
 
-def detect_large_table_doc(text: str) -> dict:
+def detect_large_table_doc(text: str, **context) -> dict:
     """判断一份文档是不是"大量表格数据为主"的材料(银行流水/社保/证券流水)。
 
     入参 text: 文档前 2 页 OCR 文本(几百到几千字)。
@@ -719,7 +788,7 @@ def detect_large_table_doc(text: str) -> dict:
 ---"""
 
     try:
-        raw = _call_llm(prompt, max_retries=2)   # 不重试太多,失败就降级
+        raw = _call_llm(prompt, max_retries=2, operation="detect_large_table_doc", **context)   # 不重试太多,失败就降级
         # 容错 JSON 解析
         raw = raw.strip()
         if raw.startswith("{") is False:
@@ -739,7 +808,7 @@ def detect_large_table_doc(text: str) -> dict:
         return fallback
 
 
-def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None) -> dict:
+def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None, **context) -> dict:
     """以用户提供的判定标准判断 text 符合程度（三态 verdict）。
 
     入参：
@@ -777,7 +846,7 @@ def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None) ->
         )
 
     prompt = _build_archive_detect_prompt(src, user_prompt.strip(), stage=stage)
-    raw = _call_llm(prompt)
+    raw = _call_llm(prompt, operation="detect_archival", **context)
 
     # 解析 JSON（容错）
     try:
@@ -862,6 +931,7 @@ def summarize_batch(
     user_prompt: str,
     overall_verdict: str,
     overall_score: int,
+    **context,
 ) -> str:
     """对一个 batch 内所有已 done 文件生成总体审核说明文本。
 
@@ -875,7 +945,7 @@ def summarize_batch(
       str - 80-200 字总体说明纯文本(未脱敏,调用方再 redact 兜底)
     """
     prompt = _build_summarize_batch_prompt(files_brief, user_prompt, overall_verdict, overall_score)
-    raw = _call_llm(prompt)
+    raw = _call_llm(prompt, operation="summarize_batch", **context)
     # 简单清理:去掉首尾空白和潜在 markdown 代码块标记
     out = (raw or "").strip()
     if out.startswith("```"):
@@ -918,13 +988,26 @@ def _build_judge_batch_overall_prompt(
         f"{stage_hint}\n"
         f"各文件检测明细(共 {len(files_brief)} 条):\n{detail}\n\n"
         "判定原则(重要):\n"
-        "1. 一个批次通常包含**关键文件**(直接证明该进展成立,如批复函/受理回执/递交确认)"
+        "0. **留底的核心是证明「该进展对应的服务确已启动或发生」,而不是必须有官方回执类关键件。**"
+        "证据既可以是官方文件(批复函/受理回执/递交确认),**也可以是软证据的组合**:"
+        "如服务合同(写明具体服务内容,完成合同中任意一项即视为服务启动)+ 聊天记录/邮件/确认截图"
+        "(客户确认凭证,如客户确认转卖房产=该项服务已启动)。"
+        "合同 + 聊天记录/确认截图**不是无关附件**,它们组合起来即可构成证明服务已启动的关键证据链。\n"
+        "1. 一个批次通常包含**关键证据**(能证明该进展/服务成立,含上述官方件或软证据组合)"
         "和**附带文件**(身份证、护照等辅助材料)。\n"
-        "2. **只要存在确凿命中该进展要求的关键文件,整批即判为 match**,"
+        "2. **只要存在能证明该进展服务已启动/已发生的证据(官方件或软证据组合任一即可),整批即判为 match**,"
         "不因附带文件与进展不完全相关而降级——附带文件的低分不应拉低整体结论。\n"
-        "3. 但要判断命中的文件**是否真的是该进展的关键证明**:若命中的只是无关紧要的附件、"
-        "而真正的关键文件缺失,则判 partial(材料不齐),不能仅因'有文件 match'就判 match。\n"
-        "4. 完全没有任何文件与进展相关 → mismatch。\n\n"
+        "3. 若只有辅助性附件、既无官方关键件、也无任何能证明服务已启动的软证据组合,"
+        "则判 partial(材料不齐)。\n"
+        "4. 完全没有任何文件能体现该进展的服务已启动或发生 → mismatch。\n"
+        "5. **转款凭证**:金额+币种与项目投资标准吻合即为有效留底,不要求体现客户姓名。\n"
+        "6. **银行开户类项目(美国/新加坡个户等)**:账户核心材料属隐私、文案侧常无原件,"
+        "只要有客户账户信息/开户信息表/开通/转款等任一凭证即判 match;"
+        "银行通用材料(隐私通知、网点列表、汇款模板、防诈骗指南)属正常附带件,不据此降级。\n"
+        "7. **阶段错配不作硬性否决**:文件更适用于其他阶段(如递交前材料出现在递交后批次)不影响整体符合性,"
+        "银行开户等隐私类项目对阶段匹配不作强制要求。\n"
+        "8. **单份文件检测失败/加密无法读取,只影响该文件,不影响其他文件的整体判断**;"
+        "不要因个别文件读取异常就把整批判为 mismatch。\n\n"
         "请输出严格 JSON(不要 markdown、不要多余文字):\n"
         '{"verdict":"match|partial|mismatch","score":0-100整数,"reason":"80-200字中文总体说明"}\n'
         "score 与 verdict 需一致:match≥80,partial 50-79,mismatch<50。\n"
@@ -937,6 +1020,7 @@ def judge_batch_overall(
     files_brief: list,
     user_prompt: str,
     stage: Optional[str] = None,
+    **context,
 ) -> dict:
     """LLM 综合判定批次总体结论。返回 {verdict, score, reason}。
 
@@ -944,7 +1028,7 @@ def judge_batch_overall(
     解析失败或字段非法时抛 ValueError,由调用方回退规则平均分。
     """
     prompt = _build_judge_batch_overall_prompt(files_brief, user_prompt, stage)
-    raw = _call_llm(prompt)
+    raw = _call_llm(prompt, operation="judge_batch_overall", **context)
     try:
         start = raw.find("{")
         end = raw.rfind("}")
@@ -993,7 +1077,7 @@ def _build_client_profile_prompt(ocr_text: str, filename: str, doc_category: str
     )
 
 
-def extract_client_profile_facts(ocr_text: str, filename: str = "", doc_category: str = "") -> dict:
+def extract_client_profile_facts(ocr_text: str, filename: str = "", doc_category: str = "", **context) -> dict:
     """从单个文件 OCR 文本中抽取客户档案结构化事实。"""
     if not ocr_text or not ocr_text.strip():
         raise ValueError("OCR 文本为空，无法抽取客户档案")
@@ -1003,7 +1087,7 @@ def extract_client_profile_facts(ocr_text: str, filename: str = "", doc_category
         tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
         src = src[:head_n] + f"\n\n...[省略 {len(ocr_text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n" + src[-tail_n:]
 
-    raw = _call_llm(_build_client_profile_prompt(src, filename, doc_category))
+    raw = _call_llm(_build_client_profile_prompt(src, filename, doc_category), operation="extract_client_profile_facts", **context)
     try:
         start = raw.find("{")
         end = raw.rfind("}")

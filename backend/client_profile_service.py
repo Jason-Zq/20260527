@@ -39,6 +39,8 @@ async def _generate_background(task_id: int, client_id: int, files: list[dict]) 
                 ocr_text,
                 f.get("filename") or "",
                 f.get("doc_category") or "",
+                task_id=str(task_id),
+                client_code=str(client_id),
             )
             facts["_source_file_id"] = f.get("id")
             facts["_source_filename"] = f.get("filename")

@@ -90,6 +90,15 @@
               </div>
               <el-icon class="tool-arrow"><ArrowRight /></el-icon>
             </article>
+
+            <article class="tool-card" @click="go('/ai-api-calls')" tabindex="0" @keydown.enter="go('/ai-api-calls')">
+              <div class="tool-icon icon-ai"><el-icon :size="22"><Cpu /></el-icon></div>
+              <div class="tool-body">
+                <h4 class="tool-title">AI 调用记录</h4>
+                <p class="tool-desc">查看大模型 API 调用、耗时、状态与关联业务</p>
+              </div>
+              <el-icon class="tool-arrow"><ArrowRight /></el-icon>
+            </article>
           </div>
         </transition>
       </div>
@@ -101,7 +110,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  MagicStick, Document, Files, Reading,
+  MagicStick, Document, Files, Reading, Cpu,
   ArrowRight, ArrowDown, Check,
 } from '@element-plus/icons-vue'
 
@@ -429,6 +438,9 @@ function go(path) {
 }
 .tool-icon.icon-admin {
   background: linear-gradient(135deg, #f97316, #f59e0b);
+}
+.tool-icon.icon-ai {
+  background: linear-gradient(135deg, #8b5cf6, #ec4899);
 }
 
 .tool-body {

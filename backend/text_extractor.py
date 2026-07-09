@@ -537,7 +537,7 @@ def _extract_pdf(file_path: str) -> dict:
         head_text = "\n\n".join(p.get("text", "") for p in head_pages[:2]).strip()
 
         # === 5. LLM 初判 ===
-        verdict = llm_service.detect_large_table_doc(head_text)
+        verdict = llm_service.detect_large_table_doc(head_text, task_id=file_path)
         is_large_table = bool(verdict.get("is_large_table"))
         doc_type = verdict.get("doc_type") or "unknown"
         is_fallback = bool(verdict.get("_fallback"))

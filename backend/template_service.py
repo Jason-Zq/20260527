@@ -530,7 +530,7 @@ def enrich_anchors_with_llm(anchors: list[dict], docx_text: str | None = None) -
 
     try:
         from llm_service import _call_llm
-        result_text = _call_llm(prompt)
+        result_text = _call_llm(prompt, operation="enrich_anchors_with_llm", task_id="anchor_enrich")
         data = json.loads(result_text)
         results = data.get("results") or []
         for r in results:
@@ -685,7 +685,7 @@ async def match_anchors_to_client(
 
     try:
         from llm_service import _call_llm
-        result_text = await asyncio.to_thread(_call_llm, prompt)
+        result_text = await asyncio.to_thread(_call_llm, prompt, operation="match_anchors_to_client", task_id=f"client:{client_id}")
         data = json.loads(result_text)
         if isinstance(data, dict):
             for ph_id, v in data.items():
