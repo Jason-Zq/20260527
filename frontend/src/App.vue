@@ -1,20 +1,20 @@
 <template>
   <div class="app-container">
-    <!-- 顶部标题栏 -->
-    <header class="app-header">
+    <!-- 顶部标题栏(登录页不显示) -->
+    <header v-if="!isLoginPage" class="app-header">
       <div class="header-left" @click="go('/')">
         <div class="header-logo"></div>
         <h1 class="app-title">智能文档审核工作台</h1>
       </div>
       <nav class="top-nav">
-        <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button>
-        <button class="nav-item" :class="{ active: isActive('/archive-detect') }" @click="go('/archive-detect')">文件留底检测</button>
+        <!-- <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button> -->
         <button class="nav-item" :class="{ active: isActive('/archive-admin') }" @click="go('/archive-admin')">审核任务管理</button>
-        <button class="nav-item" :class="{ active: isActive('/events') }" @click="go('/events')">系统日志</button>
-        <button class="nav-item" :class="{ active: isActive('/request-logs') }" @click="go('/request-logs')">请求记录</button>
         <button class="nav-item" :class="{ active: isActive('/ai-api-calls') }" @click="go('/ai-api-calls')">AI 调用记录</button>
-        <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button>
-        <el-dropdown trigger="click">
+        <button class="nav-item" :class="{ active: isActive('/request-logs') }" @click="go('/request-logs')">请求记录</button>
+        <button class="nav-item" :class="{ active: isActive('/events') }" @click="go('/events')">系统日志</button>
+        <button class="nav-item" :class="{ active: isActive('/archive-detect') }" @click="go('/archive-detect')">文件留底检测</button>
+        <!-- <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button> -->
+        <!-- <el-dropdown trigger="click">
           <button class="nav-item more">更多工具</button>
           <template #dropdown>
             <el-dropdown-menu>
@@ -24,7 +24,8 @@
               <el-dropdown-item @click="go('/summary')">URL 文件摘要</el-dropdown-item>
             </el-dropdown-menu>
           </template>
-        </el-dropdown>
+        </el-dropdown> -->
+        <button class="nav-item logout" @click="onLogout">退出登录</button>
       </nav>
     </header>
 
@@ -34,10 +35,14 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { clearToken } from './api'
 
 const router = useRouter()
 const route = useRoute()
+
+const isLoginPage = computed(() => route.path === '/login')
 
 function go(path) {
   router.push(path)
@@ -45,6 +50,11 @@ function go(path) {
 
 function isActive(path) {
   return route.path === path || route.path.startsWith(path + '/')
+}
+
+function onLogout() {
+  clearToken()
+  router.push('/login')
 }
 </script>
 

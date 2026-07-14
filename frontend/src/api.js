@@ -1,6 +1,53 @@
 import axios from 'axios'
+import router from './router'
 
 const API_BASE = '/api'
+
+// 鉴权:token 存 localStorage,axios 拦截器自动带 Bearer + 401 跳登录。
+// 直接给 axios 默认实例挂拦截器(不新建实例),下面 63 处 axios.xxx 调用零改动即生效。
+const TOKEN_KEY = 'doc_review_token'
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setToken(token) {
+  localStorage.setItem(TOKEN_KEY, token)
+}
+
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY)
+}
+
+// 请求拦截:自动带 Authorization: Bearer <token>
+axios.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// 响应拦截:401 清 token 跳登录
+axios.interceptors.response.use(
+  (resp) => resp,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      clearToken()
+      if (router.currentRoute.value.path !== '/login') {
+        router.push('/login')
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+
+// 登录校验:账号密码
+export async function login(username, password) {
+  const resp = await axios.post(`${API_BASE}/auth/login`, { username, password })
+  return resp.data
+}
 
 /**
  * 上传文件（PDF/图片），返回 task_id（异步模式）

@@ -14,7 +14,8 @@ import json
 import asyncio
 import time
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Path
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Path, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -42,7 +43,21 @@ import archive_detect_service
 import event_service
 from db import archive_detect_crud
 
-app = FastAPI(title="智能文档审核工作台", version="1.0.0")
+# Bearer Token 鉴权声明(仅用于 OpenAPI 文档显示 Authorize 按钮 + docs 调用时带头)。
+# auto_error=False:不在此真正校验,真正拦截由 AuthMiddleware(ASGI)统一做,避免两套逻辑。
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def _bearer_dep(cred: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme)):
+    """全局依赖:仅为在 OpenAPI 里声明 security scheme,不校验(交给中间件)。"""
+    return cred
+
+
+app = FastAPI(
+    title="智能文档审核工作台",
+    version="1.0.0",
+    dependencies=[Depends(_bearer_dep)],
+)
 
 # 跨域配置
 # CORS 配置:
@@ -62,6 +77,12 @@ app.add_middleware(
 # API 请求记录中间件(纯 ASGI,可安全读 body 并重放给下游)
 from middleware.request_log_middleware import RequestLogMiddleware
 app.add_middleware(RequestLogMiddleware)
+
+# 鉴权中间件(纯 ASGI,统一 Bearer Token 校验)。
+# Starlette 中间件后注册先执行:Auth 后注册 = 比 RequestLog 先执行,
+# 未授权请求直接 401,不会被请求记录中间件入库。
+from middleware.auth_middleware import AuthMiddleware
+app.add_middleware(AuthMiddleware)
 
 # 输出目录（统一用 output/）
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output")
@@ -220,6 +241,9 @@ class ChildAgeLeadListResponse(BaseModel):
 async def startup():
     """启动时加载配置并初始化数据库连接池"""
     llm_service.load_config()
+    # 重置鉴权配置缓存,使 config.json.auth 改动在重启后生效
+    from middleware.auth_middleware import reset_auth_cache
+    reset_auth_cache()
     await init_db()
     # 确保模板存储目录存在
     os.makedirs(os.path.join(OUTPUT_DIR, "templates"), exist_ok=True)
@@ -2555,10 +2579,42 @@ async def archive_detect_history(
 
 # ==================== 后台管理/识别进度监控(只读) ====================
 
+class LoginPayload(BaseModel):
+    username: str = Field(..., description="账号")
+    password: str = Field(..., description="密码")
+
+
+@app.post(
+    "/api/auth/login",
+    tags=["鉴权"],
+    summary="登录 - 账号密码校验",
+    dependencies=[],   # 白名单:免 Bearer
+)
+async def login(payload: LoginPayload):
+    """员工账号密码登录。
+
+    校验 config.json.auth 的 admin_user/admin_password,通过后返回 biz_api_key
+    作为会话 token,前端存 localStorage,后续请求带 Authorization: Bearer <token>。
+    """
+    from middleware.auth_middleware import get_admin_credentials, get_biz_api_key, reset_auth_cache
+    reset_auth_cache()  # 每次登录重读配置,使 config.json 改动即时生效
+    admin_user, admin_password = get_admin_credentials()
+    biz_key = get_biz_api_key()
+
+    user = (payload.username or "").strip()
+    pwd = (payload.password or "").strip()
+    if not admin_user or not admin_password:
+        return {"ok": False, "detail": "服务端未配置管理员账号"}
+    if user == admin_user and pwd == admin_password:
+        return {"ok": True, "token": biz_key, "detail": "登录成功"}
+    return {"ok": False, "detail": "账号或密码错误"}
+
+
 @app.get(
     "/api/healthz",
     tags=["运维"],
     summary="健康检查 - DB + 队列",
+    dependencies=[],   # 白名单:免 Bearer
 )
 async def healthz():
     """探针:DB 可达。供 nginx/k8s/外部监控调用。

@@ -10,7 +10,10 @@
  */
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+const TOKEN_KEY = 'doc_review_token'
+
 const routes = [
+  { path: '/login', component: () => import('./components/LoginPage.vue'), meta: { public: true } },
   { path: '/', component: () => import('./components/HomePage.vue') },
   { path: '/clients', component: () => import('./components/ClientListPage.vue') },
   { path: '/clients/:clientId', component: () => import('./components/ClientDetailPage.vue'), props: route => ({ clientId: Number(route.params.clientId) }) },
@@ -28,7 +31,21 @@ const routes = [
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
-export default createRouter({
+const router = createRouter({
   history: createWebHashHistory(),
   routes,
 })
+
+// 全局前置守卫:无 token 跳登录页(白名单路由放行)
+router.beforeEach((to, from, next) => {
+  const token = localStorage.getItem(TOKEN_KEY)
+  if (to.meta.public || token) {
+    // 已登录却访问登录页 -> 跳首页
+    if (to.path === '/login' && token) return next('/')
+    return next()
+  }
+  // 未登录,跳登录页(带 redirect 参数)
+  return next({ path: '/login', query: { redirect: to.fullPath } })
+})
+
+export default router
