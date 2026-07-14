@@ -236,10 +236,10 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/te
 ## 8. 文件留底检测 / 业务审核要点
 
 - 入口路由在 `/api/archive-detect/*`。
-- **业务审核**当前是主线：
+- **业务审核**是唯一入口（快速检测/匿名模式已移除）：
   - `POST /api/archive-detect/business/batch` 只校验 + 写 DB（`pending`）+ 秒回 `batch_id`，不下载、不 OCR。
   - 真正的下载/OCR/LLM 由 worker 串行处理。
-  - `POST /api/archive-detect/business/batch/upload` **已停用，返回 410**。
+  - 客户姓名与办理人由后端从 DB（`clients.name` / `archive_detect_progress.handler`）显式注入检测/总判/总结 prompt，不再依赖前端 criteria 字符串。
 - 同一进展包内 `(progress_id, file_id)` 命中历史 `done` 文件时严格复用旧结果。
 - 单文件 verdict：`match/partial/mismatch/no_text`；`no_text` 不算失败，不参与总体判定。
 - 批次总报告优先由 LLM 综合判定（理解"关键件 vs 附带件"），LLM 失败时回退规则平均分。

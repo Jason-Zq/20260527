@@ -13,6 +13,48 @@ from db.engine import async_session_maker
 from db.models import ArchiveDetectBatch, ArchiveDetectFile, ArchiveDetectProgress, Client
 
 
+# C0 控制字符清洗表:PostgreSQL text 列不接受 NUL(0x00),其它 C0 控制符也无存储价值,
+# 一并去除;保留 \t(0x09) \n(0x0a) \r(0x0d)。
+_CTRL_DELETE = {c: None for c in range(0x20) if c not in (0x09, 0x0A, 0x0D)}
+_CTRL_DELETE[0x7F] = None  # DEL
+
+# 字段级存储软上限,避免极端行膨胀。
+_OCR_TEXT_LIMIT = 1_000_000  # ocr_text / reuse_ocr_text
+_CRITERIA_LIMIT = 100_000    # batch.user_prompt / criteria
+_REASON_LIMIT = 50_000       # file.reason / batch.overall_reason
+_ERROR_MSG_LIMIT = 10_000    # file.error_msg / batch.error
+_URL_LIMIT = 16_384          # source_url / local_path
+_SMALL_TEXT_LIMIT = 4_096    # filename / mime_type / doc_category / verdict / file_id / stage
+_KEY_POINT_ITEM_LIMIT = 10_000      # key_points 列表每项
+_KEY_POINTS_TOTAL_LIMIT = 100_000   # key_points 序列化后总长度
+
+
+def _clean_text(s: Optional[str], limit: Optional[int] = None) -> Optional[str]:
+    """写库前清洗:去除 NUL/C0 控制字符(保留 \t\n\r)和 DEL,可选长度截断。None 原样返回。"""
+    if s is None:
+        return None
+    cleaned = s.translate(_CTRL_DELETE)
+    if limit is not None and len(cleaned) > limit:
+        cleaned = cleaned[:limit] + f"\n...[已截断,原长 {len(cleaned)} 字]"
+    return cleaned
+
+
+def _clean_key_points(items: Optional[list]) -> Optional[list]:
+    """清洗 key_points JSONB 列表:逐项去控制字符/截断,再限制序列化后总长度。"""
+    if items is None:
+        return None
+    import json
+    cleaned = []
+    for it in items:
+        if it is None:
+            continue
+        cleaned.append(_clean_text(str(it), _KEY_POINT_ITEM_LIMIT))
+    # 序列化后若仍超长,从尾部丢弃条目(不破坏 JSONB 列表结构)
+    while cleaned and len(json.dumps(cleaned, ensure_ascii=False)) > _KEY_POINTS_TOTAL_LIMIT:
+        cleaned.pop()
+    return cleaned
+
+
 def _file_to_dict(f: ArchiveDetectFile) -> dict:
     """默认不含 ocr_text（大字段，按需在 get_file_detail 单独取）。
 
@@ -101,7 +143,7 @@ async def create_batch_with_files(
     async with async_session_maker() as session:
         batch = ArchiveDetectBatch(
             batch_id=batch_id,
-            user_prompt=user_prompt,
+            user_prompt=_clean_text(user_prompt, _CRITERIA_LIMIT),
             source_kind=source_kind,
             total_files=len(file_specs),
             done_files=0,
@@ -114,9 +156,9 @@ async def create_batch_with_files(
             session.add(ArchiveDetectFile(
                 batch_id=batch_id,
                 idx=i,
-                source_url=spec.get("source_url"),
-                filename=spec.get("filename"),
-                mime_type=spec.get("mime_type"),
+                source_url=_clean_text(spec.get("source_url"), _URL_LIMIT),
+                filename=_clean_text(spec.get("filename"), _SMALL_TEXT_LIMIT),
+                mime_type=_clean_text(spec.get("mime_type"), _SMALL_TEXT_LIMIT),
                 status="pending",
                 created_at=now,
                 updated_at=now,
@@ -142,18 +184,18 @@ async def update_file_done(batch_id: str, idx: int, payload: dict) -> None:
     """
     values = {
         "status": "done",
-        "filename": payload.get("filename"),
-        "mime_type": payload.get("mime_type"),
+        "filename": _clean_text(payload.get("filename"), _SMALL_TEXT_LIMIT),
+        "mime_type": _clean_text(payload.get("mime_type"), _SMALL_TEXT_LIMIT),
         "page_count": payload.get("page_count"),
         "char_count": payload.get("char_count"),
         "is_archival": payload.get("is_archival"),
         "confidence": payload.get("confidence"),
-        "verdict": payload.get("verdict"),
+        "verdict": _clean_text(payload.get("verdict"), _SMALL_TEXT_LIMIT),
         "match_score": payload.get("match_score"),
-        "reason": payload.get("reason"),
-        "key_points": payload.get("key_points"),
-        "doc_category": payload.get("doc_category"),
-        "ocr_text": payload.get("ocr_text"),
+        "reason": _clean_text(payload.get("reason"), _REASON_LIMIT),
+        "key_points": _clean_key_points(payload.get("key_points")),
+        "doc_category": _clean_text(payload.get("doc_category"), _SMALL_TEXT_LIMIT),
+        "ocr_text": _clean_text(payload.get("ocr_text"), _OCR_TEXT_LIMIT),
         "updated_at": datetime.now(),
     }
     if payload.get("elapsed_sec") is not None:
@@ -174,13 +216,13 @@ async def update_file_error(
 ) -> None:
     values = {
         "status": "error",
-        "error_msg": error_msg,
+        "error_msg": _clean_text(error_msg, _ERROR_MSG_LIMIT),
         "updated_at": datetime.now(),
     }
     if elapsed_sec is not None:
         values["elapsed_sec"] = Decimal(str(elapsed_sec))
-    if filename:
-        values["filename"] = filename
+    if filename is not None:
+        values["filename"] = _clean_text(filename, _SMALL_TEXT_LIMIT)
     async with async_session_maker() as session:
         stmt = (
             sa_update(ArchiveDetectFile)
@@ -210,7 +252,7 @@ async def update_batch_status(batch_id: str, status: str, error: Optional[str] =
     async with async_session_maker() as session:
         values = {"status": status, "updated_at": datetime.now()}
         if error is not None:
-            values["error"] = error
+            values["error"] = _clean_text(error, _ERROR_MSG_LIMIT)
         stmt = (
             sa_update(ArchiveDetectBatch)
             .where(ArchiveDetectBatch.batch_id == batch_id)
@@ -252,8 +294,8 @@ async def requeue_files_for_rerun(
             sa_update(ArchiveDetectBatch)
             .where(ArchiveDetectBatch.batch_id == batch_id)
             .values(
-                user_prompt=criteria,
-                stage=stage,
+                user_prompt=_clean_text(criteria, _CRITERIA_LIMIT),
+                stage=_clean_text(stage, _SMALL_TEXT_LIMIT),
                 status="running",
                 done_files=done_kept,
                 overall_verdict=None,
@@ -272,7 +314,7 @@ async def requeue_files_for_rerun(
                 )
                 .values(
                     status="pending",
-                    reuse_ocr_text=(it.get("ocr_text") or None),
+                    reuse_ocr_text=_clean_text(it.get("ocr_text") or None, _OCR_TEXT_LIMIT),
                     worker_lease_until=None,
                     retry_count=0,
                     verdict=None,
@@ -368,9 +410,9 @@ async def update_batch_overall(
             sa_update(ArchiveDetectBatch)
             .where(ArchiveDetectBatch.batch_id == batch_id)
             .values(
-                overall_verdict=overall_verdict,
+                overall_verdict=_clean_text(overall_verdict, _SMALL_TEXT_LIMIT),
                 overall_score=overall_score,
-                overall_reason=overall_reason,
+                overall_reason=_clean_text(overall_reason, _REASON_LIMIT),
                 updated_at=datetime.now(),
             )
         )
@@ -555,7 +597,7 @@ async def create_business_batch_with_files(
         # 1) 创建 batch
         batch = ArchiveDetectBatch(
             batch_id=batch_id,
-            user_prompt=user_prompt,
+            user_prompt=_clean_text(user_prompt, _CRITERIA_LIMIT),
             source_kind="batch",        # 业务模式统一标 batch
             total_files=len(items_plan),
             done_files=0,                # 会被下面循环里 reuse 项累加
@@ -573,10 +615,10 @@ async def create_business_batch_with_files(
                 batch_id=batch_id,
                 idx=i,
                 progress_id=progress_id,
-                file_id=spec["file_id"],
-                filename=spec.get("filename"),
-                source_url=spec.get("source_url"),
-                local_path=spec.get("local_path"),  # upload 模式:主进程落盘后写 DB,worker 读取
+                file_id=_clean_text(spec["file_id"], _SMALL_TEXT_LIMIT),
+                filename=_clean_text(spec.get("filename"), _SMALL_TEXT_LIMIT),
+                source_url=_clean_text(spec.get("source_url"), _URL_LIMIT),
+                local_path=_clean_text(spec.get("local_path"), _URL_LIMIT),  # upload 模式:主进程落盘后写 DB,worker 读取
                 version=spec.get("version") or 1,
                 deleted=False,
                 created_at=now,
@@ -590,12 +632,12 @@ async def create_business_batch_with_files(
                     elapsed_sec=Decimal("0.0"),
                     is_archival=reuse.get("is_archival"),
                     confidence=reuse.get("confidence"),
-                    verdict=reuse.get("verdict"),
+                    verdict=_clean_text(reuse.get("verdict"), _SMALL_TEXT_LIMIT),
                     match_score=reuse.get("match_score"),
-                    reason=reuse.get("reason"),
-                    key_points=reuse.get("key_points"),
-                    doc_category=reuse.get("doc_category"),
-                    ocr_text=reuse.get("ocr_text"),
+                    reason=_clean_text(reuse.get("reason"), _REASON_LIMIT),
+                    key_points=_clean_key_points(reuse.get("key_points")),
+                    doc_category=_clean_text(reuse.get("doc_category"), _SMALL_TEXT_LIMIT),
+                    ocr_text=_clean_text(reuse.get("ocr_text"), _OCR_TEXT_LIMIT),
                     page_count=reuse.get("page_count"),
                     char_count=reuse.get("char_count"),
                 )
@@ -737,9 +779,9 @@ async def create_recheck_batch_with_files(
     async with async_session_maker() as session:
         batch = ArchiveDetectBatch(
             batch_id=new_batch_id,
-            user_prompt=criteria,
+            user_prompt=_clean_text(criteria, _CRITERIA_LIMIT),
             source_kind="recheck",
-            stage=stage,
+            stage=_clean_text(stage, _SMALL_TEXT_LIMIT),
             total_files=len(items_plan),
             done_files=0,
             status="running",
@@ -753,12 +795,12 @@ async def create_recheck_batch_with_files(
                 batch_id=new_batch_id,
                 idx=i,
                 progress_id=progress_id,
-                file_id=spec.get("file_id"),
+                file_id=_clean_text(spec.get("file_id"), _SMALL_TEXT_LIMIT),
                 version=spec.get("version") or 1,
-                source_url=spec.get("source_url"),
-                filename=spec.get("filename"),
-                mime_type=spec.get("mime_type"),
-                reuse_ocr_text=spec.get("ocr_text") or None,
+                source_url=_clean_text(spec.get("source_url"), _URL_LIMIT),
+                filename=_clean_text(spec.get("filename"), _SMALL_TEXT_LIMIT),
+                mime_type=_clean_text(spec.get("mime_type"), _SMALL_TEXT_LIMIT),
+                reuse_ocr_text=_clean_text(spec.get("ocr_text") or None, _OCR_TEXT_LIMIT),
                 status="pending",
                 deleted=False,
                 created_at=now,
@@ -781,6 +823,7 @@ async def admin_list_batches(
     client_name: Optional[str] = None,
     progress_oid: Optional[str] = None,
     progress_name: Optional[str] = None,
+    handler: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     limit: int = 100,
@@ -824,6 +867,8 @@ async def admin_list_batches(
             conditions.append(ArchiveDetectProgress.progress_oid.ilike(f"%{progress_oid}%"))
         if progress_name:
             conditions.append(ArchiveDetectProgress.progress_name.ilike(f"%{progress_name}%"))
+        if handler:
+            conditions.append(ArchiveDetectProgress.handler.ilike(f"%{handler}%"))
         if date_from:
             start = datetime.strptime(date_from, "%Y-%m-%d")
             conditions.append(ArchiveDetectBatch.created_at >= start)
@@ -1103,16 +1148,23 @@ async def list_running_batch_ids() -> list[str]:
         return [r[0] for r in res.all()]
 
 
-async def list_batch_ids_for_rejudge(verdicts: list[str]) -> list[str]:
-    """批量重判总体:查 status='done' 且 overall_verdict 在给定集合内的 batch_id。
+async def list_batch_ids_for_rejudge(
+    verdicts: Optional[list[str]] = None,
+    batch_ids: Optional[list[str]] = None,
+) -> list[str]:
+    """批量重判/重新检测:查 status='done' 的 batch_id。
 
-    verdicts 为空则返回所有 done 批次。按 created_at 升序(老的先刷)。
+    - 若提供 batch_ids,只处理这些指定批次中 status='done' 的项(忽略 verdicts)。
+    - 未提供 batch_ids 则按 overall_verdict 筛选(verdicts 为空返回所有 done 批次)。
+    按 created_at 升序(老的先刷)。
     """
     async with async_session_maker() as session:
         stmt = select(ArchiveDetectBatch.batch_id).where(
             ArchiveDetectBatch.status == "done"
         )
-        if verdicts:
+        if batch_ids:
+            stmt = stmt.where(ArchiveDetectBatch.batch_id.in_(batch_ids))
+        elif verdicts:
             stmt = stmt.where(ArchiveDetectBatch.overall_verdict.in_(verdicts))
         stmt = stmt.order_by(ArchiveDetectBatch.created_at.asc())
         res = await session.execute(stmt)
@@ -1135,6 +1187,36 @@ async def get_batch_meta(batch_id: str) -> Optional[dict]:
             "progress_id": b.progress_id,
             "status": b.status,
         }
+
+
+async def get_batch_context(batch_id: str) -> Optional[dict]:
+    """返回 batch 元信息 + progress.handler + client.name,供 LLM prompt 显式注入姓名。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(
+                ArchiveDetectBatch.batch_id,
+                ArchiveDetectBatch.user_prompt,
+                ArchiveDetectBatch.source_kind,
+                ArchiveDetectBatch.stage,
+                ArchiveDetectBatch.progress_id,
+                ArchiveDetectBatch.status,
+                Client.name.label("client_name"),
+                Client.client_code.label("client_code"),
+                ArchiveDetectProgress.handler.label("handler"),
+            )
+            .outerjoin(
+                ArchiveDetectProgress,
+                ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id,
+            )
+            .outerjoin(
+                Client,
+                ArchiveDetectProgress.client_id == Client.id,
+            )
+            .where(ArchiveDetectBatch.batch_id == batch_id)
+        )
+        res = await session.execute(stmt)
+        row = res.mappings().first()
+        return dict(row) if row else None
 
 
 async def get_batch_files_simple(batch_id: str) -> list[dict]:

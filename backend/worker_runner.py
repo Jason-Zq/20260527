@@ -92,8 +92,7 @@ async def _process_one_file(task: dict, worker_id: str) -> None:
                 except ValueError as e:
                     raise ValueError(f"文件地址无效或刷新失败:{e}")
                 except Exception as e:
-                    from archive_detect_service import _humanize_fetch_error
-                    msg = _humanize_fetch_error(e)
+                    msg = str(e) or e.__class__.__name__
                     raise ValueError(f"无法下载文件:{msg}")
                 fetched_temp_path = local_path
                 if not file_fetcher.is_supported_extension(filename):
@@ -137,15 +136,23 @@ async def _process_one_file(task: dict, worker_id: str) -> None:
 
         # 3) LLM 判定
         await crud.update_file_intermediate_status(file_db_id, "llm")
-        # 拿 batch 的 criteria + stage
-        batch_meta = await crud.get_batch_meta(batch_id)
-        if not batch_meta:
+        # 拿 batch 的 criteria + stage + client/handler
+        batch_ctx = await crud.get_batch_context(batch_id)
+        if not batch_ctx:
             raise ValueError(f"批次 {batch_id} 元信息已丢失")
-        criteria = batch_meta.get("user_prompt") or ""
-        stage = batch_meta.get("stage") or "post_submit"
+        criteria = batch_ctx.get("user_prompt") or ""
+        stage = batch_ctx.get("stage") or "post_submit"
+        client_name = batch_ctx.get("client_name") or None
+        handler = batch_ctx.get("handler") or None
         verdict = await asyncio.to_thread(
-            llm_service.detect_archival, text, criteria, stage,
-            batch_id=batch_id, file_id=task.get("file_id"),
+            llm_service.detect_archival,
+            text,
+            criteria,
+            stage,
+            client_name=client_name,
+            handler=handler,
+            batch_id=batch_id,
+            file_id=task.get("file_id"),
         )
         verdict = redactor.redact_dict(verdict)
         ocr_text_redacted = _redact_text(text)

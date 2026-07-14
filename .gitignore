@@ -107,3 +107,9 @@ release/
 
 *.zip
 *.tar
+
+
+bin/
+.vs/
+obj/
+appsettings.json

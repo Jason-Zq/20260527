@@ -409,15 +409,15 @@ class ArchiveDetectBatch(Base):
 
     一次提交对应一条 batch 记录；batch 下挂 N 个 file（多文件并发处理）。
     user_prompt 为判定标准（多行），拼接进 LLM prompt。
-    source_kind: upload | url | batch（业务审核模式）。
-    progress_id/overall_* 仅业务审核模式有值（匿名 batch 为 NULL）。
+    source_kind: batch | recheck（历史数据可能保留 upload/url，已不再使用）。
+    progress_id/overall_* 仅业务审核模式有值。
     overall_* = 当次总体判断快照；进展包维度滚动判断见 ArchiveDetectFolderSummary。
     """
     __tablename__ = "archive_detect_batches"
 
     batch_id = Column(String(40), primary_key=True, comment="任务批次ID")
     user_prompt = Column(Text, nullable=False, comment="用户输入的留底判定标准（多行）")
-    source_kind = Column(String(10), nullable=False, comment="upload | url | batch")
+    source_kind = Column(String(10), nullable=False, comment="batch | recheck")
     stage = Column(String(20), nullable=True, comment="审核阶段 pre_submit|post_submit;worker 读取传给 LLM")
     total_files = Column(Integer, nullable=False, comment="文件总数（1-20）")
     done_files = Column(Integer, default=0, nullable=False, comment="已完成（含成功+失败）")

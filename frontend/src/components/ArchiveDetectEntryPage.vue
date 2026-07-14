@@ -6,10 +6,6 @@
         <span class="title-indicator"></span>
         文件留底检测
       </div>
-      <el-radio-group v-model="tabKind" :disabled="busy" size="default" class="tab-switch">
-        <el-radio-button label="business">业务审核</el-radio-button>
-        <el-radio-button label="quick">快速检测</el-radio-button>
-      </el-radio-group>
       <el-button class="history-btn" size="default" @click="openHistory">
         <el-icon style="margin-right: 4px"><Clock /></el-icon>
         历史记录
@@ -18,123 +14,8 @@
 
     <!-- 主体 -->
     <div class="main-scroll">
-      <!-- 隐私提醒条(仅快速检测模式) -->
-      <div v-if="tabKind === 'quick'" class="privacy-banner">
-        <el-icon><Lock /></el-icon>
-        <span>文件不入库、处理完即删，不会在本服务保存</span>
-      </div>
-
-      <!-- 判定提示词(快速模式专属位置:顶部) -->
-      <section v-if="tabKind === 'quick'" class="card">
-        <div class="card-head">
-          <el-icon><EditPen /></el-icon>
-          <span>判定提示词（可编辑，将拼接到 AI 识别中）</span>
-        </div>
-        <el-input
-          v-model="userPrompt"
-          type="textarea"
-          :rows="3"
-          :autosize="{ minRows: 3, maxRows: 8 }"
-          placeholder="例：帮我检测文件是否是 XXX 客户 XXX 项目的 XXX 进展（留底）文件"
-          :disabled="busy"
-          @input="onCriteriaInput"
-        />
-        <div class="hint">
-          请把模板中的 XXX 替换为客户、项目、进展的具体名称。AI 会按你的描述判定每个文件是否符合留底要求。
-        </div>
-      </section>
-
-      <!-- 2. 来源切换(仅快速检测模式) -->
-      <section v-if="tabKind === 'quick'" class="card">
-        <div class="card-head">
-          <el-icon><Files /></el-icon>
-          <span>文件来源</span>
-        </div>
-        <el-radio-group v-model="sourceKind" :disabled="busy" size="default">
-          <el-radio-button label="upload">上传文件</el-radio-button>
-          <el-radio-button label="url">输入文件地址</el-radio-button>
-        </el-radio-group>
-
-        <!-- upload 模式 -->
-        <div v-if="sourceKind === 'upload'" class="source-pane">
-          <el-upload
-            v-model:file-list="uploadFiles"
-            multiple
-            :auto-upload="false"
-            :limit="MAX_FILES"
-            accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.webp,.gif,.doc,.docx,.xls,.xlsx,.pptx"
-            :on-exceed="onExceedUpload"
-            :on-change="onUploadChange"
-            drag
-          >
-            <el-icon class="upload-icon"><UploadFilled /></el-icon>
-            <div class="upload-text">点击或拖拽文件到此处</div>
-            <div class="upload-tip">最多 {{ MAX_FILES }} 个文件 · 支持 PDF / 图片 / Word / Excel / PPT（GIF 仅识别第一帧）</div>
-          </el-upload>
-        </div>
-
-        <!-- url 模式：动态行输入 -->
-        <div v-else class="source-pane">
-          <div class="url-rows">
-            <div
-              v-for="(row, i) in urlRows"
-              :key="row.id"
-              class="url-row"
-              :class="{ 'has-error': row.invalid }"
-            >
-              <span class="url-row-label">文件地址 {{ i + 1 }}</span>
-              <el-input
-                v-model="row.value"
-                placeholder="https://...（仅支持 http/https）"
-                :disabled="busy"
-                clearable
-                @input="row.invalid = false"
-                @paste="(e) => onUrlPaste(e, i)"
-              />
-              <el-button
-                class="url-row-del"
-                :disabled="busy || urlRows.length <= 1"
-                circle
-                size="small"
-                @click="removeUrlRow(i)"
-              >
-                <el-icon><Close /></el-icon>
-              </el-button>
-            </div>
-          </div>
-          <div class="url-row-actions">
-            <el-button
-              size="small"
-              :disabled="busy || urlRows.length >= MAX_FILES"
-              @click="addUrlRow()"
-            >
-              <el-icon style="margin-right: 4px"><Plus /></el-icon>
-              添加文件地址
-            </el-button>
-            <span class="hint url-counter">
-              当前 <b>{{ filledUrlCount }}</b>/{{ MAX_FILES }}
-              <span v-if="urlRows.length >= MAX_FILES" class="warn">（已达上限）</span>
-            </span>
-          </div>
-        </div>
-
-        <div class="submit-row">
-          <el-button
-            type="primary"
-            size="large"
-            :loading="busy"
-            :disabled="!canSubmit"
-            @click="handleSubmit"
-          >
-            <el-icon v-if="!busy" style="margin-right: 4px"><MagicStick /></el-icon>
-            {{ submitButtonText }}
-          </el-button>
-        </div>
-      </section>
-
       <!-- 业务审核模式专属区块:客户 + 进展 + 业务文件行 -->
-      <template v-if="tabKind === 'business'">
-        <!-- 阶段选择 -->
+      <!-- 阶段选择 -->
         <section class="card">
           <div class="card-head">
             <el-icon><Files /></el-icon>
@@ -272,7 +153,6 @@
             </el-button>
           </div>
         </section>
-      </template>
 
       <!-- 3. 结果列表（一文件一卡） -->
       <section v-if="batch" class="card">
@@ -430,7 +310,7 @@
       <!-- 空状态 -->
       <section v-else-if="!busy" class="card empty">
         <el-icon :size="48"><Reading /></el-icon>
-        <p class="empty-title">填写判定提示词，选择文件或输入文件地址，开始检测</p>
+        <p class="empty-title">填写客户、进展与文件信息，开始业务审核</p>
         <p class="empty-sub">检测结果中的金额、电话、身份证、银行卡等敏感信息会自动脱敏</p>
       </section>
     </div>
@@ -513,15 +393,12 @@
 <script setup>
 import { ref, computed, onUnmounted, watch } from 'vue'
 import {
-  EditPen, UploadFilled, Files, Reading, MagicStick,
-  CircleCheck, CircleClose, Warning, Loading, Plus, Close, Lock,
+  EditPen, Files, Reading, MagicStick,
+  CircleCheck, CircleClose, Warning, Loading, Plus, Close,
   Clock, Refresh,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  submitArchiveDetectUpload,
-  submitArchiveDetectUrls,
-  pollArchiveDetect,
   listArchiveDetectHistory,
   deleteArchiveDetectBatch,
   submitBusinessBatch,
@@ -532,15 +409,6 @@ import {
 const MAX_FILES = 50
 
 const userPrompt = ref('')
-const sourceKind = ref('upload')         // 'upload' | 'url'
-const uploadFiles = ref([])              // el-upload v-model 接管
-
-// 动态行：每个对象 {id, value, invalid}；初始 1 行空
-let _rowSeq = 0
-function makeRow(value = '') {
-  return { id: ++_rowSeq, value, invalid: false }
-}
-const urlRows = ref([makeRow()])
 
 const submitting = ref(false)            // HTTP 提交瞬态
 const batch = ref(null)
@@ -551,10 +419,7 @@ const historyVisible = ref(false)
 const historyList = ref([])
 const historyLoading = ref(false)
 
-// ==================== 业务审核 tab(阶段三) ====================
-const tabKind = ref('business')               // 'quick' | 'business'，默认进入业务审核
-const tabMode = ref('business')               // 当前 batch 是哪个 tab 提交的(决定轮询走哪个 api)
-
+// ==================== 业务审核(阶段三) ====================
 const bizClient = ref({
   client_code: '',
   name: '',
@@ -588,23 +453,24 @@ function buildBizCriteria() {
 
   const parts = []
   // 客户标签用 client_code 而非姓名 —— 不作为姓名硬匹配条件，仅为上下文
-  const label = c.client_code ? `客户代号${c.client_code}` : (c.name ? `客户「${c.name}」` : '')
+  const clientLabel = c.client_code ? `客户代号${c.client_code}` : (c.name ? `客户「${c.name}」` : '')
+  const handlerLabel = p.handler ? `办理人「${p.handler}」` : ''
+  const label = clientLabel
+    ? (handlerLabel ? `${clientLabel}${handlerLabel}` : clientLabel)
+    : handlerLabel
   if (label) parts.push(label)
-  if (p.project_name) parts.push(`「${p.project_name}」项目`)
-  if (p.project_detail_name) parts.push(`「${p.project_detail_name}」`)
-  if (p.progress_name) parts.push(`「${p.progress_name}」进展`)
 
   const subject = parts.length ? parts.join(' / ') : '本客户'
 
-  // 关联人关键词:客户姓名、办理人。文件中若出现这些人名(含拼音/英文转写)即视为强关联信号。
+  // 关联人关键词:客户姓名、办理人。后端会额外显式注入这两个姓名,prompt 层负责拼音/英文转写等规则。
   const relatedNames = []
   if (c.name) relatedNames.push(c.name)
   if (p.handler) relatedNames.push(p.handler)
   const relatedHint = relatedNames.length
-    ? `\n关联人关键词：${relatedNames.join('、')}。文件内容中若出现上述任一姓名（含其拼音或英文转写，如「关晓晓」对应「GUAN Xiaoxiao」），即视为与本进展强关联，可支持判定为符合，不要因文件当事人姓名与客户不一致而判为不符合——授权委托书/公证认证等文件的委托人可能是客户的家属或本进展的办理人。`
+    ? `\n关联人关键词：${relatedNames.join('、')}。系统将同时识别上述人名的中文、拼音及英文转写。`
     : ''
 
-  return `请按公司文件留底标准，审核此文件是否为 ${subject} 在「${stage}」阶段应上传的留底文件。重点判断文件类型、内容完整性和格式规范，而不是严格匹配文件上的姓名（该客户的文件可能属于其配偶/子女/父母）。留底的核心是证明该进展对应的服务已启动或发生：只要合同中约定的任意一项服务内容有对应凭证即视为服务启动，证据可以是官方文件，也可以是服务合同 + 聊天记录/邮件/确认截图等软证据组合（如客户确认转卖房产即视为该项服务已启动），软证据同样有效。${relatedHint}`
+  return `请按公司文件留底标准，审核此文件是否为 ${subject} 在「${stage}」阶段的相关留底文件。重点判断文件类型、内容完整性和格式规范，而不是严格匹配文件上的姓名（该客户的文件可能属于其配偶/子女/父母）。不核对具体项目名称、投资金额或转账金额，只看文件是否与公司留底分类体系相关。${relatedHint}`
 }
 
 function onCriteriaInput() {
@@ -620,6 +486,7 @@ function resetCriteria() {
 // 监听业务字段变化 → 实时刷新 criteria(除非用户已手改)
 watch(
   () => [
+    bizClient.value.client_code,
     bizClient.value.name,
     bizProgress.value.handler,
     bizProgress.value.project_name,
@@ -628,51 +495,16 @@ watch(
     bizStage.value,
   ],
   () => {
-    if (tabKind.value !== 'business') return
     if (criteriaDirty.value) return
     userPrompt.value = buildBizCriteria()
   },
   { immediate: true },
 )
 
-// 切换到业务 tab → 自动预填(若用户未手改)
-watch(tabKind, (newTab) => {
-  if (newTab === 'business' && !criteriaDirty.value) {
-    userPrompt.value = buildBizCriteria()
-  }
-})
-
-const filledUrlCount = computed(
-  () => urlRows.value.filter((r) => r.value.trim()).length,
-)
-
 // 是否还在跑（提交瞬态 OR 轮询期）。整个生命周期都视为忙。
 const busy = computed(
   () => submitting.value || (batch.value && batch.value.status !== 'done'),
 )
-
-// 已有完整结果 → 再次提交前要确认（避免误覆盖）
-const hasResult = computed(
-  () => batch.value && batch.value.status === 'done',
-)
-
-const submitButtonText = computed(() => {
-  if (submitting.value) return '提交中...'
-  if (batch.value && batch.value.status !== 'done') {
-    return `检测中 ${batch.value.done_files}/${batch.value.total_files}...`
-  }
-  if (hasResult.value) return '重新检测'
-  return '开始检测'
-})
-
-const canSubmit = computed(() => {
-  if (busy.value) return false
-  if (!userPrompt.value.trim()) return false
-  if (sourceKind.value === 'upload') {
-    return uploadFiles.value.length > 0 && uploadFiles.value.length <= MAX_FILES
-  }
-  return filledUrlCount.value > 0 && urlRows.value.length <= MAX_FILES
-})
 
 // ==================== 业务审核 computed + 函数 ====================
 
@@ -738,7 +570,6 @@ async function handleSubmitBiz() {
   submitting.value = true
   batch.value = null
   stopPoll()
-  tabMode.value = 'business'
 
   try {
     // URL 模式:校验每行
@@ -801,177 +632,16 @@ async function handleRecheckBatch() {
     const resp = await recheckArchiveDetectBatch(
       batch.value.batch_id,
       criteria,
-      tabKind.value === 'business' ? bizStage.value : null,
+      bizStage.value,
     )
     ElMessage.success(
       `已创建重新审核批次:${resp.ai_only_count} 个文件复用 OCR,${resp.ocr_count} 个文件需重新 OCR`,
     )
-    tabMode.value = resp.mode === 'business' ? 'business' : 'quick'
     batch.value = null
     startPoll(resp.batch_id)
   } catch (err) {
     const msg = err.response?.data?.detail || err.message || '重新审核失败'
     ElMessage.error('重新审核失败:' + msg)
-  } finally {
-    submitting.value = false
-  }
-}
-
-const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024   // 与后端 file_fetcher.MAX_DOWNLOAD_BYTES 对齐
-
-function onExceedUpload() {
-  ElMessage.warning(`最多 ${MAX_FILES} 个文件`)
-}
-
-/**
- * el-upload 每次添加/移除文件触发。仅做大小提醒，不阻止用户加入。
- * 后端 file_fetcher 上限 50MB，超限会被服务端 413 拒绝（写到该文件结果卡的 error_msg）。
- */
-function onUploadChange(file) {
-  if (file?.status !== 'ready') return
-  if (file.size && file.size > MAX_FILE_SIZE_BYTES) {
-    const mb = (file.size / 1024 / 1024).toFixed(1)
-    ElMessage.warning(`「${file.name}」体积 ${mb}MB 超过 50MB 上限，提交后该文件会失败`)
-  }
-}
-
-function addUrlRow() {
-  if (urlRows.value.length >= MAX_FILES) {
-    ElMessage.warning(`最多 ${MAX_FILES} 个文件地址`)
-    return
-  }
-  urlRows.value.push(makeRow())
-}
-
-function removeUrlRow(i) {
-  if (urlRows.value.length <= 1) return
-  urlRows.value.splice(i, 1)
-}
-
-/**
- * 粘贴增强：当用户在某行粘贴包含换行的文本时，按行拆分：
- *  - 第 1 行填到当前行
- *  - 后续行依次填到下一行（不存在则新建，受 MAX_FILES 限制）
- * 不含换行 → 走默认粘贴行为。
- */
-function onUrlPaste(event, rowIdx) {
-  const txt = (event.clipboardData || window.clipboardData)?.getData('text') ?? ''
-  if (!/[\r\n]/.test(txt)) return
-  event.preventDefault()
-  const lines = txt.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-  if (lines.length === 0) return
-
-  let cursor = rowIdx
-  let truncated = false
-  for (const line of lines) {
-    if (cursor >= MAX_FILES) {
-      truncated = true
-      break
-    }
-    if (cursor >= urlRows.value.length) {
-      urlRows.value.push(makeRow(line))
-    } else {
-      urlRows.value[cursor].value = line
-      urlRows.value[cursor].invalid = false
-    }
-    cursor++
-  }
-  if (truncated) {
-    ElMessage.warning(`仅保留前 ${MAX_FILES} 个文件地址，其余已忽略`)
-  } else {
-    ElMessage.success(`已拆分 ${lines.length} 个地址到独立输入框`)
-  }
-}
-
-async function handleSubmit() {
-  // 防呆 1: 进行中禁止再次提交（按钮已禁用，但保险起见再挡一层）
-  if (busy.value) return
-
-  tabMode.value = 'quick'      // 快速检测模式,轮询走 pollArchiveDetect
-
-  // 防呆 2: 已有完成结果时再次提交 → 弹确认
-  if (hasResult.value) {
-    try {
-      await ElMessageBox.confirm(
-        '当前已有检测结果，重新检测会清空现有结果，是否继续？',
-        '确认重新检测',
-        { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' },
-      )
-    } catch {
-      return                                 // 用户取消
-    }
-  }
-
-  const prompt = userPrompt.value.trim()
-  if (!prompt) {
-    ElMessage.warning('请填写判定提示词')
-    return
-  }
-
-  if (sourceKind.value === 'upload') {
-    if (uploadFiles.value.length === 0) {
-      ElMessage.warning('请至少选择一个文件')
-      return
-    }
-    if (uploadFiles.value.length > MAX_FILES) {
-      ElMessage.warning(`最多 ${MAX_FILES} 个文件`)
-      return
-    }
-  } else {
-    // 校验每行
-    let firstBad = -1
-    const urls = []
-    urlRows.value.forEach((row, i) => {
-      const v = row.value.trim()
-      if (!v) return                // 空行允许，提交时丢弃
-      if (!/^https?:\/\//i.test(v)) {
-        row.invalid = true
-        if (firstBad === -1) firstBad = i
-      } else {
-        row.invalid = false
-        urls.push(v)
-      }
-    })
-    if (firstBad >= 0) {
-      ElMessage.warning(`第 ${firstBad + 1} 行不是合法地址（需以 http:// 或 https:// 开头）`)
-      return
-    }
-    if (urls.length === 0) {
-      ElMessage.warning('请至少输入一个文件地址')
-      return
-    }
-    if (urls.length > MAX_FILES) {
-      ElMessage.warning(`最多 ${MAX_FILES} 个文件地址`)
-      return
-    }
-
-    submitting.value = true
-    batch.value = null
-    stopPoll()
-    try {
-      const resp = await submitArchiveDetectUrls(urls, prompt)
-      ElMessage.success(`已提交 ${resp.total_files} 个文件，AI 正在检测...`)
-      startPoll(resp.batch_id)
-    } catch (err) {
-      const msg = err.response?.data?.detail || err.message || '提交失败'
-      ElMessage.error('提交失败：' + msg)
-    } finally {
-      submitting.value = false
-    }
-    return
-  }
-
-  submitting.value = true
-  batch.value = null
-  stopPoll()
-  try {
-    const realFiles = uploadFiles.value.map((it) => it.raw).filter(Boolean)
-    const resp = await submitArchiveDetectUpload(realFiles, prompt)
-    ElMessage.success(`已提交 ${resp.total_files} 个文件，AI 正在检测...`)
-    startPoll(resp.batch_id)
-  } catch (err) {
-    const msg = err.response?.data?.detail || err.message || '提交失败'
-    ElMessage.error('提交失败：' + msg)
   } finally {
     submitting.value = false
   }
@@ -991,10 +661,7 @@ function stopPoll() {
 
 async function pollOnce(batchId) {
   try {
-    // 业务模式走 pollBusinessBatch(含 client/progress 透传);快速模式走 pollArchiveDetect
-    const data = (tabMode.value === 'business')
-      ? await pollBusinessBatch(batchId)
-      : await pollArchiveDetect(batchId)
+    const data = await pollBusinessBatch(batchId)
     batch.value = data
     if (data.status === 'done') {
       stopPoll()
@@ -1102,7 +769,7 @@ async function loadHistoryItem(row) {
   historyVisible.value = false
   submitting.value = true
   try {
-    const data = await pollArchiveDetect(row.batch_id)
+    const data = await pollBusinessBatch(row.batch_id)
     batch.value = data
     if (data.status !== 'done') {
       // 历史 batch 一般是 done；若仍 running 则继续轮询
@@ -1185,11 +852,6 @@ onUnmounted(stopPoll)
 .mono { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 12px; }
 
 /* ==================== 业务审核 tab(阶段三) ==================== */
-
-.tab-switch {
-  margin-right: auto;
-  margin-left: 20px;
-}
 
 .card-sub {
   margin-left: auto;
@@ -1320,25 +982,6 @@ onUnmounted(stopPoll)
   gap: 16px;
 }
 
-/* 隐私提醒条 */
-.privacy-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  border-radius: 10px;
-  font-size: 13px;
-  color: #065f46;
-  font-weight: 500;
-}
-.privacy-banner :deep(.el-icon) {
-  color: #10b981;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
 /* 总体判断条(在文件网格之前) */
 .overall-banner {
   margin-bottom: 14px;
@@ -1449,66 +1092,6 @@ onUnmounted(stopPoll)
   color: #94a3b8;
 }
 .hint .warn { color: #ef4444; margin-left: 4px; }
-
-.source-pane {
-  margin-top: 14px;
-}
-
-.upload-icon {
-  font-size: 40px;
-  color: #cbd5e1;
-}
-.upload-text { font-size: 14px; color: #475569; margin-top: 4px; }
-.upload-tip { font-size: 12px; color: #94a3b8; margin-top: 4px; }
-
-/* URL 动态行 */
-.url-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.url-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.url-row-label {
-  flex-shrink: 0;
-  width: 92px;
-  font-size: 12px;
-  color: #64748b;
-  font-weight: 500;
-}
-.url-row :deep(.el-input) { flex: 1; }
-.url-row :deep(.el-input__wrapper) {
-  box-shadow: 0 0 0 1px #cbd5e1 inset;
-  transition: box-shadow 0.2s;
-}
-.url-row :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 2px #fb923c inset !important;
-}
-.url-row.has-error :deep(.el-input__wrapper) {
-  box-shadow: 0 0 0 1px #ef4444 inset !important;
-  background: #fef2f2;
-}
-.url-row-del {
-  flex-shrink: 0;
-  color: #94a3b8 !important;
-}
-.url-row-del:hover:not(.is-disabled) {
-  color: #ef4444 !important;
-  border-color: #fecaca !important;
-}
-
-.url-row-actions {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.url-counter {
-  margin-top: 0 !important;
-}
 
 .submit-row {
   margin-top: 16px;

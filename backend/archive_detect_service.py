@@ -24,22 +24,66 @@ import secrets
 from datetime import datetime
 from typing import Optional
 
-import file_fetcher
-import text_extractor
 import llm_service
 import redactor
-from redactor import redact as _redact_text
 from db import archive_detect_crud as crud
 import event_service
+
+
+def _build_new_criteria_for_batch(ctx: dict) -> str:
+    """根据 batch + progress + client 上下文生成新的简化版 criteria。
+
+    与 frontend/src/components/ArchiveDetectEntryPage.vue 的 buildBizCriteria()
+    保持语义一致，但不再拼接 project/progress 名称，也不强调金额核对。
+    如果该批次没有 client/progress 业务上下文（upload/url 匿名来源），
+    返回一条通用新规则 criteria。
+    """
+    client_code = (ctx.get("client_code") or "").strip()
+    client_name = (ctx.get("client_name") or "").strip()
+    handler = (ctx.get("handler") or "").strip()
+    stage_raw = ctx.get("stage") or "post_submit"
+    stage = "递交前" if stage_raw == "pre_submit" else "递交后"
+
+    parts = []
+    if client_code:
+        parts.append(f"客户代号{client_code}")
+    elif client_name:
+        parts.append(f"客户「{client_name}」")
+    if handler:
+        parts.append(f"办理人「{handler}」")
+
+    subject = " / ".join(parts) if parts else "本客户"
+
+    related_names = [n for n in [client_name, handler] if n]
+    related_hint = ""
+    if related_names:
+        related_hint = (
+            "\n关联人关键词："
+            + "、".join(related_names)
+            + "。系统将同时识别上述人名的中文、拼音及英文转写。"
+        )
+
+    return (
+        f"请按公司文件留底标准，审核此文件是否为 {subject} 在「{stage}」阶段的相关留底文件。"
+        "重点判断文件类型、内容完整性和格式规范，而不是严格匹配文件上的姓名（该客户的文件可能属于其配偶/子女/父母）。"
+        "不核对具体项目名称、投资金额或转账金额，只看文件是否与公司留底分类体系相关。"
+        f"{related_hint}"
+    )
+
+
+def _fallback_new_criteria() -> str:
+    """无业务上下文批次（upload/url 匿名来源）的通用新规则 criteria。"""
+    return (
+        "请按公司文件留底标准，审核此文件是否为公司留底相关文件。"
+        "重点判断文件类型、内容完整性和格式规范，不核对具体项目名称、投资金额或转账金额，"
+        "只看文件是否与公司留底分类体系相关。"
+    )
 
 
 # ==================== 常量与状态 ====================
 
 MAX_FILES_PER_BATCH = int(os.getenv("ARCHIVE_DETECT_MAX_FILES_PER_BATCH", "50"))
 LLM_CONCURRENCY = 3
-# 快速检测 fan-out 下载并发上限:一批最多 50 文件 asyncio.gather 全并发。
-# httpx 连接池不设上限,并发保护交给这个信号量,避免瞬间轰爆业务方/OSS。
-DOWNLOAD_CONCURRENCY = int(os.getenv("ARCHIVE_DETECT_DOWNLOAD_CONCURRENCY", "10"))
 RESULT_TTL_HOURS = 6                         # 内存结果保留 6 小时
 
 # 全局 pending 队列深度(仅供 /admin/queue-stats、/healthz 只读监控展示)
@@ -50,9 +94,6 @@ _batch_status: dict[str, dict] = {}
 
 # LLM 限流:主进程的 finalize 阶段调 summarize_batch 时用;worker 进程不依赖这个
 _LLM_SEMAPHORE = asyncio.Semaphore(LLM_CONCURRENCY)
-
-# 下载限流:快速检测 fan-out 的下载环节用,主动排队而非靠连接池满超时
-_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
 
 # 主进程的后台协程引用(startup 创建,shutdown cancel)
 _finalize_tasks: dict[str, asyncio.Task] = {}      # batch_id → finalize task
@@ -74,413 +115,12 @@ _rerun_batch_progress: dict = {
 
 # ==================== 工具 ====================
 
-def _upload_temp_dir() -> str:
-    """temp/archive_detect/ — 上传文件的暂存目录，处理完后删除。"""
-    root = os.path.dirname(os.path.abspath(__file__))
-    d = os.path.normpath(os.path.join(root, "..", "temp", "archive_detect"))
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
 def gen_batch_id() -> str:
     """YYMMDDHHMMSS_<6 hex>。"""
     return datetime.now().strftime("%y%m%d%H%M%S") + "_" + secrets.token_hex(3)
 
 
-def _humanize_fetch_error(exc: Exception) -> str:
-    """把 httpx 的网络层异常翻译成业务方能看懂的中文。"""
-    import httpx
-    if isinstance(exc, httpx.HTTPStatusError):
-        code = exc.response.status_code
-        if code == 404:
-            return "文件不存在（404），地址可能已失效"
-        if code == 403:
-            return "服务器拒绝访问（403），可能需要授权"
-        if code == 401:
-            return "需要登录鉴权（401）"
-        if code >= 500:
-            return f"远端服务器错误（{code}）"
-        return f"HTTP {code}"
-    if isinstance(exc, httpx.ConnectTimeout):
-        return "连接超时,地址可能无法访问"
-    if isinstance(exc, httpx.ReadTimeout):
-        return "下载超时（>5 分钟）,文件过大或网络太慢"
-    if isinstance(exc, httpx.ConnectError):
-        return "无法连接到该地址（DNS 或网络问题）"
-    if isinstance(exc, httpx.RequestError):
-        return "网络请求失败"
-    return str(exc) or exc.__class__.__name__
-
-
-def _set_file_state(batch_id: str, idx: int, **patch) -> None:
-    state = _batch_status.get(batch_id)
-    if not state:
-        return
-    files = state.get("files") or []
-    for f in files:
-        if f.get("idx") == idx:
-            f.update(patch)
-            return
-
-
 # ==================== 提交入口 ====================
-
-async def submit_batch(
-    *,
-    user_prompt: str,
-    source_kind: str,
-    items: list[dict],
-) -> str:
-    """创建 batch，启动后台 orchestrator，立即返回 batch_id。
-
-    items: list[dict]
-      - upload 模式：{"local_path": str, "filename": str, "mime_type": str}
-      - url 模式   ：{"source_url": str}
-    """
-    if not user_prompt or not user_prompt.strip():
-        raise ValueError("判定标准 user_prompt 不能为空")
-    if not items:
-        raise ValueError("文件列表为空")
-    if len(items) > MAX_FILES_PER_BATCH:
-        raise ValueError(f"单次最多 {MAX_FILES_PER_BATCH} 个文件，收到 {len(items)} 个")
-    if source_kind not in ("upload", "url"):
-        raise ValueError(f"非法 source_kind={source_kind!r}")
-
-    batch_id = gen_batch_id()
-
-    _batch_status[batch_id] = {
-        "batch_id": batch_id,
-        "user_prompt": user_prompt.strip(),
-        "source_kind": source_kind,
-        "total_files": len(items),
-        "done_files": 0,
-        "status": "running",
-        "error": None,
-        "overall_verdict": None,
-        "overall_score": None,
-        "overall_reason": None,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "created_ts": time.time(),
-        "files": [
-            {
-                "idx": i,
-                "source_url": it.get("source_url"),
-                "filename": it.get("filename"),
-                "mime_type": it.get("mime_type"),
-                "status": "pending",
-                "is_archival": None,
-                "confidence": None,
-                "verdict": None,
-                "match_score": None,
-                "reason": None,
-                "key_points": [],
-                "doc_category": None,
-                "page_count": None,
-                "char_count": None,
-                "elapsed_sec": None,
-                "error_msg": None,
-            }
-            for i, it in enumerate(items)
-        ],
-    }
-
-    # DB 双写：create（中间态不写 DB，只写终态，见 _process_one）
-    # 失败只 print 不阻断——内存态已建立，任务仍可跑
-    file_specs = [
-        {
-            "source_url": it.get("source_url"),
-            "filename": it.get("filename"),
-            "mime_type": it.get("mime_type"),
-        }
-        for it in items
-    ]
-    try:
-        await crud.create_batch_with_files(
-            batch_id=batch_id,
-            user_prompt=user_prompt.strip(),
-            source_kind=source_kind,
-            file_specs=file_specs,
-        )
-    except Exception as e:
-        print(f"[archive_detect:{batch_id}] DB create 失败（继续内存态）: {e}")
-
-    asyncio.create_task(_orchestrate(batch_id, user_prompt.strip(), source_kind, items))
-    return batch_id
-
-
-# ==================== 后台编排 ====================
-
-async def _orchestrate(batch_id: str, user_prompt: str, source_kind: str, items: list[dict]):
-    """fan-out 所有文件，等全部结束后置 batch.status=done 并生成总报告。"""
-    try:
-        tasks = [
-            asyncio.create_task(_process_one(batch_id, idx, item, user_prompt, source_kind))
-            for idx, item in enumerate(items)
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        # ---- 生成批次总报告(LLM 综合判定 verdict/score/reason;失败回退规则平均分)----
-        state = _batch_status.get(batch_id)
-        overall_verdict = "mismatch"
-        overall_score = 0
-        overall_reason = ""
-        if state:
-            done_all = [f for f in (state.get("files") or []) if f.get("status") == "done"]
-            no_text_count = sum(1 for f in done_all if f.get("verdict") == "no_text")
-            done_items = [f for f in done_all if f.get("verdict") != "no_text"]
-            error_count = sum(1 for f in (state.get("files") or []) if f.get("status") == "error")
-
-            files_brief = [
-                {
-                    "filename": f.get("filename"),
-                    "verdict": f.get("verdict"),
-                    "match_score": f.get("match_score"),
-                    "doc_category": f.get("doc_category"),
-                    "reason": (f.get("reason") or "")[:80],
-                    "key_points": (f.get("key_points") or [])[:3],
-                }
-                for f in done_items
-            ]
-
-            def _rule_avg():
-                if not done_items:
-                    return "mismatch", 0
-                scores = [int(f.get("match_score") or 0) for f in done_items]
-                avg = round(sum(scores) / len(scores))
-                if avg >= 80:
-                    return "match", avg
-                elif avg >= 50:
-                    return "partial", avg
-                return "mismatch", avg
-
-            llm_ok = False
-            if done_items:
-                # 1) 优先 LLM 综合判定(理解关键件 vs 附件)
-                try:
-                    async with _LLM_SEMAPHORE:
-                        judged = await asyncio.to_thread(
-                            llm_service.judge_batch_overall, files_brief, user_prompt, None,
-                            batch_id=batch_id,
-                        )
-                    overall_verdict = judged["verdict"]
-                    overall_score = judged["score"]
-                    overall_reason = redactor.redact(judged.get("reason") or "")
-                    llm_ok = True
-                except Exception as e:
-                    print(f"[archive_detect:{batch_id}] LLM judge_batch_overall 失败,回退规则平均分: {e}")
-
-            # 2) 兜底:规则平均分 + summarize_batch 文本
-            if not llm_ok:
-                overall_verdict, overall_score = _rule_avg()
-                if done_items:
-                    try:
-                        async with _LLM_SEMAPHORE:
-                            overall_reason = await asyncio.to_thread(
-                                llm_service.summarize_batch,
-                                files_brief, user_prompt, overall_verdict, overall_score,
-                                batch_id=batch_id,
-                            )
-                        overall_reason = redactor.redact(overall_reason or "")
-                    except Exception as e:
-                        print(f"[archive_detect:{batch_id}] LLM summarize_batch 也失败,用规则文本: {e}")
-                        cnt_m = sum(1 for f in done_items if f.get("verdict") == "match")
-                        cnt_p = sum(1 for f in done_items if f.get("verdict") == "partial")
-                        cnt_x = sum(1 for f in done_items if f.get("verdict") == "mismatch")
-                        overall_reason = f"共 {len(done_items)} 个文件,{cnt_m} 个符合,{cnt_p} 个部分符合,{cnt_x} 个不符合。"
-                elif no_text_count > 0:
-                    overall_reason = f"共 {no_text_count} 个文件均无有效文字(图片型/扫描件/空白),无法判定留底符合度。"
-
-            extra = []
-            if no_text_count > 0:
-                extra.append(f"{no_text_count} 个文件无有效文字(未参与判定)")
-            if error_count > 0:
-                extra.append(f"{error_count} 个文件处理失败")
-            if extra:
-                overall_reason = (overall_reason or "").rstrip() + " 另有 " + "、".join(extra) + "。"
-
-            # 3) 写内存
-            state["overall_verdict"] = overall_verdict
-            state["overall_score"] = overall_score
-            state["overall_reason"] = overall_reason
-            state["status"] = "done"
-
-        # 4) 写 DB:overall + 状态(分两步,失败互不影响)
-        try:
-            await crud.update_batch_overall(batch_id, overall_verdict, overall_score, overall_reason)
-        except Exception as e:
-            print(f"[archive_detect:{batch_id}] DB update_batch_overall 失败（忽略）: {e}")
-        try:
-            await crud.update_batch_status(batch_id, "done")
-        except Exception as e:
-            print(f"[archive_detect:{batch_id}] DB update_batch_status 失败（忽略）: {e}")
-
-
-async def _process_one(
-    batch_id: str,
-    idx: int,
-    item: dict,
-    user_prompt: str,
-    source_kind: str,
-):
-    """单文件流水线：fetch → ocr → llm → redact。"""
-    t0 = time.time()
-    fetched_temp_path: Optional[str] = None
-    upload_path = item.get("local_path")
-
-    filename = item.get("filename") or ""
-    mime_type = item.get("mime_type")
-    page_count = char_count = None
-
-    try:
-        # 1) 拿到本地文件路径
-        if source_kind == "url":
-            url = item.get("source_url") or ""
-            _set_file_state(batch_id, idx, status="fetching")
-
-            if not url.strip():
-                raise ValueError("文件地址为空")
-            try:
-                async with _DOWNLOAD_SEMAPHORE:
-                    local_path, filename, mime_type = await file_fetcher.fetch_url_to_temp(url)
-            except file_fetcher.FileTooLargeError:
-                raise ValueError("文件超过 50MB 上限，无法处理")
-            except ValueError as e:
-                # scheme 非法 / URL 空
-                raise ValueError(f"文件地址无效：{e}")
-            except Exception as e:
-                # httpx 网络层错误（404 / DNS 失败 / 连接超时 / SSL 等）
-                msg = _humanize_fetch_error(e)
-                raise ValueError(f"无法下载文件：{msg}")
-            fetched_temp_path = local_path
-
-            if not file_fetcher.is_supported_extension(filename):
-                raise ValueError(file_fetcher.get_unsupported_hint(filename))
-        else:
-            local_path = upload_path
-            if not local_path or not os.path.exists(local_path):
-                raise ValueError("上传文件丢失")
-            # 上传文件大小检查（与 file_fetcher 50MB 上限对齐）
-            try:
-                size = os.path.getsize(local_path)
-            except OSError:
-                size = 0
-            if size > file_fetcher.MAX_DOWNLOAD_BYTES:
-                mb = size / 1024 / 1024
-                raise ValueError(f"文件体积 {mb:.1f}MB 超过 50MB 上限，无法处理")
-
-        # 2) 文本抽取(ocr_service 内部用 threading.Lock 串行 PaddleOCR,跨线程池安全)
-        _set_file_state(batch_id, idx, status="ocr", filename=filename, mime_type=mime_type)
-        extracted = await text_extractor.extract_text(local_path, mime_type)
-
-        text = extracted.get("text") or ""
-        page_count = extracted.get("page_count")
-        char_count = extracted.get("char_count")
-        if not text.strip():
-            # 无有效文字:不算失败,标 done + verdict=no_text,由总体判定排除在外。
-            elapsed = round(time.time() - t0, 2)
-            no_text_result = {
-                "verdict": "no_text", "match_score": 0, "is_archival": False,
-                "confidence": 0, "doc_category": "无文字",
-                "reason": "OCR/抽取后无有效文字(可能为图片型/扫描件/空白文档)",
-                "key_points": [],
-            }
-            _set_file_state(
-                batch_id, idx, status="done", filename=filename, mime_type=mime_type,
-                page_count=page_count, char_count=char_count, elapsed_sec=elapsed,
-                **no_text_result,
-            )
-            try:
-                await crud.update_file_done(batch_id, idx, {
-                    "filename": filename, "mime_type": mime_type,
-                    "page_count": page_count, "char_count": char_count,
-                    "ocr_text": "", "elapsed_sec": elapsed, **no_text_result,
-                })
-            except Exception as e:
-                print(f"[archive_detect:{batch_id}:{idx}] DB update_file_done(no_text) 失败（忽略）: {e}")
-            return
-
-        # 3) LLM 判定（限流 3 并发）
-        _set_file_state(batch_id, idx, status="llm",
-                        page_count=page_count, char_count=char_count)
-        async with _LLM_SEMAPHORE:
-            verdict = await asyncio.to_thread(
-                llm_service.detect_archival, text, user_prompt,
-                batch_id=batch_id, file_id=item.get("file_id"),
-            )
-
-        # 4) 脱敏（防御层）
-        verdict = redactor.redact_dict(verdict)
-        # OCR 原文也脱敏后才入库（绝不存原文）
-        ocr_text_redacted = _redact_text(text)
-
-        # 5) 写回内存态（内存不存 ocr_text，省内存；DB 存）
-        #    verdict dict 现含 7 个字段(verdict/match_score/is_archival/confidence/reason/key_points/doc_category),
-        #    **verdict 解包即可全部写到内存 file 项。
-        elapsed = round(time.time() - t0, 2)
-        _set_file_state(
-            batch_id, idx,
-            status="done",
-            filename=filename,
-            mime_type=mime_type,
-            page_count=page_count,
-            char_count=char_count,
-            elapsed_sec=elapsed,
-            **verdict,
-        )
-        # DB 双写：终态 done（含脱敏 ocr_text）。失败只 print 不影响内存态
-        try:
-            await crud.update_file_done(batch_id, idx, {
-                "filename": filename,
-                "mime_type": mime_type,
-                "page_count": page_count,
-                "char_count": char_count,
-                "is_archival": verdict.get("is_archival"),
-                "confidence": verdict.get("confidence"),
-                "verdict": verdict.get("verdict"),
-                "match_score": verdict.get("match_score"),
-                "reason": verdict.get("reason"),
-                "key_points": verdict.get("key_points"),
-                "doc_category": verdict.get("doc_category"),
-                "ocr_text": ocr_text_redacted,
-                "elapsed_sec": elapsed,
-            })
-        except Exception as e:
-            print(f"[archive_detect:{batch_id}:{idx}] DB update_file_done 失败（忽略）: {e}")
-
-    except Exception as e:
-        elapsed = round(time.time() - t0, 2)
-        msg = str(e) or e.__class__.__name__
-        _set_file_state(batch_id, idx, status="error", error_msg=msg, elapsed_sec=elapsed,
-                        filename=filename or None)
-        # DB 双写：终态 error。失败只 print
-        try:
-            await crud.update_file_error(batch_id, idx, msg, elapsed, filename or None)
-        except Exception as e2:
-            print(f"[archive_detect:{batch_id}:{idx}] DB update_file_error 失败（忽略）: {e2}")
-    finally:
-        # done 计数（成功/失败都算）—— DB 双写用返回值回填内存保证一致
-        try:
-            new_done = await crud.bump_done_count(batch_id)
-            state = _batch_status.get(batch_id)
-            if state:
-                state["done_files"] = new_done
-        except Exception as e:
-            # DB 失败则回退内存自增
-            state = _batch_status.get(batch_id)
-            if state:
-                state["done_files"] = (state.get("done_files") or 0) + 1
-            print(f"[archive_detect:{batch_id}] DB bump_done_count 失败（回退内存）: {e}")
-
-        # 清理临时文件
-        if fetched_temp_path:
-            file_fetcher.cleanup_temp_file(fetched_temp_path)
-        if upload_path:
-            try:
-                if os.path.exists(upload_path):
-                    os.remove(upload_path)
-            except OSError:
-                pass
-
 
 # ==================== 查询入口 ====================
 
@@ -532,11 +172,10 @@ async def gc_loop(interval_seconds: int = 1800):
 
 
 # ==================== 业务接口编排(阶段三) ====================
-# 与匿名 upload/urls 的区别:
 #   - 增量复用:同 (progress_id, file_id) 命中历史 done 记录 → 跳 OCR/LLM
 #   - 业务字段持久化:client/progress 实体表,file 记录带 progress_id/file_id/version
 #   - 异步处理只跑 new 项,reused 项在 submit 阶段就 done
-#   - 总报告生成同 _orchestrate(规则推 verdict/score + LLM 写 reason)
+#   - 总报告生成由 _generate_batch_overall 负责(规则推 verdict/score + LLM 写 reason)
 
 
 # ==================== 主进程 watchdog + finalize 协程 ====================
@@ -667,13 +306,15 @@ async def _batch_finalize_poll(batch_id: str) -> None:
 
 async def _generate_batch_overall(batch_id: str) -> None:
     """所有 file 终态后,根据 file 结果合成 overall_verdict/score/reason,update batch。"""
-    meta = await crud.get_batch_meta(batch_id)
-    if not meta:
+    ctx = await crud.get_batch_context(batch_id)
+    if not ctx:
         print(f"[finalize:{batch_id}] batch 元信息不存在,跳过")
         return
 
-    criteria = meta.get("user_prompt") or ""
-    stage = meta.get("stage")
+    criteria = ctx.get("user_prompt") or ""
+    stage = ctx.get("stage")
+    client_name = ctx.get("client_name") or None
+    handler = ctx.get("handler") or None
     files = await crud.get_batch_files_simple(batch_id)
     done_all = [f for f in files if f.get("status") == "done"]
     # no_text 文件算处理完成,但不参与总体判定
@@ -712,7 +353,12 @@ async def _generate_batch_overall(batch_id: str) -> None:
         try:
             async with _LLM_SEMAPHORE:
                 judged = await asyncio.to_thread(
-                    llm_service.judge_batch_overall, files_brief, criteria, stage,
+                    llm_service.judge_batch_overall,
+                    files_brief,
+                    criteria,
+                    stage,
+                    client_name=client_name,
+                    handler=handler,
                     batch_id=batch_id,
                 )
             overall_verdict = judged["verdict"]
@@ -729,7 +375,12 @@ async def _generate_batch_overall(batch_id: str) -> None:
                 async with _LLM_SEMAPHORE:
                     overall_reason = await asyncio.to_thread(
                         llm_service.summarize_batch,
-                        files_brief, criteria, overall_verdict, overall_score,
+                        files_brief,
+                        criteria,
+                        overall_verdict,
+                        overall_score,
+                        client_name=client_name,
+                        handler=handler,
                         batch_id=batch_id,
                     )
                 overall_reason = redactor.redact(overall_reason or "")
@@ -851,10 +502,16 @@ def get_rerun_batch_progress() -> dict:
     return dict(_rerun_batch_progress)
 
 
-async def start_rerun_files_batch(verdicts: Optional[list[str]] = None) -> dict:
+async def start_rerun_files_batch(
+    verdicts: Optional[list[str]] = None,
+    batch_ids: Optional[list[str]] = None,
+    regenerate_criteria: bool = False,
+) -> dict:
     """批量重审单文件:对目标批次逐个原地重跑(force_all,复用 ocr_text,不重新 OCR/下载)。
 
     每个批次沿用它自己原本的 criteria/stage。verdicts=要重审的 overall 集合;None/空=所有 done。
+    batch_ids=指定要处理的批次(提供时只处理其中 done 批次,忽略 verdicts)。
+    regenerate_criteria=True 时,每批会根据自身 client/progress/stage 重新生成新规则 criteria。
     单例;后台异步执行,前端轮询 get_rerun_batch_progress。
     """
     if _rerun_batch_progress["running"]:
@@ -862,36 +519,43 @@ async def start_rerun_files_batch(verdicts: Optional[list[str]] = None) -> dict:
     if _rejudge_progress["running"]:
         raise ValueError("批量重判总体正在进行中,请等待其完成后再批量重审")
 
-    batch_ids = await crud.list_batch_ids_for_rejudge(verdicts or [])
+    target_ids = await crud.list_batch_ids_for_rejudge(
+        verdicts=verdicts or None, batch_ids=batch_ids or None
+    )
     _rerun_batch_progress.update({
-        "running": True, "total": len(batch_ids), "done": 0, "failed": 0,
+        "running": True, "total": len(target_ids), "done": 0, "failed": 0,
         "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "finished_at": None, "verdicts": verdicts or None,
     })
-    asyncio.create_task(_run_rerun_files_batch(batch_ids))
-    return {"total": len(batch_ids), "batch_ids": batch_ids}
+    asyncio.create_task(_run_rerun_files_batch(target_ids, regenerate_criteria=regenerate_criteria))
+    return {"total": len(target_ids), "batch_ids": target_ids}
 
 
-async def _run_rerun_files_batch(batch_ids: list[str]) -> None:
-    """逐批触发原地重跑(force_all)。各批沿用自身 criteria/stage;单文件由 worker 队列串行消化。"""
+async def _run_rerun_files_batch(batch_ids: list[str], regenerate_criteria: bool = False) -> None:
+    """逐批触发原地重跑(force_all)。各批沿用自身 criteria/stage(或重新生成);单文件由 worker 队列串行消化。"""
     try:
         for bid in batch_ids:
             if _should_stop:
                 break
             try:
-                meta = await crud.get_batch_meta(bid)
-                if not meta:
-                    _rerun_batch_progress["failed"] += 1
-                    continue
-                criteria = meta.get("user_prompt") or ""
-                stage = meta.get("stage")
-                if not criteria.strip():
-                    _rerun_batch_progress["failed"] += 1
-                    print(f"[rerun_batch:{bid}] 原 criteria 为空,跳过")
-                    continue
-                await rerun_batch_inplace(
-                    batch_id=bid, criteria=criteria, stage=stage, force_all=True,
-                )
+                if regenerate_criteria:
+                    await rerun_batch_inplace(
+                        batch_id=bid, criteria="", stage=None, force_all=True, regenerate_criteria=True,
+                    )
+                else:
+                    meta = await crud.get_batch_meta(bid)
+                    if not meta:
+                        _rerun_batch_progress["failed"] += 1
+                        continue
+                    criteria = meta.get("user_prompt") or ""
+                    stage = meta.get("stage")
+                    if not criteria.strip():
+                        _rerun_batch_progress["failed"] += 1
+                        print(f"[rerun_batch:{bid}] 原 criteria 为空,跳过")
+                        continue
+                    await rerun_batch_inplace(
+                        batch_id=bid, criteria=criteria, stage=stage, force_all=True,
+                    )
                 _rerun_batch_progress["done"] += 1
             except Exception as e:
                 _rerun_batch_progress["failed"] += 1
@@ -1134,12 +798,34 @@ async def submit_recheck_batch(
     source_batch_id: str,
     criteria: str,
     stage: Optional[str] = None,
+    regenerate_criteria: bool = False,
 ) -> dict:
-    """基于当前 batch 创建 recheck batch,优先复用 ocr_text,重新跑 AI 和总报告。"""
-    if not criteria or not criteria.strip():
-        raise ValueError("重新审核的 criteria 不能为空")
+    """基于当前 batch 创建 recheck batch,优先复用 ocr_text,重新跑 AI 和总报告。
+
+    regenerate_criteria=True 时,根据原批次 client/progress/stage 重新生成新规则 criteria,
+    忽略传入的 criteria 参数。
+    """
     if stage not in (None, "pre_submit", "post_submit"):
         raise ValueError(f"非法 stage: {stage}")
+
+    source = await crud.get_batch_files_for_recheck(source_batch_id)
+    if not source:
+        raise ValueError(f"原批次 {source_batch_id} 不存在")
+    files = source.get("files") or []
+    if not files:
+        raise ValueError(f"原批次 {source_batch_id} 没有文件")
+
+    if regenerate_criteria:
+        ctx = await crud.get_batch_context(source_batch_id)
+        if ctx and (ctx.get("client_name") or ctx.get("client_code") or ctx.get("handler")):
+            criteria = _build_new_criteria_for_batch(ctx)
+        else:
+            criteria = _fallback_new_criteria()
+        stage = ctx.get("stage") or stage or "post_submit"
+    else:
+        if not criteria or not criteria.strip():
+            raise ValueError("重新审核的 criteria 不能为空")
+        criteria = criteria.strip()
 
     source = await crud.get_batch_files_for_recheck(source_batch_id)
     if not source:
@@ -1248,17 +934,30 @@ async def rerun_batch_inplace(
     criteria: str,
     stage: Optional[str] = None,
     force_all: bool = False,
+    regenerate_criteria: bool = False,
 ) -> dict:
     """原地重跑批次:复用已有结果,只补跑缺失的。
 
     Args:
         force_all: True = 无视已有 AI 结果,全部用新 criteria 重跑 AI。
                    False = 有 AI 结果的跳过,只补跑缺失的。
+        regenerate_criteria: True = 根据该批次当前 client/progress/stage 重新生成新规则 criteria,
+                             忽略传入的 criteria 参数。
     """
-    if not criteria or not criteria.strip():
-        raise ValueError("判定提示词不能为空")
     if stage not in (None, "pre_submit", "post_submit"):
         raise ValueError(f"非法 stage: {stage}")
+
+    if regenerate_criteria:
+        ctx = await crud.get_batch_context(batch_id)
+        if ctx and (ctx.get("client_name") or ctx.get("client_code") or ctx.get("handler")):
+            criteria = _build_new_criteria_for_batch(ctx)
+        else:
+            criteria = _fallback_new_criteria()
+        stage = ctx.get("stage") or stage or "post_submit"
+    else:
+        if not criteria or not criteria.strip():
+            raise ValueError("判定提示词不能为空")
+        criteria = criteria.strip()
 
     source = await crud.get_batch_files_for_recheck(batch_id)
     if not source:

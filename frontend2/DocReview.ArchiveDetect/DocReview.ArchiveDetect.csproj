@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 生成 XML 文档,供 Swagger 读取接口/参数注释 -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- 抑制"缺少 XML 注释"警告(未加注释的成员不报警) -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="PDFtoImage" Version="5.2.1" />
+    <PackageReference Include="RapidOcrNet" Version="3.0.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />
+  </ItemGroup>
+
+  <!-- PP-OCRv4 中文模型(与 Python 项目同款,复用本地 venv 文件) -->
+  <ItemGroup>
+    <None Include="models\v4\**\*" CopyToOutputDirectory="PreserveNewest" Link="models\v4\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

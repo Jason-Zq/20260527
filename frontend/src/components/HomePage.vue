@@ -26,7 +26,7 @@
             <div class="primary-badge">主功能</div>
             <h2 class="primary-title">文件留底检测</h2>
             <p class="primary-desc">
-              上传文件或粘贴 URL，AI 根据你的判定标准检测文件是否符合留底要求；金额、电话、身份证、银行卡等敏感信息自动脱敏。
+              按客户 / 项目 / 进展提交待审文件（OSS URL），AI 根据留底判定标准检测文件是否符合要求；金额、电话、身份证、银行卡等敏感信息自动脱敏。
             </p>
             <ul class="primary-bullets">
               <li><el-icon size="14"><Check /></el-icon> 多文件并发处理（≤20）</li>

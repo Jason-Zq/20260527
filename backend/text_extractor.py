@@ -44,6 +44,30 @@ _GIF_EXT = ".gif"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
 
 
+# NUL/C0 控制字符清洗表:pdfplumber/python-docx/OCR 偶发混入 0x00 等控制符,
+# PostgreSQL text 列不接受 NUL,下游 LLM 也无需这些字符。在抽取出口统一剔除
+# (保留 \t \n \r),作为 CRUD 层清洗之外的源头防御。
+_CTRL_DELETE = {c: None for c in range(0x20) if c not in (0x09, 0x0A, 0x0D)}
+_CTRL_DELETE[0x7F] = None  # DEL
+
+
+def _sanitize_text(text: Optional[str]) -> Optional[str]:
+    """去除 NUL/C0 控制字符(保留 \t\n\r)和 DEL。None/空串原样返回。"""
+    if not text:
+        return text
+    return text.translate(_CTRL_DELETE)
+
+
+def _sanitize_extracted(result: dict) -> dict:
+    """在抽取出口清洗 text 字段并同步 char_count,确保下游拿到的是干净文本。"""
+    if result and result.get("text"):
+        cleaned = _sanitize_text(result["text"])
+        result["text"] = cleaned
+        if "char_count" in result:
+            result["char_count"] = len(cleaned) if cleaned else 0
+    return result
+
+
 _ANTIWORD_CACHE = {"path": None, "checked": False}
 _SOFFICE_CACHE = {"path": None, "checked": False}
 
@@ -652,28 +676,28 @@ async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext == _DOCX_EXT:
-        return await asyncio.to_thread(_extract_docx, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_docx, file_path))
 
     if ext == _XLSX_EXT:
-        return await asyncio.to_thread(_extract_xlsx, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_xlsx, file_path))
 
     if ext == _PPTX_EXT:
-        return await asyncio.to_thread(_extract_pptx, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_pptx, file_path))
 
     if ext == _XLS_EXT:
-        return await asyncio.to_thread(_extract_xls, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_xls, file_path))
 
     if ext == _GIF_EXT:
-        return await asyncio.to_thread(_extract_gif, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_gif, file_path))
 
     if ext == ".doc":
-        return await asyncio.to_thread(_extract_doc, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_doc, file_path))
 
     if ext == _PDF_EXT:
-        return await asyncio.to_thread(_extract_pdf, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_pdf, file_path))
 
     if ext in _IMAGE_EXTS:
-        return await asyncio.to_thread(_extract_image, file_path)
+        return _sanitize_extracted(await asyncio.to_thread(_extract_image, file_path))
 
     raise ValueError(f"不支持的文件类型: {ext}（支持 .pdf/.doc/.docx/.xls/.xlsx/.pptx/.gif/{'/'.join(sorted(_IMAGE_EXTS))}）")
 

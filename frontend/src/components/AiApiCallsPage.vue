@@ -53,12 +53,12 @@
       </section>
 
       <section class="card">
-        <el-table :data="items" v-loading="loading" stripe empty-text="暂无记录" size="default">
-          <el-table-column label="时间" width="170">
+        <el-table :data="items" v-loading="loading" stripe empty-text="暂无记录" size="default" style="width: 100%">
+          <el-table-column label="时间" min-width="150">
             <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="180" show-overflow-tooltip prop="operation" />
-          <el-table-column label="模型" width="150" show-overflow-tooltip prop="model" />
+          <el-table-column label="操作" min-width="180" show-overflow-tooltip prop="operation" />
+          <el-table-column label="模型" min-width="150" show-overflow-tooltip prop="model" />
           <el-table-column label="状态" width="80" align="center">
             <template #default="{ row }">
               <el-tag :type="row.status === 'ok' ? 'success' : 'danger'" size="small">{{ row.status === 'ok' ? '成功' : '失败' }}</el-tag>
@@ -67,10 +67,10 @@
           <el-table-column label="耗时" width="100" align="center">
             <template #default="{ row }">{{ row.elapsed_ms != null ? (row.elapsed_ms / 1000).toFixed(3) + 's' : '-' }}</template>
           </el-table-column>
-          <el-table-column label="批次" width="130" show-overflow-tooltip prop="batch_id" />
-          <el-table-column label="文件编码" width="120" show-overflow-tooltip prop="file_id" />
-          <el-table-column label="客户编码" width="100" show-overflow-tooltip prop="client_code" />
-          <el-table-column label="任务 ID" width="120" show-overflow-tooltip prop="task_id" />
+          <el-table-column label="批次" min-width="130" show-overflow-tooltip prop="batch_id" />
+          <el-table-column label="文件编码" min-width="120" show-overflow-tooltip prop="file_id" />
+          <el-table-column label="客户编码" min-width="100" show-overflow-tooltip prop="client_code" />
+          <el-table-column label="任务 ID" min-width="120" show-overflow-tooltip prop="task_id" />
           <el-table-column label="操作" width="100" align="center" fixed="right">
             <template #default="{ row }">
               <el-button size="small" type="primary" link @click="openDetail(row)">详情</el-button>
@@ -223,8 +223,12 @@ onMounted(() => { loadList() })
 .header-actions { display: flex; align-items: center; }
 .aiapi-main { flex: 1; overflow: auto; padding: 18px 24px 32px; display: flex; flex-direction: column; gap: 14px; }
 .card { background: #fff; border: 1px solid #e8ebf5; border-radius: 12px; padding: 16px 18px; }
-.filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; align-items: center; }
-.date-filter { width: 100%; min-width: 320px; }
+.filter-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.filter-grid > .el-input,
+.filter-grid > .el-select { width: 160px; flex: 0 0 auto; }
+.filter-grid > .date-filter { flex: 0 0 300px; width: 300px; }
+.date-filter :deep(.el-range-editor) { width: 300px; }
+.filter-grid > .el-button { flex: 0 0 auto; }
 .pagination-row { display: flex; justify-content: flex-end; margin-top: 12px; }
 .dim { color: #94a3b8; font-weight: 400; }
 .mono { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 12px; }

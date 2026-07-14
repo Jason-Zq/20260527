@@ -643,67 +643,69 @@ H. 其他文件:客户获批后协助客户留存的重要证件信息,如更新
 I. 停滞/放弃类文件:客户明确表示撤案、不再继续办理、不启动了/放弃办理了等主观原因不再继续办理项目的邮件、聊天等截图
 """
 
-ARCHIVE_CATEGORIES_SIMPLE = """
-A. 客户基础文件 / B. 客户个人文件 / C. 客户公司文件 / D. 其他备用文件 / E. 转款凭证 /
-F. 文案制作的递交文件类 / G. 获批/失败 / H. 其他文件 / I. 停滞/放弃类文件
-"""
-
 
 def _build_archive_detect_prompt(
     text: str,
     user_prompt: str,
     stage: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
 ) -> str:
     """把用户输入的多行判定标准拼接进 LLM prompt。
 
-    stage: None(匿名模式)用简化版分类; "pre_submit" / "post_submit" 用完整分类树 + 阶段提醒。
+    stage: "pre_submit" / "post_submit" 用完整分类树 + 阶段提醒。
+    client_name/handler 会从 DB 显式注入,不依赖 user_prompt 是否包含姓名。
     输出 verdict 三态(match/partial/mismatch) + match_score(0-100)。
     is_archival/confidence 由 service 层从 verdict/match_score 推导。
     """
-    if stage in ("pre_submit", "post_submit"):
-        cat_block = ARCHIVE_CATEGORIES_FULL
-        stage_label = "递交前" if stage == "pre_submit" else "递交后"
-        stage_hint = f"\n当前阶段: {stage} ({stage_label})\n"
-    else:
-        cat_block = ARCHIVE_CATEGORIES_SIMPLE
-        stage_hint = ""
+    cat_block = ARCHIVE_CATEGORIES_FULL
+    stage_label = "递交前" if stage == "pre_submit" else "递交后"
+    stage_hint = f"\n当前阶段: {stage} ({stage_label})\n" if stage in ("pre_submit", "post_submit") else ""
+
+    name_parts = []
+    if client_name:
+        name_parts.append(f"客户姓名：{client_name}")
+    if handler:
+        name_parts.append(f"办理人：{handler}")
+    name_header = ("本进展" + "；".join(name_parts) + "。\n") if name_parts else ""
+
+    handler_clause = ""
+    if handler:
+        handler_clause = (
+            "官方回执、递交确认、受理通知等文件上的「申请人」姓名通常对应本进展办理人而非客户本人,"
+            "若文件上姓名与客户不一致但与办理人(含拼音/英文转写)一致,视为本进展有效留底,不判 mismatch。"
+        )
 
     return (
         "你是一个公司文件留底审核助手。请根据下方公司分类标准 + 用户判定提示词,审核文件。\n\n"
         "---用户判定标准开始---\n"
         f"{user_prompt}\n"
         "---用户判定标准结束---\n\n"
-        "---公司分类标准开始---"
+        "---公司分类标准开始---\n"
         f"{stage_hint}{cat_block}\n"
         "---公司分类标准结束---\n\n"
         "重要判定指南:\n"
-        "- 同一客户的文件集合中,属于该客户配偶、子女、父母、共同申请人的文件也视为相关。"
+        f"{name_header}"
+        "- 本次审核只判断文件是否与公司留底分类体系相关,不核对具体项目名称、投资金额、转账金额等细节。"
+        "同一客户的文件集合中,属于该客户配偶、子女、父母、共同申请人的文件也视为相关。"
         "不要因为文件上的人名与客户姓名不一致而判为 mismatch。"
-        "只要文件内容与项目类型、进展阶段匹配,且可归入分类体系,即视为符合。\n"
-        "- **文件中出现的姓名若匹配用户判定标准里列出的任一关联人(客户/家庭成员/办理人),"
+        "只要文件内容可归入分类体系且与客户/办理人相关,即视为符合。\n"
+        "- **文件中出现的姓名若匹配客户姓名、办理人姓名或用户判定标准里列出的其他关联人(家庭成员/共同申请人等),"
         "包括其拼音或英文转写(如「关晓晓」对应「GUAN Xiaoxiao」、「邓士凯」对应「Deng Shikai」),"
         "即视为与本进展强关联,应判 match 或 partial,不要因当事人姓名与客户本人不一致就判 mismatch。**"
         "授权委托书(Power of Attorney)、公证认证文件(如附海牙认证 Apostille)等,"
-        "其委托人/当事人常为客户的家属或本进展的办理人,属有效留底。\n"
+        "其委托人/当事人常为客户的家属或本进展的办理人,属有效留底;"
+        f"{handler_clause}\n"
         "- 如果一份文件明显是某类证件的标准格式(如身份证、护照、房产证),"
         "即使 OCR 提取质量差、部分文字乱码,也应判为 match 或 partial,不要因 OCR 噪声判 mismatch。\n"
-        "- **服务合同(写明具体服务内容)、客户确认类聊天记录/邮件/截图属于有效留底证据**,"
-        "它们能证明服务已启动(如客户确认转卖房产=该项服务已启动)。"
+        "- **服务合同、客户确认类聊天记录/邮件/截图属于有效留底证据**,"
+        "它们能证明相关服务已启动或客户已确认事项。"
         "合同归入 C 类,客户确认/放弃类沟通归入对应分类(如 I 类或备注为服务启动凭证),"
         "**不要因为它们不是标准证件格式就判 mismatch**。\n"
         "- 若文件体现了服务已启动或客户已确认某项服务内容,请在 key_points 中明确标注"
-        "(如「体现服务已启动」「客户确认转卖房产」),供总体判定参考。\n"
-        "- **转账/汇款凭证等以金额+币种为核心证据的文件**:只要金额、币种与项目投资标准吻合"
-        "(如泰币 650000 符合泰国精英签青铜卡投资金额),即视为有效留底,判 match,"
-        "**不强制要求转款凭证上体现客户姓名**——转账凭证常以金额币种本身作为匹配依据。\n"
-        "- **银行开户类项目(如美国/新加坡个人账户开户)**:账户核心材料属客户隐私,"
-        "银行常在开户后直接通过邮件等联系客户,文案侧未必持有核心原件。"
-        "因此只要识别到客户账户信息/开户信息表/账户开通/转款等任一凭证,即视为符合(判 match)。"
-        "银行通用材料(隐私通知、网点列表、汇款模板、防诈骗指南等)属正常附带件,"
-        "不因其内容通用、未直接体现客户信息就判 mismatch。\n"
+        "(如「体现服务已启动」「客户确认相关事项」),供总体判定参考。\n"
         "- **阶段错配不作硬性否决**:某文件更适用于其他阶段(如递交前的身份证/资产证明出现在递交后批次),"
-        "只要文件本身可归入分类体系且与客户/项目相关,最多判 partial,不要仅因阶段不符就判 mismatch;"
-        "银行开户等隐私类项目对阶段匹配不作强制要求。\n\n"
+        "只要文件本身可归入分类体系且与客户/办理人相关,最多判 partial,不要仅因阶段不符就判 mismatch。\n\n"
         "请输出:\n"
         "1. verdict: 三选一\n"
         "   - \"match\"   : 文件可明确归入上述某个分类,且符合用户判定标准\n"
@@ -808,13 +810,22 @@ def detect_large_table_doc(text: str, **context) -> dict:
         return fallback
 
 
-def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None, **context) -> dict:
+def detect_archival(
+    text: str,
+    user_prompt: str,
+    stage: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
+    **context,
+) -> dict:
     """以用户提供的判定标准判断 text 符合程度（三态 verdict）。
 
     入参：
       text        - 已抽取的纯文本（OCR 或 docx 抽取）
       user_prompt - 用户输入的多行判定标准（必填）
       stage       - None(匿名/简化版分类) | "pre_submit" | "post_submit"(完整分类树+阶段提醒)
+      client_name - 本进展客户姓名,从 DB 显式注入
+      handler     - 本进展办理人,从 DB 显式注入
 
     返回：
       {
@@ -845,7 +856,9 @@ def detect_archival(text: str, user_prompt: str, stage: Optional[str] = None, **
             + src[-tail_n:]
         )
 
-    prompt = _build_archive_detect_prompt(src, user_prompt.strip(), stage=stage)
+    prompt = _build_archive_detect_prompt(
+        src, user_prompt.strip(), stage=stage, client_name=client_name, handler=handler
+    )
     raw = _call_llm(prompt, operation="detect_archival", **context)
 
     # 解析 JSON（容错）
@@ -897,6 +910,8 @@ def _build_summarize_batch_prompt(
     user_prompt: str,
     overall_verdict: str,
     overall_score: int,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
 ) -> str:
     """批次总报告 prompt:输入各文件简要明细 + 已算好的规则汇总结论,输出 80-200 字总体说明文本。"""
     lines = []
@@ -911,8 +926,16 @@ def _build_summarize_batch_prompt(
         )
     detail = "\n".join(lines) if lines else "（无符合 done 状态的文件）"
 
+    name_parts = []
+    if client_name:
+        name_parts.append(f"客户姓名：{client_name}")
+    if handler:
+        name_parts.append(f"办理人：{handler}")
+    name_header = ("本进展" + "；".join(name_parts) + "。\n") if name_parts else ""
+
     return (
         "你是一个文档留底审核总结助手。请基于以下信息撰写一段总体审核说明:\n\n"
+        f"{name_header}"
         f"用户判定标准:\n{user_prompt}\n\n"
         f"规则汇总结论: verdict={overall_verdict}, 综合匹配度={overall_score}\n\n"
         f"文件检测明细(共 {len(files_brief)} 条):\n{detail}\n\n"
@@ -931,6 +954,8 @@ def summarize_batch(
     user_prompt: str,
     overall_verdict: str,
     overall_score: int,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
     **context,
 ) -> str:
     """对一个 batch 内所有已 done 文件生成总体审核说明文本。
@@ -940,11 +965,20 @@ def summarize_batch(
       user_prompt - 用户的审核判定标准
       overall_verdict - 规则汇总结论 match/partial/mismatch
       overall_score - 规则汇总平均分 0-100
+      client_name - 本进展客户姓名,从 DB 显式注入
+      handler     - 本进展办理人,从 DB 显式注入
 
     返回:
       str - 80-200 字总体说明纯文本(未脱敏,调用方再 redact 兜底)
     """
-    prompt = _build_summarize_batch_prompt(files_brief, user_prompt, overall_verdict, overall_score)
+    prompt = _build_summarize_batch_prompt(
+        files_brief,
+        user_prompt,
+        overall_verdict,
+        overall_score,
+        client_name=client_name,
+        handler=handler,
+    )
     raw = _call_llm(prompt, operation="summarize_batch", **context)
     # 简单清理:去掉首尾空白和潜在 markdown 代码块标记
     out = (raw or "").strip()
@@ -961,6 +995,8 @@ def _build_judge_batch_overall_prompt(
     files_brief: list,
     user_prompt: str,
     stage: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
 ) -> str:
     """批次总体判定 prompt:让 LLM 综合所有文件,理解关键件 vs 附件,输出 verdict/score/reason。"""
     lines = []
@@ -981,32 +1017,36 @@ def _build_judge_batch_overall_prompt(
     elif stage == "post_submit":
         stage_hint = "\n当前审核阶段:递交后(post_submit)——关注证明已递交/已受理的官方回执类材料。\n"
 
+    name_parts = []
+    if client_name:
+        name_parts.append(f"客户姓名：{client_name}")
+    if handler:
+        name_parts.append(f"办理人：{handler}")
+    name_header = ("本进展" + "；".join(name_parts) + "。\n") if name_parts else ""
+
     return (
         "你是文档留底审核的总体判定助手。请综合一个批次内所有文件的检测结果,"
         "对**整个批次是否满足该进展的留底要求**给出总体判断。\n\n"
+        f"{name_header}"
         f"用户判定标准(该进展要求):\n{user_prompt}\n"
         f"{stage_hint}\n"
         f"各文件检测明细(共 {len(files_brief)} 条):\n{detail}\n\n"
         "判定原则(重要):\n"
-        "0. **留底的核心是证明「该进展对应的服务确已启动或发生」,而不是必须有官方回执类关键件。**"
+        "0. **本次总体判定只关注批次内文件是否与公司留底分类体系相关,不核对具体项目名称、投资金额、转账金额等细节。**"
+        "留底的核心是证明相关服务确已启动或发生,而不是必须有官方回执类关键件。"
         "证据既可以是官方文件(批复函/受理回执/递交确认),**也可以是软证据的组合**:"
-        "如服务合同(写明具体服务内容,完成合同中任意一项即视为服务启动)+ 聊天记录/邮件/确认截图"
-        "(客户确认凭证,如客户确认转卖房产=该项服务已启动)。"
+        "如服务合同 + 聊天记录/邮件/确认截图(客户确认凭证)。"
         "合同 + 聊天记录/确认截图**不是无关附件**,它们组合起来即可构成证明服务已启动的关键证据链。\n"
-        "1. 一个批次通常包含**关键证据**(能证明该进展/服务成立,含上述官方件或软证据组合)"
+        "1. 一个批次通常包含**关键证据**(能证明服务成立,含上述官方件或软证据组合)"
         "和**附带文件**(身份证、护照等辅助材料)。\n"
-        "2. **只要存在能证明该进展服务已启动/已发生的证据(官方件或软证据组合任一即可),整批即判为 match**,"
+        "2. **只要存在能证明服务已启动/已发生的证据(官方件或软证据组合任一即可),整批即判为 match**,"
         "不因附带文件与进展不完全相关而降级——附带文件的低分不应拉低整体结论。\n"
         "3. 若只有辅助性附件、既无官方关键件、也无任何能证明服务已启动的软证据组合,"
         "则判 partial(材料不齐)。\n"
-        "4. 完全没有任何文件能体现该进展的服务已启动或发生 → mismatch。\n"
-        "5. **转款凭证**:金额+币种与项目投资标准吻合即为有效留底,不要求体现客户姓名。\n"
-        "6. **银行开户类项目(美国/新加坡个户等)**:账户核心材料属隐私、文案侧常无原件,"
-        "只要有客户账户信息/开户信息表/开通/转款等任一凭证即判 match;"
-        "银行通用材料(隐私通知、网点列表、汇款模板、防诈骗指南)属正常附带件,不据此降级。\n"
-        "7. **阶段错配不作硬性否决**:文件更适用于其他阶段(如递交前材料出现在递交后批次)不影响整体符合性,"
-        "银行开户等隐私类项目对阶段匹配不作强制要求。\n"
-        "8. **单份文件检测失败/加密无法读取,只影响该文件,不影响其他文件的整体判断**;"
+        "4. 完全没有任何文件能体现服务已启动或发生 → mismatch。\n"
+        "5. **阶段错配不作硬性否决**:文件更适用于其他阶段(如递交前材料出现在递交后批次)不影响整体符合性,"
+        "只要文件本身可归入分类体系且与客户/办理人相关即可。\n"
+        "6. **单份文件检测失败/加密无法读取,只影响该文件,不影响其他文件的整体判断**;"
         "不要因个别文件读取异常就把整批判为 mismatch。\n\n"
         "请输出严格 JSON(不要 markdown、不要多余文字):\n"
         '{"verdict":"match|partial|mismatch","score":0-100整数,"reason":"80-200字中文总体说明"}\n'
@@ -1020,6 +1060,8 @@ def judge_batch_overall(
     files_brief: list,
     user_prompt: str,
     stage: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
     **context,
 ) -> dict:
     """LLM 综合判定批次总体结论。返回 {verdict, score, reason}。
@@ -1027,7 +1069,9 @@ def judge_batch_overall(
     理解关键件 vs 附件:有关键文件命中即整批 match,不被附带文件拉低。
     解析失败或字段非法时抛 ValueError,由调用方回退规则平均分。
     """
-    prompt = _build_judge_batch_overall_prompt(files_brief, user_prompt, stage)
+    prompt = _build_judge_batch_overall_prompt(
+        files_brief, user_prompt, stage=stage, client_name=client_name, handler=handler
+    )
     raw = _call_llm(prompt, operation="judge_batch_overall", **context)
     try:
         start = raw.find("{")

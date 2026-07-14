@@ -6,19 +6,21 @@
         审核任务管理
       </div>
       <div class="header-actions">
-        <span v-if="rejudge.running" class="dim rejudge-tip">
-          批量重判中 {{ rejudge.done }}/{{ rejudge.total }}{{ rejudge.failed ? `（失败 ${rejudge.failed}）` : '' }}
-        </span>
-        <span v-if="rerunBatch.running" class="dim rejudge-tip">
-          批量重审派发中 {{ rerunBatch.done }}/{{ rerunBatch.total }}{{ rerunBatch.failed ? `（失败 ${rerunBatch.failed}）` : '' }}
-        </span>
-        <el-button size="default" :loading="rejudge.running" @click="onRejudge">
-          <el-icon style="margin-right: 4px"><MagicStick /></el-icon>
-          按新规则批量重判
-        </el-button>
+        <template v-if="rerunBatch.running">
+          <el-progress
+            :percentage="Math.round((rerunBatch.done / (rerunBatch.total || 1)) * 100)"
+            :text-inside="true"
+            :stroke-width="14"
+            status="warning"
+            style="width: 140px;"
+          />
+          <span class="dim rejudge-tip">
+            批量重新检测派发中 {{ rerunBatch.done }}/{{ rerunBatch.total }}{{ rerunBatch.failed ? `（失败 ${rerunBatch.failed}）` : '' }}
+          </span>
+        </template>
         <el-button size="default" type="warning" plain :loading="rerunBatch.running" @click="onRerunBatch">
           <el-icon style="margin-right: 4px"><RefreshRight /></el-icon>
-          批量重审
+          批量重新检测
         </el-button>
         <el-button size="default" @click="loadBatches" :loading="loading">
           <el-icon style="margin-right: 4px"><Refresh /></el-icon>
@@ -71,7 +73,7 @@
           <el-input v-model="filters.client_code" clearable placeholder="客户编码" size="small" />
           <el-input v-model="filters.progress_oid" class="w-wide" clearable placeholder="进展 OID" size="small" />
           <el-input v-model="filters.progress_name" clearable placeholder="进展名称" size="small" />
-          
+          <el-input v-model="filters.handler" clearable placeholder="办理人" size="small" />
           <el-button type="primary" size="small" @click="handleSearch">查询</el-button>
           <el-button size="small" @click="resetFilters">重置</el-button>
         </div>
@@ -80,14 +82,23 @@
       <section class="card">
         <div class="table-head">
           <span>批次列表</span>
-          <span class="dim">共 {{ total }} 条</span>
+          <div class="table-head-meta">
+            <span class="dim">共 {{ total }} 条</span>
+            <span v-if="selectedBatchIds.length" class="dim">已选 {{ selectedBatchIds.length }} 项</span>
+            <el-button v-if="selectedBatchIds.length" size="small" link @click="clearSelection">清空已选</el-button>
+          </div>
         </div>
         <el-table
+          ref="batchTableRef"
           :data="batches"
           v-loading="loading"
           stripe
           empty-text="暂无批次"
+          row-key="batch_id"
+          :reserve-selection="true"
+          @selection-change="handleSelectionChange"
         >
+          <el-table-column type="selection" width="48" align="center" :selectable="isSelectable" />
           <el-table-column label="批次ID" min-width="160" show-overflow-tooltip>
             <template #default="{ row }"><span class="mono">{{ row.batch_id }}</span></template>
           </el-table-column>
@@ -96,16 +107,25 @@
               <el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="进度" width="90" align="center">
+          <!-- <el-table-column label="进度" width="90" align="center">
             <template #default="{ row }">{{ row.done_files }}/{{ row.total_files }}</template>
           </el-table-column>
           <el-table-column label="来源" width="90" align="center">
             <template #default="{ row }">{{ sourceLabel(row.source_kind) }}</template>
-          </el-table-column>
+          </el-table-column> -->
           <el-table-column label="客户" min-width="120" show-overflow-tooltip>
             <template #default="{ row }">{{ row.client?.name || '-' }}</template>
           </el-table-column>
-          <el-table-column label="进展" min-width="150" show-overflow-tooltip>
+          <el-table-column label="办理人" min-width="100" show-overflow-tooltip align="center">
+            <template #default="{ row }">{{ row.progress?.handler || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="项目" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.progress?.project_name || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="项目详情" min-width="150" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.progress?.project_detail_name || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="进展" min-width="120" show-overflow-tooltip>
             <template #default="{ row }">{{ row.progress?.progress_name || row.progress?.progress_oid || '-' }}</template>
           </el-table-column>
           <el-table-column label="总体" width="110" align="center">
@@ -122,7 +142,7 @@
           <el-table-column label="识别完成时间" width="160">
             <template #default="{ row }"><span class="dim mono">{{ row.status === 'done' ? row.updated_at : '-' }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="140" align="center" fixed="right">
+          <el-table-column label="操作" width="200" align="center" fixed="right">
             <template #default="{ row }">
               <el-button size="small" type="primary" link @click="selectBatch(row)">详情</el-button>
               <el-button
@@ -131,6 +151,12 @@
                 link
                 @click.stop="openRerun(row)"
               >重审</el-button>
+              <el-button
+                size="small"
+                type="danger"
+                link
+                @click.stop="onDeleteBatch(row)"
+              >删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -270,6 +296,11 @@
               全部重跑（无视已有 AI 结果，全部用新标准重跑）
             </el-checkbox>
           </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="rerunRegenerateCriteria">
+              使用新规则自动重新生成 criteria（根据客户/办理人/阶段）
+            </el-checkbox>
+          </el-form-item>
         </el-form>
       </div>
       <template #footer>
@@ -277,12 +308,32 @@
         <el-button type="primary" :loading="rerunSubmitting" @click="submitRerun">提交重跑</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="bulkRerunDialogVisible" title="批量重新检测" width="560px">
+      <div class="rerun-body">
+        <div class="rerun-tip">
+          将对选中的 <span class="mono">{{ selectedBatchIds.length }}</span> 个批次逐个原地重跑——复用已有 OCR 文本、重新识别每个文件的符合度（不重新下载、不重新 OCR）。
+          <br />此操作成本较高（每个文件一次 AI 调用），由后台队列串行处理，耗时较长。
+        </div>
+        <el-form label-position="top">
+          <el-form-item>
+            <el-checkbox v-model="bulkRerunRegenerateCriteria">
+              使用新规则自动重新生成 criteria（逐批按客户/办理人/阶段）
+            </el-checkbox>
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="bulkRerunDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="bulkRerunSubmitting" @click="submitBulkRerun">开始检测</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Refresh, MagicStick, RefreshRight } from '@element-plus/icons-vue'
+import { Refresh, RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listArchiveAdminBatches,
@@ -290,10 +341,9 @@ import {
   pollBusinessBatch,
   pollArchiveDetect,
   rerunArchiveDetectBatch,
-  startRejudgeOverall,
-  getRejudgeProgress,
   startRerunFilesBatch,
   getRerunFilesProgress,
+  deleteArchiveDetectBatch,
 } from '../api.js'
 
 const loading = ref(false)
@@ -310,12 +360,33 @@ const fileLoading = ref(false)
 const fileDetail = ref(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
+const batchTableRef = ref(null)
+const selectedBatchIds = ref([])
+
+function isSelectable(row) {
+  // 只有已完成的批次才允许重新检测
+  return row.status === 'done'
+}
+
+function handleSelectionChange(rows) {
+  selectedBatchIds.value = rows.map(r => r.batch_id)
+}
+
+function clearSelection() {
+  batchTableRef.value?.clearSelection()
+  selectedBatchIds.value = []
+}
 
 const rerunDialogVisible = ref(false)
 const rerunTarget = ref(null)
 const rerunCriteria = ref('')
 const rerunForceAll = ref(false)
+const rerunRegenerateCriteria = ref(false)
 const rerunSubmitting = ref(false)
+
+const bulkRerunDialogVisible = ref(false)
+const bulkRerunRegenerateCriteria = ref(false)
+const bulkRerunSubmitting = ref(false)
 
 const filters = ref({
   status: '',
@@ -327,6 +398,7 @@ const filters = ref({
   client_code: '',
   progress_oid: '',
   progress_name: '',
+  handler: '',
   date_range: [],
   limit: 10,
   offset: 0,
@@ -370,6 +442,7 @@ async function loadBatches() {
 
 function handleSearch() {
   currentPage.value = 1
+  batchTableRef.value?.clearSelection()
   loadBatches()
 }
 
@@ -384,12 +457,14 @@ function resetFilters() {
     client_code: '',
     progress_oid: '',
     progress_name: '',
+    handler: '',
     date_range: [],
     limit: 10,
     offset: 0,
   }
   currentPage.value = 1
   pageSize.value = 10
+  batchTableRef.value?.clearSelection()
   loadBatches()
 }
 
@@ -428,6 +503,32 @@ async function loadBatchDetail(batchId) {
   }
 }
 
+async function onDeleteBatch(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除批次「${row.batch_id}」？删除后无法恢复。`,
+      '确认删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+    await deleteArchiveDetectBatch(row.batch_id)
+    ElMessage.success('已删除')
+  } catch (err) {
+    if (err === 'cancel') return
+    ElMessage.error('删除失败：' + (err.response?.data?.detail || err.message))
+    return
+  }
+  // 清理相关 UI 状态并刷新列表（刷新失败不应影响已删除成功）
+  if (selectedBatch.value && selectedBatch.value.batch_id === row.batch_id) {
+    batchDialogVisible.value = false
+    selectedBatch.value = null
+    detail.value = null
+  }
+  if (selectedBatchIds.value.includes(row.batch_id)) {
+    selectedBatchIds.value = selectedBatchIds.value.filter((id) => id !== row.batch_id)
+  }
+  await loadBatches()
+}
+
 async function openFileDetail(row) {
   fileDialogVisible.value = true
   fileLoading.value = true
@@ -445,11 +546,12 @@ async function openRerun(row) {
   rerunTarget.value = row
   rerunCriteria.value = row.user_prompt || row.criteria || ''
   rerunForceAll.value = false
+  rerunRegenerateCriteria.value = false
   rerunDialogVisible.value = true
 }
 
 async function submitRerun() {
-  if (!rerunCriteria.value.trim()) {
+  if (!rerunRegenerateCriteria.value && !rerunCriteria.value.trim()) {
     ElMessage.warning('判定提示词不能为空')
     return
   }
@@ -460,6 +562,7 @@ async function submitRerun() {
       rerunCriteria.value.trim(),
       null,  // stage
       rerunForceAll.value || false,
+      rerunRegenerateCriteria.value || false,
     )
     if (resp.mode === 'no-op') {
       ElMessage.info('所有文件已有完整结果，无需重跑')
@@ -500,50 +603,6 @@ function sourceLabel(v) {
   return { batch: '业务', recheck: '重审', upload: '上传', url: 'URL' }[v] || v || '-'
 }
 
-const rejudge = ref({ running: false, total: 0, done: 0, failed: 0 })
-let rejudgeTimer = null
-
-async function pollRejudge() {
-  try {
-    const p = await getRejudgeProgress()
-    rejudge.value = p
-    if (!p.running) {
-      clearInterval(rejudgeTimer)
-      rejudgeTimer = null
-      ElMessage.success(`批量重判完成：共 ${p.total} 个，成功 ${p.done - (p.failed || 0)}，失败 ${p.failed || 0}`)
-      loadBatches()
-    }
-  } catch (e) {
-    // 轮询失败不打断
-  }
-}
-
-async function onRejudge() {
-  try {
-    await ElMessageBox.confirm(
-      '将按新规则（关键件优先）重新判定「部分符合 / 不符合」的批次总体结论。只重算总体，不重新识别单个文件、不下载。是否继续？',
-      '按新规则批量重判',
-      { confirmButtonText: '开始重判', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return
-  }
-  try {
-    const resp = await startRejudgeOverall(['partial', 'mismatch'])
-    if (!resp.total) {
-      ElMessage.info('没有符合条件（部分符合 / 不符合）的批次需要重判')
-      return
-    }
-    ElMessage.success(`已启动批量重判，共 ${resp.total} 个批次`)
-    rejudge.value = { running: true, total: resp.total, done: 0, failed: 0 }
-    if (rejudgeTimer) clearInterval(rejudgeTimer)
-    rejudgeTimer = setInterval(pollRejudge, 2000)
-  } catch (err) {
-    const msg = err.response?.data?.detail || err.message || '启动失败'
-    ElMessage.error('批量重判启动失败：' + msg)
-  }
-}
-
 const rerunBatch = ref({ running: false, total: 0, done: 0, failed: 0 })
 let rerunBatchTimer = null
 
@@ -554,7 +613,7 @@ async function pollRerunBatch() {
     if (!p.running) {
       clearInterval(rerunBatchTimer)
       rerunBatchTimer = null
-      ElMessage.success(`批量重审已全部派发：共 ${p.total} 个批次。单文件由后台队列串行处理，请稍后刷新查看结果`)
+      ElMessage.success(`批量重新检测已全部派发：共 ${p.total} 个批次。单文件由后台队列串行处理，请稍后刷新查看结果`)
       loadBatches()
     }
   } catch (e) {
@@ -563,41 +622,42 @@ async function pollRerunBatch() {
 }
 
 async function onRerunBatch() {
-  try {
-    await ElMessageBox.confirm(
-      '将对「部分符合 / 不符合」的批次逐个原地重跑——复用已有 OCR 文本、按各批原判定标准重新识别每个文件的符合度（不重新下载、不重新 OCR）。' +
-      '此操作成本较高（每个文件一次 AI 调用），由后台队列串行处理，耗时较长。是否继续？',
-      '批量重审(重跑单文件)',
-      { confirmButtonText: '开始重审', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
+  if (selectedBatchIds.value.length === 0) {
+    ElMessage.warning('请勾选要重新检测的批次')
     return
   }
+  bulkRerunDialogVisible.value = true
+}
+
+async function submitBulkRerun() {
+  bulkRerunSubmitting.value = true
   try {
-    const resp = await startRerunFilesBatch(['partial', 'mismatch'])
+    const resp = await startRerunFilesBatch({
+      batch_ids: selectedBatchIds.value,
+      regenerateCriteria: bulkRerunRegenerateCriteria.value || false,
+    })
     if (!resp.total) {
-      ElMessage.info('没有符合条件（部分符合 / 不符合）的批次需要重审')
-      return
+      ElMessage.info('没有符合重新检测条件的批次')
+    } else {
+      ElMessage.success(`已启动批量重新检测，共 ${resp.total} 个批次将被重跑`)
+      rerunBatch.value = { running: true, total: resp.total, done: 0, failed: 0 }
+      if (rerunBatchTimer) clearInterval(rerunBatchTimer)
+      rerunBatchTimer = setInterval(pollRerunBatch, 2000)
     }
-    ElMessage.success(`已启动批量重审，共 ${resp.total} 个批次将被重跑`)
-    rerunBatch.value = { running: true, total: resp.total, done: 0, failed: 0 }
-    if (rerunBatchTimer) clearInterval(rerunBatchTimer)
-    rerunBatchTimer = setInterval(pollRerunBatch, 2000)
+    bulkRerunDialogVisible.value = false
+    batchTableRef.value?.clearSelection()
+    selectedBatchIds.value = []
   } catch (err) {
     const msg = err.response?.data?.detail || err.message || '启动失败'
-    ElMessage.error('批量重审启动失败：' + msg)
+    ElMessage.error('批量重新检测启动失败：' + msg)
+  } finally {
+    bulkRerunSubmitting.value = false
   }
 }
 
 onMounted(() => {
   loadBatches()
-  // 页面加载时若已有重判在跑,恢复轮询
-  getRejudgeProgress().then((p) => {
-    if (p.running) {
-      rejudge.value = p
-      rejudgeTimer = setInterval(pollRejudge, 2000)
-    }
-  }).catch(() => {})
+  // 页面加载时若已有批量重新检测在跑,恢复轮询
   getRerunFilesProgress().then((p) => {
     if (p.running) {
       rerunBatch.value = p
@@ -607,7 +667,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (rejudgeTimer) clearInterval(rejudgeTimer)
   if (rerunBatchTimer) clearInterval(rerunBatchTimer)
 })
 </script>
@@ -631,6 +690,7 @@ onUnmounted(() => {
 .date-filter :deep(.el-range-editor) { width: 300px; }
 .filter-grid > .el-button { flex: 0 0 auto; }
 .table-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-weight: 600; color: #1e293b; }
+.table-head-meta { display: flex; align-items: center; gap: 12px; }
 .pagination-row { display: flex; justify-content: flex-end; margin-top: 12px; }
 .dim { color: #94a3b8; font-weight: 400; }
 .mono { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 12px; }

@@ -2314,12 +2314,6 @@ async def delete_summary(summary_id: int):
 
 # ==================== 文件留底检测 ====================
 
-class ArchiveDetectUrlsPayload(BaseModel):
-    """URL 列表模式提交体。"""
-    user_prompt: str = Field(..., description="判定提示词/审核标准,会拼接进 AI 识别 prompt")
-    urls: list[str] = Field(..., description="文件 URL 列表,支持 http/https;可为 OSS 临时签名地址")
-
-
 # ---- 业务接口(阶段三):增量复用 + 业务字段透传 ----
 
 class BusinessClientPayload(BaseModel):
@@ -2353,12 +2347,6 @@ class BusinessBatchPayload(BaseModel):
 
 
 # ---- 文件留底检测:Response Models(用于 Swagger UI Schema 中文说明) ----
-
-class ArchiveDetectSubmitResponse(BaseModel):
-    """快速检测/业务审核 提交后立即返回的批次创建结果。"""
-    batch_id: str = Field(..., description="批次ID,后续轮询 GET /{batch_id} 使用")
-    total_files: int = Field(..., description="本次提交的文件总数")
-
 
 class ArchiveDetectBusinessSubmitResponse(BaseModel):
     """业务审核接口提交后立即返回的批次创建结果(含增量复用统计)。"""
@@ -2472,8 +2460,9 @@ class ArchiveDetectDeleteResponse(BaseModel):
 
 class ArchiveDetectRecheckPayload(BaseModel):
     """重新审核请求体。"""
-    criteria: str = Field(..., description="重新审核使用的最新判定提示词")
+    criteria: str = Field(default="", description="重新审核使用的最新判定提示词；regenerate_criteria=true 时可忽略")
     stage: Optional[str] = Field(None, description="审核阶段:pre_submit=递交前,post_submit=递交后;快速检测可为空")
+    regenerate_criteria: bool = Field(False, description="是否根据批次当前 client/progress/stage 重新生成新规则 criteria；为 true 时忽略 criteria 字段")
 
 
 class ArchiveDetectRecheckResponse(BaseModel):
@@ -2547,108 +2536,6 @@ class ArchiveDetectAdminFileDetail(ArchiveDetectFileItem):
     ocr_text: Optional[str] = Field(None, description="OCR 识别文字(已脱敏),仅详情接口返回")
     client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息")
     progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息")
-
-
-@app.post(
-    "/api/archive-detect/upload",
-    tags=["文件留底检测"],
-    summary="快速检测 - 上传文件",
-    response_model=ArchiveDetectSubmitResponse,
-)
-async def archive_detect_upload(
-    files: list[UploadFile] = File(..., description="待检测文件列表,支持 PDF/图片/Word,最多 20 个"),
-    user_prompt: str = Form(..., description="判定提示词/审核标准,会拼接进 AI 识别 prompt"),
-):
-    """上传文件模式：multipart 提交多文件 + 判定提示词。
-
-    返回 {batch_id, total_files}。前端用 batch_id 轮询 GET /api/archive-detect/{batch_id}。
-    """
-    user_prompt = (user_prompt or "").strip()
-    if not user_prompt:
-        raise HTTPException(status_code=400, detail="判定标准（提示词）不能为空")
-    if not files:
-        raise HTTPException(status_code=400, detail="请至少上传一个文件")
-    if len(files) > archive_detect_service.MAX_FILES_PER_BATCH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"单次最多 {archive_detect_service.MAX_FILES_PER_BATCH} 个文件，收到 {len(files)} 个",
-        )
-
-    # 把每个 UploadFile 落到 temp/archive_detect/，构造 items
-    items: list[dict] = []
-    upload_dir = archive_detect_service._upload_temp_dir()
-    for i, f in enumerate(files):
-        if not f.filename:
-            raise HTTPException(status_code=400, detail=f"第 {i+1} 个文件没有文件名")
-        if not file_fetcher.is_supported_extension(f.filename):
-            raise HTTPException(
-                status_code=400,
-                detail=file_fetcher.get_unsupported_hint(f.filename),
-            )
-        # 文件名含中文 / 空格也安全
-        safe_name = os.path.basename(f.filename)
-        token = datetime.now().strftime("%y%m%d%H%M%S") + f"_{i}_"
-        local_path = os.path.join(upload_dir, token + safe_name)
-        await save_upload_stream(f, local_path)
-        items.append({
-            "local_path": local_path,
-            "filename": safe_name,
-            "mime_type": f.content_type or None,
-        })
-
-    try:
-        batch_id = await archive_detect_service.submit_batch(
-            user_prompt=user_prompt,
-            source_kind="upload",
-            items=items,
-        )
-    except ValueError as e:
-        # 提交失败（如校验错误）→ 清理已落盘的临时文件
-        for it in items:
-            try:
-                if it.get("local_path") and os.path.exists(it["local_path"]):
-                    os.remove(it["local_path"])
-            except OSError:
-                pass
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {"batch_id": batch_id, "total_files": len(items)}
-
-
-@app.post(
-    "/api/archive-detect/urls",
-    tags=["文件留底检测"],
-    summary="快速检测 - URL 列表",
-    response_model=ArchiveDetectSubmitResponse,
-)
-async def archive_detect_urls(payload: ArchiveDetectUrlsPayload):
-    """URL 列表模式：JSON 提交一组 URL + 判定提示词。"""
-    user_prompt = (payload.user_prompt or "").strip()
-    urls = [u.strip() for u in (payload.urls or []) if u and u.strip()]
-    if not user_prompt:
-        raise HTTPException(status_code=400, detail="判定标准（提示词）不能为空")
-    if not urls:
-        raise HTTPException(status_code=400, detail="请至少输入一个 URL")
-    if len(urls) > archive_detect_service.MAX_FILES_PER_BATCH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"单次最多 {archive_detect_service.MAX_FILES_PER_BATCH} 个 URL，收到 {len(urls)} 个",
-        )
-    for u in urls:
-        if not u.lower().startswith(("http://", "https://")):
-            raise HTTPException(status_code=400, detail=f"非法 URL（仅支持 http/https）: {u}")
-
-    items = [{"source_url": u} for u in urls]
-    try:
-        batch_id = await archive_detect_service.submit_batch(
-            user_prompt=user_prompt,
-            source_kind="url",
-            items=items,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {"batch_id": batch_id, "total_files": len(items)}
 
 
 # 注意:history 必须声明在 /{batch_id} 之前,避免路径参数吞掉 "history"
@@ -2965,6 +2852,7 @@ async def archive_detect_admin_batches(
     client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
     progress_oid: Optional[str] = Query(None, description="进展 OID 模糊查询"),
     progress_name: Optional[str] = Query(None, description="进展名称模糊查询"),
+    handler: Optional[str] = Query(None, description="办理人模糊查询"),
     date_from: Optional[str] = Query(None, description="创建时间开始日期,格式 YYYY-MM-DD"),
     date_to: Optional[str] = Query(None, description="创建时间结束日期,格式 YYYY-MM-DD"),
     limit: int = Query(100, ge=1, le=500, description="返回条数,1-500"),
@@ -2994,6 +2882,7 @@ async def archive_detect_admin_batches(
         client_name=client_name,
         progress_oid=progress_oid,
         progress_name=progress_name,
+        handler=handler,
         date_from=date_from,
         date_to=date_to,
         limit=limit,
@@ -3006,6 +2895,18 @@ class RejudgeOverallPayload(BaseModel):
     verdicts: Optional[list[str]] = Field(
         default=["partial", "mismatch"],
         description="要重判的 overall_verdict 集合;默认只刷 partial/mismatch。传 [] 或省略含义见默认值",
+    )
+
+
+class RerunFilesBatchPayload(RejudgeOverallPayload):
+    """批量重新检测(重跑单文件)请求体。支持指定 batch_ids,提供时只处理其中 status='done' 的批次。"""
+    batch_ids: Optional[list[str]] = Field(
+        default=None,
+        description="要重新检测的批次 ID 列表；提供时只处理其中 status='done' 的批次,忽略 verdicts",
+    )
+    regenerate_criteria: bool = Field(
+        default=False,
+        description="是否逐批根据各自 client/progress/stage 重新生成新规则 criteria",
     )
 
 
@@ -3047,10 +2948,11 @@ async def archive_detect_rejudge_progress():
     tags=["文件留底检测"],
     summary="后台管理 - 批量重审(重跑单文件)",
 )
-async def archive_detect_rerun_files_batch(payload: RejudgeOverallPayload = RejudgeOverallPayload()):
-    """批量重审:对目标批次逐个原地重跑(force_all),复用 ocr_text 重判单文件 verdict/score,
+async def archive_detect_rerun_files_batch(payload: RerunFilesBatchPayload = RerunFilesBatchPayload()):
+    """批量重新检测:对目标批次逐个原地重跑(force_all),复用 ocr_text 重判单文件 verdict/score,
     不重新 OCR、不下载。各批沿用自身原 criteria。默认只重审 partial/mismatch 的 done 批次。
 
+    支持传入 batch_ids 指定具体要重新检测的 done 批次,此时忽略 verdicts。
     注意:成本高(每文件 1 次 LLM),由 worker 队列串行消化。进度只反映"已触发重跑的批次数"。
     异步执行,前端轮询 GET /admin/rerun-files-batch/progress。
     """
@@ -3061,7 +2963,9 @@ async def archive_detect_rerun_files_batch(payload: RejudgeOverallPayload = Reju
         if bad:
             raise HTTPException(status_code=400, detail=f"非法 verdict: {bad}")
     try:
-        return await archive_detect_service.start_rerun_files_batch(verdicts)
+        return await archive_detect_service.start_rerun_files_batch(
+            verdicts=verdicts, batch_ids=payload.batch_ids, regenerate_criteria=payload.regenerate_criteria
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -3157,92 +3061,6 @@ async def archive_detect_business_batch(payload: BusinessBatchPayload):
     return result
 
 
-@app.post(
-    "/api/archive-detect/business/batch/upload",
-    tags=["文件留底检测"],
-    summary="业务审核 - 提交进展包(本地上传)",
-    response_model=ArchiveDetectBusinessSubmitResponse,
-)
-async def archive_detect_business_batch_upload(
-    files: list[UploadFile] = File(..., description="待检测文件列表,顺序必须与 items_payload 一一对应"),
-    criteria: str = Form(..., description="审核标准/判定提示词"),
-    stage: str = Form("post_submit", description="审核阶段:pre_submit=递交前,post_submit=递交后;默认 post_submit"),
-    client_payload: str = Form(..., description="客户信息 JSON 字符串,示例:{\"client_code\":\"C001\",\"name\":\"张三\"}"),
-    progress_payload: str = Form(..., description="进展信息 JSON 字符串,示例:{\"progress_oid\":\"POID_001\",\"handler\":\"李顾问\"}"),
-    items_payload: str = Form(..., description="文件元信息 JSON 数组,顺序与 files 对应,示例:[{\"file_id\":\"F001\",\"filename\":\"护照.pdf\"}]"),
-):
-    """本地上传模式已停用。请先上传到 OSS,再调用 URL 模式提交。"""
-    raise HTTPException(
-        status_code=410,
-        detail="本地上传模式已停用，请先上传到 OSS 后调用 /api/archive-detect/business/batch 提交 URL",
-    )
-
-
-async def _archive_detect_business_batch_upload_impl(
-    files: list[UploadFile],
-    criteria: str,
-    stage: str,
-    client_payload: str,
-    progress_payload: str,
-    items_payload: str,
-):
-    """实际处理逻辑,被上层 semaphore 包裹。拆出来是为了 finally release 干净。"""
-    # 解析 JSON 字符串
-    try:
-        client_obj = json.loads(client_payload)
-        progress_obj = json.loads(progress_payload)
-        items_obj = json.loads(items_payload)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"payload JSON 解析失败:{e}")
-
-    if not isinstance(items_obj, list):
-        raise HTTPException(status_code=400, detail="items_payload 必须是数组")
-    if len(items_obj) != len(files):
-        raise HTTPException(
-            status_code=400,
-            detail=f"items_payload 长度({len(items_obj)})与 files 数量({len(files)})不一致",
-        )
-
-    # 落盘 files 到 temp/archive_detect/,补 local_path 进 items
-    upload_dir = archive_detect_service._upload_temp_dir()
-    items_with_path = []
-    saved_paths = []
-    for i, (f, meta) in enumerate(zip(files, items_obj)):
-        if not f.filename:
-            raise HTTPException(status_code=400, detail=f"第 {i+1} 个文件没有文件名")
-        if not file_fetcher.is_supported_extension(f.filename):
-            raise HTTPException(status_code=400, detail=file_fetcher.get_unsupported_hint(f.filename))
-        safe_name = os.path.basename(f.filename)
-        token = datetime.now().strftime("%y%m%d%H%M%S") + f"_{i}_"
-        local_path = os.path.join(upload_dir, token + safe_name)
-        await save_upload_stream(f, local_path)
-        saved_paths.append(local_path)
-        items_with_path.append({
-            "file_id": meta.get("file_id"),
-            "filename": meta.get("filename") or safe_name,
-            "local_path": local_path,
-        })
-
-    try:
-        result = await archive_detect_service.submit_business_batch(
-            criteria=criteria,
-            stage=stage,
-            client_payload=client_obj,
-            progress_payload=progress_obj,
-            items=items_with_path,
-        )
-    except ValueError as e:
-        # 校验失败时清理已落盘文件
-        for p in saved_paths:
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except OSError:
-                pass
-        raise HTTPException(status_code=400, detail=str(e))
-    return result
-
-
 @app.get(
     "/api/archive-detect/business/batch",
     tags=["文件留底检测"],
@@ -3285,12 +3103,16 @@ async def archive_detect_recheck(
     payload: ArchiveDetectRecheckPayload,
     batch_id: str = Path(..., description="要重新审核的原批次 ID"),
 ):
-    """重新审核当前批次:有 OCR 文本则跳过 OCR 只跑 AI;否则尝试重新下载/OCR。"""
+    """重新审核当前批次:有 OCR 文本则跳过 OCR 只跑 AI;否则尝试重新下载/OCR。
+
+    regenerate_criteria=True 时,根据原批次 client/progress/stage 重新生成新规则 criteria,忽略 criteria 字段。
+    """
     try:
         return await archive_detect_service.submit_recheck_batch(
             source_batch_id=batch_id,
             criteria=payload.criteria,
             stage=payload.stage,
+            regenerate_criteria=payload.regenerate_criteria,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3312,6 +3134,7 @@ async def archive_detect_rerun(
     - 有 AI 结果的默认跳过(force_all=False)
     - 缺失的部分补跑
     - 用新 criteria 更新批次提示词
+    - regenerate_criteria=True 时,忽略传入的 criteria,根据批次当前 client/progress/stage 重新生成新规则 criteria
     """
     try:
         return await archive_detect_service.rerun_batch_inplace(
@@ -3319,6 +3142,7 @@ async def archive_detect_rerun(
             criteria=payload.criteria,
             stage=payload.stage,
             force_all=force_all,
+            regenerate_criteria=payload.regenerate_criteria,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

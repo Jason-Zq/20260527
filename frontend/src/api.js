@@ -228,35 +228,6 @@ export async function deleteSummary(summaryId) {
 // ==================== 文件留底检测（archive-detect） ====================
 
 /**
- * 上传多个文件 + 用户判定提示词，提交一个检测批次。
- * @param {File[]} files
- * @param {string} userPrompt 用户多行提示词
- * @returns {Promise<{batch_id: string, total_files: number}>}
- */
-export async function submitArchiveDetectUpload(files, userPrompt) {
-  const fd = new FormData()
-  for (const f of files) fd.append('files', f)
-  fd.append('user_prompt', userPrompt)
-  const r = await axios.post(`${API_BASE}/archive-detect/upload`, fd, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000,
-  })
-  return r.data
-}
-
-/**
- * URL 列表 + 提示词模式提交。
- * @param {string[]} urls
- * @param {string} userPrompt
- */
-export async function submitArchiveDetectUrls(urls, userPrompt) {
-  const r = await axios.post(`${API_BASE}/archive-detect/urls`,
-    { urls, user_prompt: userPrompt },
-    { timeout: 60000 })
-  return r.data
-}
-
-/**
  * 轮询批次状态（含每文件状态与脱敏后结果）。
  */
 export async function pollArchiveDetect(batchId) {
@@ -317,9 +288,10 @@ export async function pollBusinessBatch(batchId) {
  * @param {string} batchId 原批次 ID
  * @param {string} criteria 当前最新判定提示词
  * @param {string|null} stage pre_submit | post_submit | null
+ * @param {boolean} regenerateCriteria 是否重新生成新规则 criteria
  */
-export async function recheckArchiveDetectBatch(batchId, criteria, stage = null) {
-  const r = await axios.post(`${API_BASE}/archive-detect/recheck/${batchId}`, { criteria, stage }, {
+export async function recheckArchiveDetectBatch(batchId, criteria, stage = null, regenerateCriteria = false) {
+  const r = await axios.post(`${API_BASE}/archive-detect/recheck/${batchId}`, { criteria, stage, regenerate_criteria: regenerateCriteria }, {
     timeout: 60000,
   })
   return r.data
@@ -331,35 +303,28 @@ export async function recheckArchiveDetectBatch(batchId, criteria, stage = null)
  * @param {string} criteria 当前判定提示词
  * @param {string|null} stage pre_submit | post_submit | null
  * @param {boolean} forceAll 是否无视已有 AI 结果，全部用新 criteria 重跑
+ * @param {boolean} regenerateCriteria 是否重新生成新规则 criteria
  */
-export async function rerunArchiveDetectBatch(batchId, criteria, stage = null, forceAll = false) {
+export async function rerunArchiveDetectBatch(batchId, criteria, stage = null, forceAll = false, regenerateCriteria = false) {
   const r = await axios.post(
     `${API_BASE}/archive-detect/rerun/${batchId}?force_all=${forceAll}`,
-    { criteria, stage },
+    { criteria, stage, regenerate_criteria: regenerateCriteria },
     { timeout: 60000 },
   )
   return r.data
 }
 
-/** 按新规则批量重判批次总体（默认只刷 partial/mismatch） */
-export async function startRejudgeOverall(verdicts = ['partial', 'mismatch']) {
-  const r = await axios.post(`${API_BASE}/archive-detect/admin/rejudge-overall`, { verdicts })
+/** 批量重新检测单文件（重跑，复用 ocr_text）。支持指定 batch_ids 或按 verdicts 筛选 */
+export async function startRerunFilesBatch({ verdicts = ['partial', 'mismatch'], batch_ids, regenerateCriteria = false } = {}) {
+  const body = { verdicts, regenerate_criteria: regenerateCriteria }
+  if (batch_ids && batch_ids.length) {
+    body.batch_ids = batch_ids
+  }
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/rerun-files-batch`, body)
   return r.data
 }
 
-/** 查询批量重判进度 */
-export async function getRejudgeProgress() {
-  const r = await axios.get(`${API_BASE}/archive-detect/admin/rejudge-overall/progress`)
-  return r.data
-}
-
-/** 批量重审单文件（重跑，复用 ocr_text，默认只刷 partial/mismatch） */
-export async function startRerunFilesBatch(verdicts = ['partial', 'mismatch']) {
-  const r = await axios.post(`${API_BASE}/archive-detect/admin/rerun-files-batch`, { verdicts })
-  return r.data
-}
-
-/** 查询批量重审进度 */
+/** 查询批量重新检测进度 */
 export async function getRerunFilesProgress() {
   const r = await axios.get(`${API_BASE}/archive-detect/admin/rerun-files-batch/progress`)
   return r.data
