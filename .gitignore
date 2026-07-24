@@ -44,6 +44,7 @@ frontend/openapi_check.json
 # 敏感配置（包含 API Key / DB 密码，绝对不能上传）
 # ============================================================================
 config.json
+ocrapi/users.json
 .env
 .env.*
 !.env.example
@@ -56,6 +57,9 @@ output/
 
 # 上传中转、URL 下载缓存等
 temp/
+
+# ocrapi 访问日志(按天 jsonl,含调用方用户名/URL/IP)
+ocrapi/logs/
 
 # 测试时用的真实证件 PDF（含个人信息）
 tests/fixtures/

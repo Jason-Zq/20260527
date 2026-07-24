@@ -1147,3 +1147,220 @@ def extract_client_profile_facts(ocr_text: str, filename: str = "", doc_category
         "confidence_notes": data.get("confidence_notes") or [],
     }
 
+
+# ==================== 客户画像:证件类型识别 + 按规则字段提取 + 规则起草 ====================
+
+DOC_EXTRACT_TYPES = ("id_card", "hukou", "degree_cert", "birth_cert", "passport", "kyc_form",
+                     "marriage_cert", "property_cert", "no_crime", "approval",
+                     "submission", "receipt")
+DOC_TYPE_NAMES = {
+    "id_card": "身份证(居民身份证)",
+    "hukou": "居民户口簿",
+    "degree_cert": "学位证书",
+    "birth_cert": "出生医学证明",
+    "passport": "护照",
+    "kyc_form": "KYC 信息收集表(客户尽职调查表)",
+    "marriage_cert": "结婚证",
+    "property_cert": "房产证/不动产权证(含不动产登记查册)",
+    "no_crime": "无犯罪记录证明",
+    "approval": "批复/获批文件(永居卡/批复函等)",
+    "submission": "递交申请包(签证申请表+附材料合订)",
+    "receipt": "签收回执(重要文件签收函)",
+}
+
+
+def _load_llm_json(raw: str) -> dict:
+    """容错解析 LLM 返回的 JSON 对象:截取首个 { 到末个 } 再 json.loads。"""
+    raw = (raw or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    return json.loads(raw[start:end + 1] if start >= 0 and end > start else raw)
+
+
+def recognize_doc_type(text_head: str, **context) -> dict:
+    """兜底证件类型识别(关键词分类器置信不足时调用)。
+
+    入参 text_head: OCR 文本头部(约 2000 字内)。
+    返回 {"doc_type": DOC_EXTRACT_TYPES 之一 | "other",
+          "confidence": 0-100, "_fallback": bool}
+    任何失败都返回 other+_fallback=True,不抛异常(宁漏不误)。
+    """
+    fallback = {"doc_type": "other", "confidence": 0, "_fallback": True}
+    if not text_head or not text_head.strip():
+        return fallback
+
+    src = text_head.strip()
+    if len(src) > 2000:
+        src = src[:2000]
+
+    prompt = f"""你是证件分类助手。下面是某文件前部 OCR 文本,判断它属于哪一类:
+  - id_card: 身份证/居民身份证(含临时身份证)
+  - hukou: 居民户口簿(户口本/常住人口登记卡)
+  - degree_cert: 学位证书(学士/硕士/博士学位证书;注意:毕业证书不是学位证,判 other)
+  - birth_cert: 出生医学证明(出生证;注意:结婚证不是出生证,判 other)
+  - passport: 护照(含个人信息页,常见 护照/Passport/护照号/Passport No./国家码/Country Code 等字样)
+  - kyc_form: KYC 信息收集表/客户尽职调查表(常见 CDD/KYC/Customer's Name/信息收集表 等字样,中英双语表格)
+  - marriage_cert: 结婚证(常见 结婚证/持证人/婚姻登记/予以登记/结婚证字号 等字样)
+  - property_cert: 房产证/不动产权证/不动产登记查册(常见 不动产/房屋坐落/建筑面积/权利人/Real Estate Ownership 等)
+  - no_crime: 无犯罪记录证明(常见 无犯罪记录证明/未发现...犯罪记录/被查询人/N 个月内有效 等)
+  - approval: 批复/获批文件(永居卡/签证卡/批复函,常见 PERMANENT RESIDENCY/VISA CARD/批复/获批 等;OCR 可能粘连空格)
+  - submission: 递交申请包(签证申请表/递交材料合订,常见 申请表/Application Form/申請日期/Application Date/申请人签字 等)
+  - receipt: 签收回执(重要文件签收函/交付确认,常见 签收/签收日期/交付/回执/项目名称 等)
+  - other: 以上都不是(毕业证/合同/流水/照片/公证等)
+
+判别要点:只看文本内容本身,不确定就 other,不要硬猜。
+严格输出 JSON(不要 markdown,不要解释):
+{{"doc_type": "id_card|hukou|degree_cert|birth_cert|passport|kyc_form|marriage_cert|property_cert|no_crime|approval|submission|receipt|other", "confidence": 0-100}}
+
+文本:
+---
+{src}
+---"""
+
+    try:
+        raw = _call_llm(prompt, max_retries=2, operation="recognize_doc_type", **context)
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            lb, rb = raw.find("{"), raw.rfind("}")
+            if lb >= 0 and rb > lb:
+                raw = raw[lb : rb + 1]
+        data = json.loads(raw)
+        doc_type = str(data.get("doc_type", "other"))
+        if doc_type not in DOC_EXTRACT_TYPES and doc_type != "other":
+            doc_type = "other"
+        return {
+            "doc_type": doc_type,
+            "confidence": int(data.get("confidence", 0)),
+            "_fallback": False,
+        }
+    except Exception as e:
+        print(f"[recognize_doc_type] LLM 调用/解析失败,按 other 处理: {e}")
+        return fallback
+
+
+def _build_extract_prompt(text: str, rule: dict) -> str:
+    lines = []
+    for f in rule.get("fields") or []:
+        desc = f"({f.get('description')})" if f.get("description") else ""
+        req = "必填" if f.get("required") else "可空"
+        example = f",例:{f.get('example')}" if f.get("example") else ""
+        lines.append(f'  "{f.get("key")}": {f.get("label")} {req}{desc}{example}')
+    fields_block = "\n".join(lines)
+    extra = (rule.get("prompt_extra") or "").strip()
+    extra_block = f"\n额外注意事项:\n{extra}\n" if extra else ""
+    return f"""你是证件信息提取助手。下面是一份{DOC_TYPE_NAMES.get(rule.get('doc_type'), rule.get('doc_type'))}的 OCR 文本。
+只抽取文本中明确出现的信息,不确定/没有出现的一律 null,不要编造。
+日期统一 YYYY-MM-DD;其余字段按原文输出。
+JSON 字符串值内部如需引用,一律用中文引号「」,禁止使用未转义的 ASCII 双引号。
+{extra_block}
+严格输出 JSON(不要 markdown,不要解释),结构:
+{{"fields": {{
+{fields_block}
+}}}}
+
+OCR 文本:
+---
+{text}
+---"""
+
+
+def extract_doc_fields(text: str, rule: dict, **context) -> dict:
+    """按规则提取证件字段。
+
+    入参 rule: doc_extract_rules 行(dict),含 fields JSONB + prompt_extra。
+    返回 {"fields": {key: 字符串值|None}}。
+    异常: ValueError - 文本为空 / LLM 返回非 JSON(调用方统一 catch 记 error)。
+    """
+    if not text or not text.strip():
+        raise ValueError("OCR 文本为空,无法提取字段")
+    src = text.strip()
+    if len(src) > ARCHIVE_DETECT_INPUT_LIMIT_CHARS:
+        head_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS // 2
+        tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
+        src = src[:head_n] + f"\n\n...[省略 {len(text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n" + src[-tail_n:]
+
+    prompt = _build_extract_prompt(src, rule)
+    last_err: Optional[Exception] = None
+    for _ in range(2):  # 模型偶发非法 JSON(如未转义内引号),失败重试一次
+        raw = _call_llm(prompt, operation="extract_doc_fields", **context)
+        try:
+            data = _load_llm_json(raw)
+            break
+        except json.JSONDecodeError as e:
+            last_err = e
+    else:
+        raise ValueError(f"LLM 返回非合法提取 JSON(重试仍失败)") from last_err
+
+    fields = data.get("fields")
+    if not isinstance(fields, dict):
+        # 兼容模型直接平铺返回的情况
+        fields = {k: v for k, v in data.items() if isinstance(v, (str, int, float)) or v is None}
+    # 只保留规则里定义的 key,值统一成字符串/None
+    out = {}
+    for f in rule.get("fields") or []:
+        v = fields.get(f.get("key"))
+        out[f["key"]] = (str(v).strip() if v is not None and str(v).strip() else None)
+    return {"fields": out}
+
+
+def draft_extract_rule(doc_type: str, target_columns: str, **context) -> dict:
+    """AI 起草某证件类型的提取规则(字段定义 + 目标列映射)。
+
+    入参 target_columns: 可写列清单文本(列名+中文说明,由调用方提供)。
+    返回 {"fields": [...], "prompt_extra": str},fields 元素:
+      {key, label, description, required, target: {entity: "person", column|None}, example}
+    异常: ValueError - LLM 返回结构不合法。
+    """
+    type_name = DOC_TYPE_NAMES.get(doc_type, doc_type)
+    prompt = f"""你是证件信息提取规则设计助手。我们要从{type_name}的 OCR 文本中提取结构化字段,写入客户档案表。
+请为"{type_name}"设计一套提取规则。
+
+要求:
+1. 字段覆盖该证件上真正有档案价值的信息(身份识别类优先),一般 6-12 个字段。
+2. 每个字段给出:
+   - key: 英文 snake_case 字段键(如 id_number)
+   - label: 中文名(与证件版面上的用语一致)
+   - description: 提取要求(格式/口径,一句话;没有特殊要求可空)
+   - required: 该证件上必然存在的核心字段为 true,否则 false
+   - target.column: 该字段应写入的档案列,只能从下面的可写列清单中选;没有对应列则 null(只抽不写)
+   - target.entity: "person"(写到人身上,客户本人或家庭成员由系统归因);
+     仅当证件是房产证/不动产权证类时可用 "asset"(写入家庭资产表,此时 column 一律 null,
+     字段 key 即资产属性名,如 address/area/cert_no;证件上的权利人字段仍用 entity=person、column=name 供归因);
+     仅当证件是递交/签收/批复等案件过程文件时还可用 "case"(写入案件时间线,column 一律 null,
+     label 即里程碑名如 递交/签收/获批,value 为该事件日期;案件类型字段用 key=case_type)
+   - example: 一个示例值
+3. prompt_extra: 这类证件提取时的整体注意事项(2-4 条,如:正反面信息合并、日期格式、与相似证件的区分点)。
+4. JSON 字符串值内部如需引用,一律用中文引号「」,禁止使用未转义的 ASCII 双引号。
+
+可写列清单(列名=说明):
+{target_columns}
+
+严格输出 JSON(不要 markdown,不要解释):
+{{"fields": [{{"key":"...","label":"...","description":"...","required":true/false,"target":{{"entity":"person|asset","column":"...或null"}},"example":"..."}}],
+  "prompt_extra": "..."}}"""
+
+    last_err: Optional[Exception] = None
+    for _ in range(2):  # 模型偶发非法 JSON(如未转义内引号),失败重试一次
+        raw = _call_llm(prompt, operation="draft_extract_rule", **context)
+        try:
+            data = _load_llm_json(raw)
+            break
+        except json.JSONDecodeError as e:
+            last_err = e
+    else:
+        raise ValueError("LLM 返回非合法规则 JSON(重试仍失败)") from last_err
+
+    fields = data.get("fields")
+    if not isinstance(fields, list) or not fields:
+        raise ValueError(f"LLM 起草的规则缺少 fields 数组:{raw[:200]}")
+    for f in fields:
+        if not isinstance(f, dict) or not f.get("key") or not f.get("label"):
+            raise ValueError(f"规则字段缺少 key/label:{f}")
+        f.setdefault("description", "")
+        f.setdefault("required", False)
+        f.setdefault("example", "")
+        target = f.get("target") or {}
+        entity = target.get("entity") if target.get("entity") in ("person", "asset", "case") else "person"
+        f["target"] = {"entity": entity, "column": target.get("column") if entity == "person" else None}
+    return {"fields": fields, "prompt_extra": str(data.get("prompt_extra") or "")}
+

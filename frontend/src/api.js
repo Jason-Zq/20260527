@@ -420,6 +420,11 @@ export async function listArchiveAdminProgress(params = {}) {
   return r.data
 }
 
+export async function listFileInfos(params = {}) {
+  const r = await axios.get(`${API_BASE}/admin/file-infos`, { params })
+  return r.data
+}
+
 export async function getArchiveAdminFileDetail(recordId) {
   const r = await axios.get(`${API_BASE}/archive-detect/admin/file/${recordId}`)
   return r.data
@@ -730,4 +735,99 @@ export async function listAiApiCalls(params = {}) {
 export async function getAiApiCallDetail(rowId) {
   const response = await axios.get(`${API_BASE}/admin/ai-api-calls/${rowId}`)
   return response.data
+}
+
+// ==================== 客户画像(Excel 导入) ====================
+
+/**
+ * 上传客户文件清单 Excel,创建导入任务(后台跑 OCR/分类/提取)
+ */
+export async function importProfileExcel(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  const r = await axios.post(`${API_BASE}/profile/import`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  })
+  return r.data
+}
+
+export async function listProfileTasks(params = {}) {
+  const r = await axios.get(`${API_BASE}/profile/tasks`, { params })
+  return r.data
+}
+
+export async function getProfileTask(taskId) {
+  const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}`)
+  return r.data
+}
+
+export async function listProfileTaskFiles(taskId, params = {}) {
+  const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}/files`, { params })
+  return r.data
+}
+
+export async function getProfileTaskProfile(taskId) {
+  const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}/profile`)
+  return r.data
+}
+
+export async function getDocExtractResult(rowId) {
+  const r = await axios.get(`${API_BASE}/doc-extract/results/${rowId}`)
+  return r.data
+}
+
+export async function getCustomerFile(fileId) {
+  const r = await axios.get(`${API_BASE}/profile/files/${fileId}`)
+  return r.data
+}
+
+// ==================== 复核中心 ====================
+
+export async function listReviewFiles(params = {}) {
+  const r = await axios.get(`${API_BASE}/review/files`, { params })
+  return r.data
+}
+
+export async function getReviewFile(fileId) {
+  const r = await axios.get(`${API_BASE}/review/files/${fileId}`)
+  return r.data
+}
+
+export async function confirmReviewFile(fileId, payload = {}) {
+  const r = await axios.post(`${API_BASE}/review/files/${fileId}/confirm`, payload)
+  return r.data
+}
+
+export async function correctReviewFile(fileId, payload) {
+  const r = await axios.post(`${API_BASE}/review/files/${fileId}/correct`, payload)
+  return r.data
+}
+
+export async function dismissReviewFile(fileId, payload = {}) {
+  const r = await axios.post(`${API_BASE}/review/files/${fileId}/dismiss`, payload)
+  return r.data
+}
+
+/**
+ * 拉取原件(带 Bearer 鉴权),返回 { blobUrl, mime, revoke }
+ * 用完调 revoke() 释放 objectURL。
+ */
+export async function fetchCustomerFileRawUrl(fileId) {
+  const r = await axios.get(`${API_BASE}/profile/files/${fileId}/raw`, {
+    responseType: 'blob',
+    timeout: 120000,
+  })
+  const mime = r.headers['content-type'] || 'application/octet-stream'
+  const blobUrl = URL.createObjectURL(r.data)
+  return {
+    blobUrl,
+    mime,
+    revoke: () => URL.revokeObjectURL(blobUrl),
+  }
+}
+
+export async function getProfileTaskMatrix(taskId) {
+  const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}/matrix`)
+  return r.data
 }

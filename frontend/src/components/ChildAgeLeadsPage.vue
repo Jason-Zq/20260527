@@ -38,7 +38,7 @@
             v-model:current-page="currentPage"
             v-model:page-size="pageSize"
             :total="total"
-            :page-sizes="[20, 50, 100]"
+            :page-sizes="[10, 25, 50, 100, 200]"
             layout="total, sizes, prev, pager, next, jumper"
             small
             background
@@ -62,7 +62,7 @@ const loading = ref(false)
 const items = ref([])
 const total = ref(0)
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(10)
 const filters = ref({ keyword: '', min_age: null, max_age: null })
 
 function params() {

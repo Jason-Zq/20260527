@@ -973,6 +973,76 @@ async def admin_get_file_detail(record_id: int) -> Optional[dict]:
         return d
 
 
+async def admin_list_files(
+    *,
+    batch_id: Optional[str] = None,
+    file_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    status: Optional[str] = None,
+    verdict: Optional[str] = None,
+    client_code: Optional[str] = None,
+    client_name: Optional[str] = None,
+    progress_name: Optional[str] = None,
+    handler: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """文件信息列表:以文件为维度,join batch/progress/client,支持模糊筛选。"""
+    async with async_session_maker() as session:
+        stmt = (
+            select(ArchiveDetectFile, ArchiveDetectBatch, ArchiveDetectProgress, Client)
+            .join(ArchiveDetectBatch, ArchiveDetectFile.batch_id == ArchiveDetectBatch.batch_id)
+            .outerjoin(ArchiveDetectProgress, ArchiveDetectFile.progress_id == ArchiveDetectProgress.id)
+            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
+        )
+        count_stmt = (
+            select(func.count())
+            .select_from(ArchiveDetectFile)
+            .join(ArchiveDetectBatch, ArchiveDetectFile.batch_id == ArchiveDetectBatch.batch_id)
+            .outerjoin(ArchiveDetectProgress, ArchiveDetectFile.progress_id == ArchiveDetectProgress.id)
+            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
+        )
+
+        conditions = []
+        if batch_id:
+            conditions.append(ArchiveDetectBatch.batch_id.ilike(f"%{batch_id}%"))
+        if file_id:
+            conditions.append(ArchiveDetectFile.file_id.ilike(f"%{file_id}%"))
+        if filename:
+            conditions.append(ArchiveDetectFile.filename.ilike(f"%{filename}%"))
+        if status:
+            conditions.append(ArchiveDetectFile.status == status)
+        if verdict:
+            conditions.append(ArchiveDetectFile.verdict == verdict)
+        if client_code:
+            conditions.append(Client.client_code.ilike(f"%{client_code}%"))
+        if client_name:
+            conditions.append(Client.name.ilike(f"%{client_name}%"))
+        if progress_name:
+            conditions.append(ArchiveDetectProgress.progress_name.ilike(f"%{progress_name}%"))
+        if handler:
+            conditions.append(ArchiveDetectProgress.handler.ilike(f"%{handler}%"))
+
+        for cond in conditions:
+            stmt = stmt.where(cond)
+            count_stmt = count_stmt.where(cond)
+
+        stmt = stmt.order_by(ArchiveDetectFile.id.desc()).limit(limit).offset(offset)
+        rows = (await session.execute(stmt)).all()
+        total = (await session.execute(count_stmt)).scalar() or 0
+
+        items = []
+        for f, b, p, c in rows:
+            d = _file_to_dict(f)
+            d["batch_id"] = f.batch_id
+            d["created_at"] = f.created_at.strftime("%Y-%m-%d %H:%M:%S") if f.created_at else ""
+            d["updated_at"] = f.updated_at.strftime("%Y-%m-%d %H:%M:%S") if f.updated_at else ""
+            d["client"] = _client_to_brief_dict(c) if c else None
+            d["progress"] = _progress_to_dict(p) if p else None
+            items.append(d)
+        return {"items": items, "total": total}
+
+
 # ==================== 方案二 2b: DB 队列 Worker 调度 ====================
 
 from sqlalchemy import text as sa_text

@@ -2190,6 +2190,31 @@ async def _split_cleanup_loop():
                 )
         except Exception as e:
             print(f"[ai_api_call_gc] 异常(忽略): {e}")
+        # 客户文件原件 GC:到期(file_keep_until)删磁盘原件,DB/OCR 文本保留
+        try:
+            from db import customer_file_crud as _cfc
+            expired = await _cfc.list_expired_local_files()
+            cleaned_files = 0
+            for ef in expired:
+                abs_path = os.path.join(OUTPUT_DIR, ef["local_path"] or "")
+                try:
+                    if ef["local_path"] and os.path.exists(abs_path):
+                        os.remove(abs_path)
+                except OSError:
+                    pass  # Windows 句柄占用等,下个周期重试
+                else:
+                    await _cfc.clear_file_local(ef["id"])
+                    cleaned_files += 1
+            if cleaned_files:
+                print(f"[customer_file_gc] 清理 {cleaned_files} 份到期原件(DB/OCR 保留)")
+                event_service.log_event(
+                    severity="info",
+                    category="gc.cleanup",
+                    message=f"清理 {cleaned_files} 份到期客户文件原件",
+                    context={"table": "customer_files", "deleted": cleaned_files},
+                )
+        except Exception as e:
+            print(f"[customer_file_gc] 异常(忽略): {e}")
         await asyncio.sleep(inmem_gc_every)
 
 
@@ -2562,6 +2587,21 @@ class ArchiveDetectAdminFileDetail(ArchiveDetectFileItem):
     progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息")
 
 
+class FileInfoListItem(ArchiveDetectFileItem):
+    """文件信息列表项:含文件本身 + 批次/客户/进展上下文。"""
+    batch_id: str = Field(..., description="所属批次 ID")
+    created_at: str = Field(..., description="文件创建时间")
+    updated_at: Optional[str] = Field(None, description="文件最后更新时间")
+    client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息(仅业务模式)")
+    progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息(仅业务模式)")
+
+
+class FileInfoListResponse(BaseModel):
+    """文件信息列表返回。"""
+    items: list[FileInfoListItem] = Field(..., description="文件列表")
+    total: int = Field(..., description="符合筛选条件的总条数")
+
+
 # 注意:history 必须声明在 /{batch_id} 之前,避免路径参数吞掉 "history"
 @app.get(
     "/api/archive-detect/history",
@@ -2892,6 +2932,501 @@ async def admin_get_ai_api_call(row_id: int):
     return detail
 
 
+# ==================== 信息提取:证件提取规则(doc_extract_rules) ====================
+# 规则生命周期: AI 起草(draft) -> 人工审核编辑(仅 draft 可改) -> activate -> disable。
+# 每 doc_type 至多一条 active,提取时只读 active 规则。方案见 docs/09。
+
+
+class DocExtractRuleDraftPayload(BaseModel):
+    doc_type: str = Field(..., description="证件类型:id_card/hukou/degree_cert/birth_cert")
+
+
+class DocExtractRuleUpdatePayload(BaseModel):
+    fields: Optional[list] = Field(None, description="字段定义数组,完整替换")
+    prompt_extra: Optional[str] = Field(None, description="类型级 prompt 注意事项")
+    reviewed_by: Optional[str] = Field(None, description="操作人")
+
+
+class DocExtractRuleReviewPayload(BaseModel):
+    reviewed_by: Optional[str] = Field(None, description="审核人")
+
+
+@app.post(
+    "/api/doc-extract/rules/draft",
+    tags=["信息提取"],
+    summary="AI 起草某证件类型的提取规则(存为 draft,待人工审核激活)",
+)
+async def doc_extract_rule_draft(payload: DocExtractRuleDraftPayload):
+    from db import doc_extract_crud, profile_crud
+    if payload.doc_type not in llm_service.DOC_EXTRACT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的证件类型: {payload.doc_type},可选: {list(llm_service.DOC_EXTRACT_TYPES)}",
+        )
+    try:
+        draft = await asyncio.to_thread(
+            llm_service.draft_extract_rule,
+            payload.doc_type,
+            profile_crud.target_fields_text(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=f"AI 起草失败: {e}")
+    return await doc_extract_crud.create_rule(
+        doc_type=payload.doc_type,
+        fields=draft["fields"],
+        prompt_extra=draft.get("prompt_extra"),
+        drafted_by="ai",
+    )
+
+
+@app.get(
+    "/api/doc-extract/rules",
+    tags=["信息提取"],
+    summary="提取规则列表查询",
+)
+async def doc_extract_rule_list(
+    doc_type: Optional[str] = Query(None, description="证件类型筛选:id_card/hukou/degree_cert/birth_cert"),
+    status: Optional[str] = Query(None, description="状态筛选:draft/active/disabled"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import doc_extract_crud
+    items, total = await doc_extract_crud.list_rules(
+        doc_type=doc_type, status=status, limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/doc-extract/rules/{rule_id}",
+    tags=["信息提取"],
+    summary="提取规则详情",
+)
+async def doc_extract_rule_get(rule_id: int):
+    from db import doc_extract_crud
+    row = await doc_extract_crud.get_rule(rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return row
+
+
+@app.put(
+    "/api/doc-extract/rules/{rule_id}",
+    tags=["信息提取"],
+    summary="编辑提取规则(仅 draft 状态可改)",
+)
+async def doc_extract_rule_update(rule_id: int, payload: DocExtractRuleUpdatePayload):
+    from db import doc_extract_crud
+    try:
+        return await doc_extract_crud.update_rule_draft(
+            rule_id, fields=payload.fields,
+            prompt_extra=payload.prompt_extra, reviewed_by=payload.reviewed_by)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post(
+    "/api/doc-extract/rules/{rule_id}/activate",
+    tags=["信息提取"],
+    summary="激活提取规则(同类型其他 active 自动置 disabled)",
+)
+async def doc_extract_rule_activate(rule_id: int, payload: DocExtractRuleReviewPayload):
+    from db import doc_extract_crud
+    try:
+        return await doc_extract_crud.activate_rule(rule_id, reviewed_by=payload.reviewed_by)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post(
+    "/api/doc-extract/rules/{rule_id}/disable",
+    tags=["信息提取"],
+    summary="停用提取规则",
+)
+async def doc_extract_rule_disable(rule_id: int):
+    from db import doc_extract_crud
+    try:
+        return await doc_extract_crud.disable_rule(rule_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ==================== 客户画像:Excel 文件清单导入 ====================
+# 上传客户文件清单 Excel -> 全量 OCR 入客户文件库 -> 筛 4 类证件 -> 规则提取 -> 客户档案。
+# 方案见 docs/09-客户画像-Excel导入方案.md。
+
+
+@app.post(
+    "/api/profile/import",
+    tags=["客户画像"],
+    summary="上传客户文件清单 Excel,创建导入任务(后台跑 OCR/分类/提取)",
+)
+async def profile_import_upload(file: UploadFile = File(...)):
+    import profile_import_service
+    from db import customer_file_crud
+
+    fname = file.filename or ""
+    if not fname.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
+
+    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_path = os.path.join(
+        temp_dir, f"profile_import_{datetime.now().strftime('%Y%m%d%H%M%S')}_{os.getpid()}.xlsx")
+    try:
+        await save_upload_stream(file, temp_path)
+        try:
+            manifest = profile_import_service.parse_excel_manifest(temp_path)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+    # 主客户:老表软关联(不写字段);画像 v2 写独立 profile_* 表
+    client = await crud.find_or_create_client(manifest["client_name"])
+    from db import profile_crud
+    household = await profile_crud.get_or_create_household(
+        manifest["client_name"], legacy_client_id=client.id)
+
+    task = await customer_file_crud.create_import_task(
+        filename=fname, client_name=manifest["client_name"],
+        client_id=client.id, total_files=len(manifest["files"]),
+        household_id=household["id"])
+    counts = await customer_file_crud.upsert_task_files(
+        task["id"], client.id, manifest["files"])
+
+    asyncio.create_task(profile_import_service.run_import(task["id"]))
+    return {
+        "task_id": task["id"],
+        "client_name": manifest["client_name"],
+        "client_id": client.id,
+        "household_id": household["id"],
+        "total_files": len(manifest["files"]),
+        "new_files": counts["new"],
+        "relinked_files": counts["relinked"],
+        "skipped_rows": manifest.get("skipped_rows", 0),
+        "duplicates": manifest.get("duplicates", 0),
+        "status": "running",
+    }
+
+
+@app.get(
+    "/api/profile/tasks",
+    tags=["客户画像"],
+    summary="导入任务列表查询",
+)
+async def profile_task_list(
+    status: Optional[str] = Query(None, description="状态筛选:running/done/error"),
+    client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import customer_file_crud
+    items, total = await customer_file_crud.list_import_tasks(
+        status=status, client_name=client_name, limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/profile/tasks/{task_id}",
+    tags=["客户画像"],
+    summary="导入任务详情(进度/计数)",
+)
+async def profile_task_get(task_id: int):
+    from db import customer_file_crud
+    row = await customer_file_crud.get_import_task(task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return row
+
+
+@app.get(
+    "/api/profile/tasks/{task_id}/files",
+    tags=["客户画像"],
+    summary="任务文件清单(状态/OCR 来源/分类结果;不含 OCR 全文)",
+)
+async def profile_task_files(
+    task_id: int,
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    from db import customer_file_crud
+    task = await customer_file_crud.get_import_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    items, total = await customer_file_crud.list_task_files(task_id, limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/profile/files/{file_id}",
+    tags=["客户画像"],
+    summary="客户文件详情(含 OCR 全文;fresh=原文,reused=脱敏文本)",
+)
+async def profile_file_get(file_id: int):
+    from db import customer_file_crud
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return row
+
+
+@app.get(
+    "/api/profile/files/{file_id}/raw",
+    tags=["客户画像"],
+    summary="查看/下载原件(本地留存 30 天;已清理则按需重新下载)",
+)
+async def profile_file_raw(file_id: int):
+    from db import customer_file_crud
+    import profile_import_service
+    from fastapi.responses import FileResponse
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        abs_path, mime = await profile_import_service.ensure_local_file(row)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"原件获取失败: {e}")
+    return FileResponse(abs_path, media_type=mime, filename=row.get("filename") or None)
+
+
+# ==================== 复核(质量评级驱动的轻重缓急队列) ====================
+
+
+class ReviewActionPayload(BaseModel):
+    reviewed_by: Optional[str] = Field(None, description="复核人")
+
+
+class ReviewCorrectPayload(BaseModel):
+    person_id: Optional[int] = Field(None, description="归属人 profile_persons.id;与 new_person_name 二选一")
+    new_person_name: Optional[str] = Field(None, description="新建归属人姓名(no_person 复核时)")
+    person_relation: Optional[str] = Field(None, description="顺带修正关系:配偶/子/女/父/母/户主")
+    fields: dict = Field(default_factory=dict, description="修正字段 {field: value},value 为空表示清除")
+    reviewed_by: Optional[str] = Field(None, description="复核人")
+
+
+@app.get(
+    "/api/review/files",
+    tags=["复核"],
+    summary="复核队列(待复核文件按质量分升序)",
+)
+async def review_file_list(
+    import_task_id: Optional[int] = Query(None, description="导入任务 ID"),
+    client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    reason: Optional[str] = Query(None, description="原因:no_text/garbled/ocr_short/low_confidence/extract_error/no_person/masked_id"),
+    include_reviewed: bool = Query(False, description="是否包含已复核"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import customer_file_crud
+    items, total = await customer_file_crud.list_review_files(
+        import_task_id=import_task_id, client_name=client_name, reason=reason,
+        include_reviewed=include_reviewed, limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/review/files/{file_id}",
+    tags=["复核"],
+    summary="复核详情(文件+OCR+最近提取结果+可选归属人)",
+)
+async def review_file_get(file_id: int):
+    from db import customer_file_crud, doc_extract_crud, profile_crud
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    result = await doc_extract_crud.get_latest_result_for_file(file_id)
+    persons = []
+    task = await customer_file_crud.get_import_task(row["import_task_id"])
+    if task and task.get("household_id"):
+        ps = await profile_crud.list_persons(task["household_id"])
+        persons = [{"id": p["id"], "name": p["name"],
+                    "relation_to_main": p["relation_to_main"], "is_main": p["is_main"]}
+                   for p in ps]
+    return {"file": row, "result": result, "household_persons": persons,
+            "household_id": task.get("household_id") if task else None}
+
+
+@app.post(
+    "/api/review/files/{file_id}/confirm",
+    tags=["复核"],
+    summary="复核确认无误",
+)
+async def review_file_confirm(file_id: int, payload: ReviewActionPayload):
+    from db import customer_file_crud, doc_extract_crud
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    result = await doc_extract_crud.get_latest_result_for_file(file_id)
+    if result:
+        await doc_extract_crud.update_result_review(
+            result["id"], status="confirmed", reviewed_by=payload.reviewed_by)
+    await customer_file_crud.set_file_reviewed(file_id)
+    return {"ok": True}
+
+
+@app.post(
+    "/api/review/files/{file_id}/correct",
+    tags=["复核"],
+    summary="复核修正(修正字段永远覆盖,status='corrected';no_person 可选归属/新建人)",
+)
+async def review_file_correct(file_id: int, payload: ReviewCorrectPayload):
+    from db import customer_file_crud, doc_extract_crud, profile_crud
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    task = await customer_file_crud.get_import_task(row["import_task_id"])
+    household_id = task.get("household_id") if task else None
+
+    # 定归属人:显式 person_id > 新建人 > 最近提取结果已归因的人
+    person_id = payload.person_id
+    if person_id is None and payload.new_person_name:
+        if household_id is None:
+            raise HTTPException(status_code=400, detail="任务无家庭上下文,无法新建归属人")
+        person = await profile_crud.create_person(household_id, payload.new_person_name)
+        person_id = person["id"]
+    result = await doc_extract_crud.get_latest_result_for_file(file_id)
+    if person_id is None and result and result.get("write_stats"):
+        person_id = (result["write_stats"] or {}).get("person_id")
+    if person_id is None and payload.fields:
+        raise HTTPException(status_code=400, detail="缺少归属人(person_id 或 new_person_name)")
+
+    if payload.person_relation and person_id:
+        await profile_crud.set_person_relation(person_id, payload.person_relation)
+    for field, value in (payload.fields or {}).items():
+        try:
+            await profile_crud.correct_person_field(
+                person_id, field, value,
+                corrected_by=payload.reviewed_by,
+                source_result_id=result["id"] if result else None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"字段 {field}: {e}")
+    if result:
+        await doc_extract_crud.update_result_review(
+            result["id"], status="corrected", corrected=payload.fields,
+            reviewed_by=payload.reviewed_by)
+    await customer_file_crud.set_file_reviewed(file_id)
+    return {"ok": True, "person_id": person_id}
+
+
+@app.post(
+    "/api/review/files/{file_id}/dismiss",
+    tags=["复核"],
+    summary="复核忽略(确认无需处理)",
+)
+async def review_file_dismiss(file_id: int, payload: ReviewActionPayload):
+    from db import customer_file_crud, doc_extract_crud
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    result = await doc_extract_crud.get_latest_result_for_file(file_id)
+    if result:
+        await doc_extract_crud.update_result_review(
+            result["id"], status="dismissed", reviewed_by=payload.reviewed_by)
+    await customer_file_crud.set_file_reviewed(file_id)
+    return {"ok": True}
+
+
+@app.get(
+    "/api/profile/tasks/{task_id}/profile",
+    tags=["客户画像"],
+    summary="客户画像(客户卡 + 家庭成员 + 本任务提取明细)",
+)
+async def profile_task_profile(task_id: int):
+    from db import customer_file_crud, doc_extract_crud, profile_crud
+    task = await customer_file_crud.get_import_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    client = None
+    members = []
+    if task.get("client_id"):
+        client = await crud.get_client_detail(task["client_id"])
+        members = await family_crud.list_by_client(task["client_id"])
+    # 画像 v2:家庭 + 成员字段档案(新表,主数据源)
+    household = None
+    persons = []
+    assets = []
+    cases = []
+    if task.get("household_id"):
+        household = await profile_crud.get_household(task["household_id"])
+        persons = await profile_crud.list_persons(task["household_id"])
+        profile_crud.attach_passport_expiry(persons)
+        await profile_crud.attach_field_conflicts(persons, task["household_id"])
+        assets = await profile_crud.list_assets(task["household_id"])
+        cases = await profile_crud.list_cases(task["household_id"])
+    extractions, extraction_total = await doc_extract_crud.list_results(
+        import_task_id=task_id, limit=500)
+    return {
+        "task": task,
+        "client": client,
+        "family_members": members,
+        "household": household,
+        "persons": persons,
+        "assets": assets,
+        "cases": cases,
+        "extractions": extractions,
+        "extraction_total": extraction_total,
+        "type_counts": {
+            "id_card": task["id_card_count"],
+            "hukou": task["hukou_count"],
+            "degree_cert": task["degree_cert_count"],
+            "birth_cert": task["birth_cert_count"],
+        },
+    }
+
+
+@app.get(
+    "/api/profile/tasks/{task_id}/matrix",
+    tags=["客户画像"],
+    summary="完备度矩阵(人 × 材料类型:ok/warn/missing/na)",
+)
+async def profile_task_matrix(task_id: int):
+    from db import customer_file_crud, profile_crud
+    task = await customer_file_crud.get_import_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return await profile_crud.build_completeness_matrix(task)
+
+
+@app.get(
+    "/api/doc-extract/results",
+    tags=["信息提取"],
+    summary="提取结果列表查询",
+)
+async def doc_extract_result_list(
+    import_task_id: Optional[int] = Query(None, description="导入任务 ID"),
+    file_id: Optional[str] = Query(None, description="业务文件编码模糊查询"),
+    doc_type: Optional[str] = Query(None, description="证件类型:id_card/hukou/degree_cert/birth_cert"),
+    status: Optional[str] = Query(None, description="状态:done/error/skipped"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    from db import doc_extract_crud
+    items, total = await doc_extract_crud.list_results(
+        import_task_id=import_task_id, file_id=file_id,
+        doc_type=doc_type, status=status, limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/doc-extract/results/{row_id}",
+    tags=["信息提取"],
+    summary="提取结果详情(extracted/mapped 全文)",
+)
+async def doc_extract_result_get(row_id: int):
+    from db import doc_extract_crud
+    row = await doc_extract_crud.get_result(row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return row
+
+
 @app.get(
     "/api/archive-detect/admin/batches",
     tags=["文件留底检测"],
@@ -3058,6 +3593,41 @@ async def archive_detect_admin_progress(
         handler=handler,
         project_name=project_name,
         progress_oid=progress_oid,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/api/admin/file-infos",
+    tags=["文件信息"],
+    summary="文件信息列表查询",
+    response_model=FileInfoListResponse,
+)
+async def list_file_infos(
+    batch_id: Optional[str] = Query(None, description="批次 ID 模糊查询"),
+    file_id: Optional[str] = Query(None, description="文件编码模糊查询"),
+    filename: Optional[str] = Query(None, description="文件名称模糊查询"),
+    status: Optional[str] = Query(None, description="文件状态:pending/fetching/ocr/llm/done/error"),
+    verdict: Optional[str] = Query(None, description="判定结果:match/partial/mismatch/no_text"),
+    client_code: Optional[str] = Query(None, description="客户编码模糊查询"),
+    client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    progress_name: Optional[str] = Query(None, description="进展名称模糊查询"),
+    handler: Optional[str] = Query(None, description="办理人模糊查询"),
+    limit: int = Query(50, ge=1, le=500, description="返回条数,1-500,默认50"),
+    offset: int = Query(0, ge=0, description="分页偏移量"),
+):
+    """以文件为维度的查询列表,支持按批次号、文件编码、文件名称等模糊筛选。"""
+    return await archive_detect_crud.admin_list_files(
+        batch_id=batch_id,
+        file_id=file_id,
+        filename=filename,
+        status=status,
+        verdict=verdict,
+        client_code=client_code,
+        client_name=client_name,
+        progress_name=progress_name,
+        handler=handler,
         limit=limit,
         offset=offset,
     )

@@ -107,10 +107,10 @@
               <el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <!-- <el-table-column label="进度" width="90" align="center">
+          <el-table-column label="进度" width="90" align="center">
             <template #default="{ row }">{{ row.done_files }}/{{ row.total_files }}</template>
           </el-table-column>
-          <el-table-column label="来源" width="90" align="center">
+          <!-- <el-table-column label="来源" width="90" align="center">
             <template #default="{ row }">{{ sourceLabel(row.source_kind) }}</template>
           </el-table-column> -->
           <el-table-column label="客户" min-width="120" show-overflow-tooltip>
@@ -166,7 +166,7 @@
             v-model:current-page="currentPage"
             v-model:page-size="pageSize"
             :total="total"
-            :page-sizes="[10, 20, 50, 100]"
+            :page-sizes="[10, 25, 50, 100, 200]"
             layout="total, sizes, prev, pager, next, jumper"
             small
             background
@@ -388,21 +388,31 @@ const bulkRerunDialogVisible = ref(false)
 const bulkRerunRegenerateCriteria = ref(false)
 const bulkRerunSubmitting = ref(false)
 
-const filters = ref({
-  status: '',
-  source_kind: '',
-  batch_id: '',
-  overall_verdict: [],
-  has_error_file: false,
-  client_name: '',
-  client_code: '',
-  progress_oid: '',
-  progress_name: '',
-  handler: '',
-  date_range: [],
-  limit: 10,
-  offset: 0,
-})
+function _defaultFilters() {
+  const now = new Date()
+  const start = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
+  const fmt = (d) => {
+    const z = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`
+  }
+  return {
+    status: '',
+    source_kind: '',
+    batch_id: '',
+    overall_verdict: [],
+    has_error_file: false,
+    client_name: '',
+    client_code: '',
+    progress_oid: '',
+    progress_name: '',
+    handler: '',
+    date_range: [fmt(start), fmt(now)],
+    limit: 10,
+    offset: 0,
+  }
+}
+
+const filters = ref(_defaultFilters())
 
 function buildParams() {
   const out = {}
@@ -447,21 +457,7 @@ function handleSearch() {
 }
 
 function resetFilters() {
-  filters.value = {
-    status: '',
-    source_kind: '',
-    batch_id: '',
-    overall_verdict: [],
-    has_error_file: false,
-    client_name: '',
-    client_code: '',
-    progress_oid: '',
-    progress_name: '',
-    handler: '',
-    date_range: [],
-    limit: 10,
-    offset: 0,
-  }
+  filters.value = _defaultFilters()
   currentPage.value = 1
   pageSize.value = 10
   batchTableRef.value?.clearSelection()

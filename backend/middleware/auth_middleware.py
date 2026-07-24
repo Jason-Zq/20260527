@@ -58,6 +58,10 @@ WHITELIST = [
     ("GET", "/api/healthz"),
 ]
 
+# 业务方集成接口(提交+轮询)按前缀放行:服务器上业务方不带 token,与历史行为一致。
+# 覆盖 POST /api/archive-detect/business/batch(提交) 和 GET .../batch/{id}(轮询)。
+WHITELIST_PREFIXES = ("/api/archive-detect/business/batch",)
+
 DOC_PREFIXES = ("/docs", "/redoc", "/openapi", "/swagger")
 
 
@@ -65,6 +69,8 @@ def _is_whitelisted(method: str, path: str) -> bool:
     for m, p in WHITELIST:
         if (m == "*" or m == method) and path == p:
             return True
+    if any(path == p or path.startswith(p + "/") for p in WHITELIST_PREFIXES):
+        return True
     # 文档及 OpenAPI schema(/docs /redoc /openapi.json /swagger-...)放行
     if path in DOC_PREFIXES or path.startswith(tuple(x + "/" for x in DOC_PREFIXES)) \
             or path == "/openapi.json":

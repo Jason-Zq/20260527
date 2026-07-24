@@ -39,6 +39,11 @@ CATEGORY_LLM_TIMEOUT = "llm.timeout"
 CATEGORY_DB_ERROR = "db.error"
 CATEGORY_WORKER_CRASH = "worker.crash"
 CATEGORY_MEMORY_LOW = "memory.low"
+CATEGORY_PROFILE_IMPORT_DONE = "profile.import.done"
+CATEGORY_PROFILE_IMPORT_ERROR = "profile.import.error"
+CATEGORY_EXTRACT_DONE = "extract.done"
+CATEGORY_EXTRACT_ERROR = "extract.error"
+CATEGORY_EXTRACT_SKIP = "extract.skip"
 
 # context 序列化后的大小上限(超过截断)
 _CONTEXT_MAX_BYTES = 2048

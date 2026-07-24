@@ -94,7 +94,7 @@
           <el-pagination
             v-model:current-page="currentPage"
             v-model:page-size="pageSize"
-            :page-sizes="[50, 100, 200]"
+            :page-sizes="[10, 25, 50, 100, 200]"
             :total="total"
             layout="total, sizes, prev, pager, next"
             @current-change="loadEvents"
@@ -135,15 +135,15 @@ const loading = ref(false)
 const events = ref([])
 const total = ref(0)
 const currentPage = ref(1)
-const pageSize = ref(50)
+const pageSize = ref(10)
 const detailVisible = ref(false)
 const selected = ref(null)
 const availableCategories = ref([])
 
 function _defaultFilters() {
-  // 默认:最近 24h,severity = warn/error/critical(隐藏 info 噪声)
+  // 默认:最近 7 天,severity = warn/error/critical(隐藏 info 噪声)
   const now = new Date()
-  const start = new Date(now.getTime() - 24 * 3600 * 1000)
+  const start = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
   const fmt = (d) => {
     const z = (n) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`

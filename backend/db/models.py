@@ -10,7 +10,7 @@ client_info 仍保留作为没纳入强 schema 的字段的 KV 兜底。
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, BigInteger, String, Text, Float, Numeric, Boolean, Date,
-    DateTime, ForeignKey, Index, CheckConstraint
+    DateTime, ForeignKey, Index, CheckConstraint, text as sa_text
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -684,4 +684,225 @@ class AiApiCall(Base):
         Index("ix_ai_api_calls_file_id_created", "file_id", created_at.desc()),
         Index("ix_ai_api_calls_client_code_created", "client_code", created_at.desc()),
         Index("ix_ai_api_calls_status_created", "status", created_at.desc()),
+    )
+
+
+class ProfileImportTask(Base):
+    """客户画像-文件清单导入任务。一次 Excel 导入一行,记录进度与各类计数。"""
+    __tablename__ = "profile_import_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    filename = Column(String(500), nullable=False, comment="上传的 Excel 文件名")
+    client_name = Column(String(100), nullable=False, comment="主客户姓名(客户姓名列众数)")
+    client_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, comment="归属客户")
+    status = Column(String(20), nullable=False, default="running", comment="running/done/error")
+    total_files = Column(Integer, nullable=False, default=0, comment="文件总数")
+    processed_files = Column(Integer, nullable=False, default=0, comment="已处理数(含成败)")
+    reused_count = Column(Integer, nullable=False, default=0, comment="复用 archive_detect 脱敏 OCR 的文件数")
+    relinked_count = Column(Integer, nullable=False, default=0, comment="命中本库已有 done 行直接复用的文件数")
+    fresh_ocr_count = Column(Integer, nullable=False, default=0, comment="新下载+OCR 的文件数")
+    failed_count = Column(Integer, nullable=False, default=0, comment="失败文件数")
+    extracted_count = Column(Integer, nullable=False, default=0, comment="完成提取的文件数")
+    id_card_count = Column(Integer, nullable=False, default=0, comment="筛出身份证数")
+    hukou_count = Column(Integer, nullable=False, default=0, comment="筛出户口本数")
+    degree_cert_count = Column(Integer, nullable=False, default=0, comment="筛出学位证数")
+    birth_cert_count = Column(Integer, nullable=False, default=0, comment="筛出出生证明数")
+    current_file = Column(String(500), nullable=True, comment="正在处理的文件名")
+    error = Column(Text, nullable=True, comment="任务级错误信息")
+    household_id = Column(Integer, ForeignKey("profile_households.id", ondelete="SET NULL"), nullable=True, comment="生成的家庭")
+    needs_review_count = Column(Integer, nullable=False, default=0, comment="待复核文件数")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_profile_import_tasks_status", "status"),
+        Index("ix_profile_import_tasks_client", "client_id"),
+        Index("ix_profile_import_tasks_created", created_at.desc()),
+    )
+
+
+class CustomerFile(Base):
+    """客户文件库:客户名下每个文件一行,存全量 OCR 文本(fresh=原文,reused=脱敏),供后续各类提取复用。"""
+    __tablename__ = "customer_files"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    file_code = Column(String(200), nullable=False, unique=True, comment="业务文件编码(全局唯一)")
+    import_task_id = Column(Integer, ForeignKey("profile_import_tasks.id", ondelete="CASCADE"), nullable=False, comment="最近一次导入它的任务")
+    client_name = Column(String(100), nullable=True, comment="Excel 行级客户姓名")
+    client_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, comment="归属客户")
+    filename = Column(String(500), nullable=True, comment="文件名")
+    folder_name = Column(String(300), nullable=True, comment="售后文件夹名称")
+    rel_path = Column(String(500), nullable=True, comment="相对路径")
+    status = Column(String(20), nullable=False, default="pending", comment="pending/fetching/ocr/done/error")
+    ocr_source = Column(String(10), nullable=False, default="none", comment="fresh(原文)/reused(脱敏)/none")
+    ocr_text = Column(Text, nullable=True, comment="OCR 全文;fresh=未脱敏原文(与 ai_api_calls 存原文的既定业务决策一致),reused=archive_detect 脱敏文本")
+    mime_type = Column(String(100), nullable=True, comment="MIME 类型")
+    page_count = Column(Integer, nullable=True, comment="页数")
+    char_count = Column(Integer, nullable=True, comment="字符数")
+    doc_type = Column(String(32), nullable=True, comment="识别类型:id_card/hukou/degree_cert/birth_cert/other")
+    classify_by = Column(String(10), nullable=False, default="none", comment="分类方式:keyword/llm/none")
+    classify_score = Column(Integer, nullable=True, comment="matcher 分数或 LLM confidence")
+    error_msg = Column(Text, nullable=True, comment="错误信息")
+    local_path = Column(String(500), nullable=True, comment="原件落盘相对路径(output/customer_files/...)")
+    file_keep_until = Column(DateTime, nullable=True, comment="原件保留截止时间(到期 GC 删除;DB/OCR 永久保留)")
+    review_status = Column(String(16), nullable=False, default="none", comment="复核状态:none/needs_review/reviewed")
+    review_reason = Column(String(200), nullable=True, comment="待复核原因:no_text/garbled/ocr_short/low_confidence/extract_error/no_person/masked_id")
+    quality_score = Column(Integer, nullable=True, comment="质量分 0-100(越小越急需复核)")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_customer_files_task", "import_task_id"),
+        Index("ix_customer_files_doc_type", "doc_type"),
+        Index("ix_customer_files_client", "client_id"),
+        Index("ix_customer_files_status", "status"),
+        Index("ix_customer_files_review", "review_status", "quality_score"),
+    )
+
+
+class DocExtractRule(Base):
+    """证件字段提取规则:AI 起草、人工审核激活;每 doc_type 至多一条 active。"""
+    __tablename__ = "doc_extract_rules"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    doc_type = Column(String(32), nullable=False, comment="证件类型:id_card/hukou/degree_cert/birth_cert")
+    version = Column(Integer, nullable=False, comment="同 doc_type 内递增,从 1 开始")
+    status = Column(String(16), nullable=False, default="draft", comment="draft/active/disabled")
+    fields = Column(JSONB, nullable=False, comment="字段定义数组 [{key,label,description,required,target:{entity,column},example}]")
+    prompt_extra = Column(Text, nullable=True, comment="追加到抽取 prompt 的类型级注意事项")
+    drafted_by = Column(String(16), nullable=False, default="ai", comment="ai/human")
+    reviewed_by = Column(String(64), nullable=True, comment="审核人")
+    reviewed_at = Column(DateTime, nullable=True, comment="审核时间")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_doc_extract_rules_type_status", "doc_type", "status"),
+        Index("ux_doc_extract_rules_active", "doc_type", unique=True,
+              postgresql_where=sa_text("status = 'active'")),
+    )
+
+
+class DocExtractResult(Base):
+    """一次提取运行一行:记录用的哪套规则、抽出了什么、写到了哪里,全程可回溯。"""
+    __tablename__ = "doc_extract_results"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    customer_file_id = Column(BigInteger, ForeignKey("customer_files.id", ondelete="CASCADE"), nullable=False, comment="来源客户文件行")
+    import_task_id = Column(Integer, ForeignKey("profile_import_tasks.id", ondelete="CASCADE"), nullable=False, comment="所属导入任务")
+    file_id = Column(String(200), nullable=True, comment="业务文件编码")
+    client_id = Column(Integer, nullable=True, comment="归属客户")
+    doc_type = Column(String(32), nullable=False, comment="识别出的证件类型")
+    rule_id = Column(BigInteger, nullable=True, comment="使用的规则;无 active 规则时 NULL")
+    rule_version = Column(Integer, nullable=True, comment="规则版本")
+    status = Column(String(16), nullable=False, comment="done/error/skipped")
+    skip_reason = Column(String(64), nullable=True, comment="no_active_rule/no_client/no_person 等")
+    extracted = Column(JSONB, nullable=True, comment="LLM 抽取原始字段(未脱敏,同 ai_api_calls 原始留存策略)")
+    mapped = Column(JSONB, nullable=True, comment="逐字段写入明细 [{key,column,entity,entity_id,action}]")
+    write_stats = Column(JSONB, nullable=True, comment="{matched_by, client_fields, member_fields, member_created}")
+    error_msg = Column(Text, nullable=True, comment="错误信息")
+    elapsed_ms = Column(Integer, nullable=True, comment="耗时毫秒")
+    review_status = Column(String(16), nullable=False, default="pending", comment="复核状态:pending/confirmed/corrected/dismissed")
+    corrected = Column(JSONB, nullable=True, comment="人工修正后的字段(留痕,与 extracted 对照)")
+    reviewed_by = Column(String(64), nullable=True, comment="复核人")
+    reviewed_at = Column(DateTime, nullable=True, comment="复核时间")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+
+    __table_args__ = (
+        Index("ix_doc_extract_results_task", "import_task_id"),
+        Index("ix_doc_extract_results_customer_file", "customer_file_id"),
+        Index("ix_doc_extract_results_file_id", "file_id"),
+        Index("ix_doc_extract_results_doc_type", "doc_type"),
+    )
+
+
+class ProfileHousehold(Base):
+    """家庭/客户组(画像 v2 独立领域模型;与老 clients 仅软关联,不写老表)。"""
+    __tablename__ = "profile_households"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, comment="家庭/客户组名称(主客户姓名)")
+    legacy_client_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, comment="软关联老 clients.id(仅链接,不写老表)")
+    main_person_id = Column(Integer, nullable=True, comment="主申请人 profile_persons.id")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_profile_households_name", "name"),
+    )
+
+
+class ProfilePerson(Base):
+    """人(骨架)。字段级档案在 profile_person_fields。"""
+    __tablename__ = "profile_persons"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    household_id = Column(Integer, ForeignKey("profile_households.id", ondelete="CASCADE"), nullable=False, comment="所属家庭")
+    name = Column(String(100), nullable=False, comment="姓名")
+    relation_to_main = Column(String(20), nullable=False, default="待确认", comment="与主申请人关系:户主/配偶/子/女/父/母/待确认")
+    is_main = Column(Boolean, nullable=False, default=False, comment="是否主申请人")
+    avatar_file_id = Column(BigInteger, nullable=True, comment="头像证件照 customer_files.id")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_profile_persons_household", "household_id"),
+    )
+
+
+class ProfilePersonField(Base):
+    """字段级档案 + 证据链:一人一行/字段,记当前值/可信度层/来源/确认状态。"""
+    __tablename__ = "profile_person_fields"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    person_id = Column(Integer, ForeignKey("profile_persons.id", ondelete="CASCADE"), nullable=False, comment="所属人")
+    field = Column(String(50), nullable=False, comment="字段名:如 id_number/occupation")
+    value = Column(Text, nullable=True, comment="当前值")
+    layer = Column(String(16), nullable=False, default="verified", comment="可信度层:verified=官方证件/declared=自报")
+    source_file_id = Column(BigInteger, nullable=True, comment="来源文件 customer_files.id")
+    source_result_id = Column(BigInteger, nullable=True, comment="来源提取结果 doc_extract_results.id")
+    status = Column(String(16), nullable=False, default="ai", comment="ai(待复核)/confirmed/corrected")
+    updated_by = Column(String(64), nullable=True, comment="最后操作人(AI 或复核员)")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_profile_person_fields_person", "person_id"),
+    )
+
+
+class ProfileAsset(Base):
+    """资产(房产/存款/流水等),权属到人或家庭。"""
+    __tablename__ = "profile_assets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    household_id = Column(Integer, ForeignKey("profile_households.id", ondelete="CASCADE"), nullable=False, comment="所属家庭")
+    owner_person_id = Column(Integer, ForeignKey("profile_persons.id", ondelete="SET NULL"), nullable=True, comment="权属人")
+    asset_type = Column(String(30), nullable=False, comment="房产/存款/银行流水/股票/车辆/其他")
+    name = Column(String(200), nullable=False, comment="资产名称")
+    attrs = Column(JSONB, nullable=True, comment="类型特定字段{地址,面积,证号,金额,币种,...}")
+    source_file_id = Column(BigInteger, nullable=True, comment="来源文件 customer_files.id")
+    status = Column(String(16), nullable=False, default="ai", comment="ai(待复核)/confirmed/corrected")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_profile_assets_household", "household_id"),
+    )
+
+
+class ProfileCase(Base):
+    """案件 + 时间线(里程碑从文件名/内容抽取)。"""
+    __tablename__ = "profile_cases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    household_id = Column(Integer, ForeignKey("profile_households.id", ondelete="CASCADE"), nullable=False, comment="所属家庭")
+    case_type = Column(String(100), nullable=False, comment="案件类型:如 瓦努阿图永居")
+    status = Column(String(30), nullable=False, default="进行中", comment="进行中/已获批/已签收/停滞")
+    milestones = Column(JSONB, nullable=True, comment="时间线 [{name,date,source_file_id}]")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ix_profile_cases_household", "household_id"),
     )

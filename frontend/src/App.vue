@@ -7,13 +7,33 @@
         <h1 class="app-title">智能文档审核工作台</h1>
       </div>
       <nav class="top-nav">
-        <!-- <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button> -->
-        <button class="nav-item" :class="{ active: isActive('/archive-admin') }" @click="go('/archive-admin')">审核任务管理</button>
-        <button class="nav-item" :class="{ active: isActive('/ai-api-calls') }" @click="go('/ai-api-calls')">AI 调用记录</button>
-        <button class="nav-item" :class="{ active: isActive('/request-logs') }" @click="go('/request-logs')">请求记录</button>
-        <button class="nav-item" :class="{ active: isActive('/events') }" @click="go('/events')">系统日志</button>
-        <button class="nav-item" :class="{ active: isActive('/archive-detect') }" @click="go('/archive-detect')">文件留底检测</button>
-        <!-- <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button> -->
+                <el-dropdown trigger="hover">
+          <button class="nav-item" :class="{ active: isAnyActive(['/archive-admin', '/archive-detect']) }">文件留底</button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="go('/archive-admin')">审核任务管理</el-dropdown-item>
+              <el-dropdown-item @click="go('/archive-detect')">文件留底检测</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+
+        <el-dropdown trigger="hover">
+          <button class="nav-item" :class="{ active: isAnyActive(['/ai-api-calls', '/request-logs', '/events']) }">日志消息</button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="go('/ai-api-calls')">AI 调用记录</el-dropdown-item>
+              <el-dropdown-item @click="go('/request-logs')">请求记录</el-dropdown-item>
+              <el-dropdown-item @click="go('/events')">系统日志</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        
+        <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button>
+        <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button>
+        <button class="nav-item" :class="{ active: isActive('/file-info') }" @click="go('/file-info')">文件信息</button>
+        <button class="nav-item" :class="{ active: isActive('/profile') }" @click="go('/profile')">客户画像</button>
+        <button class="nav-item" :class="{ active: isActive('/review-center') }" @click="go('/review-center')">复核中心</button>
+
         <!-- <el-dropdown trigger="click">
           <button class="nav-item more">更多工具</button>
           <template #dropdown>
@@ -25,8 +45,14 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown> -->
-        <button class="nav-item logout" @click="onLogout">退出登录</button>
       </nav>
+      <div class="header-right">
+        <el-tooltip content="退出登录" placement="bottom">
+          <button class="nav-item logout" @click="onLogout">
+            <el-icon><SwitchButton /></el-icon>
+          </button>
+        </el-tooltip>
+      </div>
     </header>
 
     <!-- 路由出口：每个页面通过 router-view 渲染 -->
@@ -37,6 +63,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { SwitchButton } from '@element-plus/icons-vue'
 import { clearToken } from './api'
 
 const router = useRouter()
@@ -50,6 +77,10 @@ function go(path) {
 
 function isActive(path) {
   return route.path === path || route.path.startsWith(path + '/')
+}
+
+function isAnyActive(paths) {
+  return paths.some((path) => route.path === path || route.path.startsWith(path + '/'))
 }
 
 function onLogout() {
@@ -89,9 +120,9 @@ html, body {
   padding: 0 28px;
   height: 56px;
   background: #ffffff;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   flex-shrink: 0;
   position: relative;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
@@ -112,12 +143,18 @@ html, body {
   align-items: center;
   gap: 12px;
   cursor: pointer;
+  justify-self: start;
 }
 
 .top-nav {
   display: flex;
   align-items: center;
   gap: 6px;
+  justify-self: center;
+}
+
+.header-right {
+  justify-self: end;
 }
 
 .nav-item {
