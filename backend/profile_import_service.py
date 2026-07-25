@@ -2,7 +2,7 @@
 
 流程:解析文件来源(现阶段 Excel,后期业务方接口) -> 落 customer_files
 -> 逐文件取 OCR(先复用 archive_detect,没有再下载+OCR) -> 分类筛 4 类
--> 按 doc_extract_rules 提取 -> 归因写入客户档案。详见 docs/09。
+-> 按 extract_rules 提取 -> 归因写入客户档案。详见 docs/09。
 
 本文件当前包含:文件来源协议 + Excel 解析(纯函数,可单测)。
 run_import 编排逻辑在 slice (c) 落地。
@@ -155,6 +155,7 @@ from datetime import datetime, timedelta
 
 import doc_type_matcher
 import event_service
+import extract_rules
 import file_fetcher
 import llm_service
 import review_service
@@ -346,7 +347,7 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
     t0 = time.time()
     outcome = {"status": None, "skip_reason": None, "id_masked": False}
 
-    rule = await doc_extract_crud.get_active_rule(doc_type)
+    rule = extract_rules.get_rule(doc_type)
     if not rule:
         await doc_extract_crud.insert_result(
             customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
@@ -366,7 +367,7 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
         await doc_extract_crud.insert_result(
             customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
             client_id=task.get("client_id"), doc_type=doc_type,
-            rule_id=rule["id"], rule_version=rule["version"],
+            rule_id=None, rule_version=rule["version"],
             status="skipped", skip_reason="garbled_text")
         event_service.log_event(
             event_service.WARN, event_service.CATEGORY_EXTRACT_SKIP,
@@ -420,7 +421,7 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
             await doc_extract_crud.insert_result(
                 customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
                 client_id=task.get("client_id"), doc_type=doc_type,
-                rule_id=rule["id"], rule_version=rule["version"],
+                rule_id=None, rule_version=rule["version"],
                 status="skipped", skip_reason="no_person",
                 extracted=extracted,
                 elapsed_ms=int((time.time() - t0) * 1000))
@@ -451,7 +452,7 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
         await doc_extract_crud.insert_result(
             customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
             client_id=task.get("client_id"), doc_type=doc_type,
-            rule_id=rule["id"], rule_version=rule["version"],
+            rule_id=None, rule_version=rule["version"],
             status="done", extracted=extracted,
             mapped=write["mapped"], write_stats=write["write_stats"],
             elapsed_ms=int((time.time() - t0) * 1000))
@@ -470,7 +471,7 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
         await doc_extract_crud.insert_result(
             customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
             client_id=task.get("client_id"), doc_type=doc_type,
-            rule_id=rule["id"], rule_version=rule["version"],
+            rule_id=None, rule_version=rule["version"],
             status="error", error_msg=f"{type(e).__name__}: {e}",
             elapsed_ms=int((time.time() - t0) * 1000))
         event_service.log_event(

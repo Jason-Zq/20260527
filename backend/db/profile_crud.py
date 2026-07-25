@@ -118,17 +118,6 @@ def default_layer(field: str) -> str:
     return PROFILE_FIELDS.get(field, ("", "verified"))[1]
 
 
-def target_fields_text() -> str:
-    """给规则起草 prompt 用的可写字段清单(字段名=中文(层))。"""
-    lines = [f"{f} = {label}({layer})" for f, (label, layer) in PROFILE_FIELDS.items()]
-    lines.append("_relation = 与户主关系(特殊字段,户口本/出生证草拟使用:取值 户主/配偶/子/女/父/母,"
-                 "出生证上新生儿按性别推 子/女;写入人的关系而非字段)")
-    lines.append("【entity=case 说明】递交/签收/批复类证件的里程碑日期用 entity=case(column=null):"
-                 "label 即里程碑名(如 递交/获批/签收/交付/公证),value 为日期;"
-                 "特殊 key='case_type' 表示案件类型(如 瓦努阿图永居),不产生里程碑")
-    return "\n".join(lines)
-
-
 # ==================== 序列化 ====================
 
 def _to_household_dict(h: ProfileHousehold) -> dict:

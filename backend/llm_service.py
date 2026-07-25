@@ -1267,7 +1267,7 @@ OCR 文本:
 def extract_doc_fields(text: str, rule: dict, **context) -> dict:
     """按规则提取证件字段。
 
-    入参 rule: doc_extract_rules 行(dict),含 fields JSONB + prompt_extra。
+    入参 rule: extract_rules.get_rule 返回的 dict,含 fields + prompt_extra。
     返回 {"fields": {key: 字符串值|None}}。
     异常: ValueError - 文本为空 / LLM 返回非 JSON(调用方统一 catch 记 error)。
     """
@@ -1481,66 +1481,4 @@ def merge_household_assets(assets: list, **context) -> dict:
         import traceback
         traceback.print_exc()
         return fallback
-
-
-def draft_extract_rule(doc_type: str, target_columns: str, **context) -> dict:
-    """AI 起草某证件类型的提取规则(字段定义 + 目标列映射)。
-
-    入参 target_columns: 可写列清单文本(列名+中文说明,由调用方提供)。
-    返回 {"fields": [...], "prompt_extra": str},fields 元素:
-      {key, label, description, required, target: {entity: "person", column|None}, example}
-    异常: ValueError - LLM 返回结构不合法。
-    """
-    type_name = DOC_TYPE_NAMES.get(doc_type, doc_type)
-    prompt = f"""你是证件信息提取规则设计助手。我们要从{type_name}的 OCR 文本中提取结构化字段,写入客户档案表。
-请为"{type_name}"设计一套提取规则。
-
-要求:
-1. 字段覆盖该证件上真正有档案价值的信息(身份识别类优先),一般 6-12 个字段。
-2. 每个字段给出:
-   - key: 英文 snake_case 字段键(如 id_number)
-   - label: 中文名(与证件版面上的用语一致)
-   - description: 提取要求(格式/口径,一句话;没有特殊要求可空)
-   - required: 该证件上必然存在的核心字段为 true,否则 false
-   - target.column: 该字段应写入的档案列,只能从下面的可写列清单中选;没有对应列则 null(只抽不写)
-   - target.entity: "person"(写到人身上,客户本人或家庭成员由系统归因);
-     仅当证件是房产证/不动产权证类时可用 "asset"(写入家庭资产表,此时 column 一律 null,
-     字段 key 即资产属性名,如 address/area/cert_no;证件上的权利人字段仍用 entity=person、column=name 供归因);
-     仅当证件是递交/签收/批复等案件过程文件时还可用 "case"(写入案件时间线,column 一律 null,
-     label 即里程碑名如 递交/签收/获批,value 为该事件日期;案件类型字段用 key=case_type)
-   - example: 一个示例值
-3. prompt_extra: 这类证件提取时的整体注意事项(2-4 条,如:正反面信息合并、日期格式、与相似证件的区分点)。
-4. JSON 字符串值内部如需引用,一律用中文引号「」,禁止使用未转义的 ASCII 双引号。
-
-可写列清单(列名=说明):
-{target_columns}
-
-严格输出 JSON(不要 markdown,不要解释):
-{{"fields": [{{"key":"...","label":"...","description":"...","required":true/false,"target":{{"entity":"person|asset","column":"...或null"}},"example":"..."}}],
-  "prompt_extra": "..."}}"""
-
-    last_err: Optional[Exception] = None
-    for _ in range(2):  # 模型偶发非法 JSON(如未转义内引号),失败重试一次
-        raw = _call_llm(prompt, operation="draft_extract_rule", **context)
-        try:
-            data = _load_llm_json(raw)
-            break
-        except json.JSONDecodeError as e:
-            last_err = e
-    else:
-        raise ValueError("LLM 返回非合法规则 JSON(重试仍失败)") from last_err
-
-    fields = data.get("fields")
-    if not isinstance(fields, list) or not fields:
-        raise ValueError(f"LLM 起草的规则缺少 fields 数组:{raw[:200]}")
-    for f in fields:
-        if not isinstance(f, dict) or not f.get("key") or not f.get("label"):
-            raise ValueError(f"规则字段缺少 key/label:{f}")
-        f.setdefault("description", "")
-        f.setdefault("required", False)
-        f.setdefault("example", "")
-        target = f.get("target") or {}
-        entity = target.get("entity") if target.get("entity") in ("person", "asset", "case") else "person"
-        f["target"] = {"entity": entity, "column": target.get("column") if entity == "person" else None}
-    return {"fields": fields, "prompt_extra": str(data.get("prompt_extra") or "")}
 

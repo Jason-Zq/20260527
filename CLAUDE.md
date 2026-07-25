@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **文件留底检测 / 业务审核**：业务方传入客户+项目+进展+文件列表（OSS URL）；后端 OCR/文本抽取 + LLM 按公司留底分类体系判定，持久化单文件结果、OCR 脱敏文本、批次总体报告，支持同 `(progress_id, file_id)` 的历史结果复用。**快速检测（upload/urls）已移除，业务审核是唯一入口**。
 2. **AI 材料解析**：上传 PDF/图片 → OCR + LLM 提取结构化字段 → 人工复核 → 归档到客户档案。
 3. **客户档案结构化生成**：从文件留底检测完成的 OCR 文件中，批量抽取客户/家庭成员/资产事实，自动写入客户档案结构化表；策略：**只补空字段，不覆盖已有非空人工数据**，避免误改。
-4. **客户画像（Excel 导入）**：上传客户文件清单 Excel → 全量 OCR 入客户文件库（fresh 存原文）→ 关键词+LLM 筛出身份证/户口本/学位证/出生证明 4 类 → 按 DB 规则（AI 起草、人工审核激活）提取 → 归因只补空写客户档案。方案见 [docs/09-客户画像-Excel导入方案.md](docs/09-客户画像-Excel导入方案.md)。
+4. **客户画像（Excel 导入）**：上传客户文件清单 Excel → 全量 OCR 入客户文件库（fresh 存原文）→ 关键词+LLM 筛出身份证/户口本/学位证/出生证明 4 类 → 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因只补空写客户档案。方案见 [docs/09-客户画像-Excel导入方案.md](docs/09-客户画像-Excel导入方案.md)。
 5. **Word 模板填写**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
 6. **PDF 拆分**：上传多证件合并 PDF → 全页 OCR + LLM 判断页边界 → 按证件类型拆为独立 PDF。
 7. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
@@ -112,7 +112,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_arc
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_ocrapi_auth.py   # ocrapi JWT/用户库/清洗(需 PyJWT/bcrypt,不依赖服务运行)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_doc_type_matcher.py        # 证件关键词分类器(纯函数)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_profile_excel_parse.py     # 客户清单 Excel 解析(读根目录真实例子文件)
-PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_doc_extract_rules.py       # 提取规则 CRUD(依赖 DB)
+PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_extract_rules.py       # 提取规则常量(纯函数,不依赖 DB)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_doc_extract_mapping.py     # 归因+只补空写库(依赖 DB)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_review_scoring.py          # 质量评级打分(纯函数)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_profile_crud.py             # 画像 v2 归因/字段写入语义(依赖 DB)
@@ -167,8 +167,9 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/te
   backend/client_profile_service.py      客户档案结构化生成编排(后台任务,只补空不覆盖)
   backend/profile_import_service.py      客户画像编排(Excel 清单解析/run_import:取 OCR→分类→提取)
   backend/doc_type_matcher.py            证件类型关键词分类器(纯函数,4 类证件正负关键词评分)
+  backend/extract_rules.py               证件字段提取规则(代码常量 + get_rule,原 doc_extract_rules 表迁来)
   backend/db/customer_file_crud.py       客户文件库(customer_files) + 导入任务 CRUD + OCR 复用查询
-  backend/db/doc_extract_crud.py         提取规则/结果 CRUD + 归因(find_person_match) + 只补空写库
+  backend/db/doc_extract_crud.py         提取结果 CRUD + 归因(find_person_match) + 只补空写库
   backend/template_service.py            Word 模板解析、锚点扫描、渲染
   backend/split_ocr_service.py           PDF 拆分专用全页 OCR(单线程,复用 ocr_service 全局引擎)
   backend/split_service.py               PDF 页范围规整与拆分
@@ -177,7 +178,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/te
 config.json                              DB + LLM + OCR/文档类型配置
 output/                                  静态挂载为 /uploads/，保存 PNG/PDF/DOCX 等产物
 temp/                                    上传/下载/模板解析临时文件
-migrations/versions/                     Alembic 迁移(当前到 017_ai_api_calls)
+migrations/versions/                     Alembic 迁移(当前到 020_drop_extract_rules)
 docs/                                    重构参考开发文档(01-系统概览 ~ 07-重构规划 + 客户数据库-PRD)
 frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后端不是前端,见下节)
 ```
@@ -209,7 +210,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - `ai_api_calls`：AI/LLM API 调用记录,记 operation/model/prompt/response/耗时/成败/业务上下文(batch_id/file_id/client_code/task_id),前端 `/ai-api-calls` 页,GC 保留 30 天。LLM 在 `llm_service._call_llm` 埋点--**注意用同步 `insert_ai_api_call_sync`**,因为它跑在 worker 线程(asyncio.to_thread)里,async 引擎连接池绑主 loop 不能跨线程用。**LLM 的 prompt/response 原文直存未脱敏**(业务决策,含脱敏前 OCR)。**入库前在 CRUD 层统一清洗**:去 NUL/控制字符(PG text 列不接受 ``,OCR 文本易混入,此前被 `except` 静默吞掉丢日志)、prompt/response 截断 50KB、error_msg 截断 2KB;列表接口只回 500 字预览,详情走单独的 `GET /api/admin/ai-api-calls/{row_id}` 拉全文。引擎层(asyncpg/psycopg2)已显式 `client_encoding=utf8`。
 - `profile_import_tasks`：客户画像导入任务；一次 Excel 导入一行,记录进度与各类计数(4 类证件各筛出数/提取数/失败数/current_file/needs_review_count/household_id)。
 - `customer_files`：客户文件库,`file_code` 全局唯一(重复导入只 re-link 不重复下载/OCR);存全量 OCR——**fresh=未脱敏原文**(与 ai_api_calls 存原文的既定决策一致)、reused=archive_detect 脱敏文本,`ocr_source` 区分;分类结果 `doc_type(id_card/hukou/degree_cert/birth_cert/other)` + `classify_by(keyword/llm/none)`;`local_path` 原件落盘 output/customer_files/(30 天 GC,DB/OCR 永留);`review_status/review_reason/quality_score` 复核与质量评级。
-- `doc_extract_rules`：证件字段提取规则,**AI 起草(draft)→人工审核编辑(仅 draft 可改)→activate**(每 doc_type 至多一条 active,部分唯一索引兜底);`fields` JSONB 带 `target:{entity:'person',column}`(v2 起 column 解读为 profile 字段名),column=null 只抽不写。
+- ~~`doc_extract_rules`~~：**已废弃并 drop(migration 020)**。证件字段提取规则改为代码常量 `backend/extract_rules.py`(改规则=改该文件+重启 worker);`fields` 结构不变:带 `target:{entity:'person',column}`(column 解读为 profile 字段名),column=null 只抽不写,entity=asset/case 走资产/案件表。原 draft→activate→disable 生命周期已移除。
 - `doc_extract_results`：一次提取一行;记用的规则版本、extracted(未脱敏原始抽取)、mapped(逐字段 written/updated/skipped_*)、write_stats;复核字段 `review_status(pending/confirmed/corrected/dismissed)/corrected/reviewed_by/at`。
 - `profile_households` / `profile_persons` / `profile_person_fields` / `profile_assets` / `profile_cases`：**画像 v2 独立领域模型(migration 019),画像流水线只写这些表,不再写 clients/family_members**(老表留给 POA 模板等老流程,仅 `legacy_client_id` 软关联)。`profile_person_fields` 是字段级档案+证据链:`(person_id, field)` 唯一,带 `layer(verified官方证件/declared自报)` 与 `status(ai/confirmed/corrected)`;写入语义:人工字段不覆盖、declared 与 verified 同等对待(不区分来源层,layer 列仅作信息留存不参与覆盖决策)、同值跳过、复核修正永远覆盖。方案见 [docs/10-客户画像v2-复核与领域模型.md](docs/10-客户画像v2-复核与领域模型.md)。
 
@@ -324,11 +325,11 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 
 关键逻辑：
 
-- **幂等**：`file_code` 全局唯一；重复上传同一 Excel 新建 task 但已 done 文件只 re-link 不重新下载/OCR；提取按当前 active 规则重跑写新结果行;person_fields 同值跳过(skipped_same)保证数据层幂等。
-- **规则管理走 Swagger**：`POST /api/doc-extract/rules/draft`(AI 起草) → `GET /rules` 审 → `PUT /rules/{id}`(仅 draft) → `POST /rules/{id}/activate`(同类型其他自动 disabled)。无前端页。
-- **LLM JSON 容错**：`draft_extract_rule`/`extract_doc_fields` 解析失败重试一次(模型偶发字符串内未转义双引号);prompt 已要求值内引用用中文「」。
+- **幂等**：`file_code` 全局唯一；重复上传同一 Excel 新建 task 但已 done 文件只 re-link 不重新下载/OCR；提取按当前代码规则重跑写新结果行;person_fields 同值跳过(skipped_same)保证数据层幂等。
+- **规则维护改代码常量**：规则在 `backend/extract_rules.py` 的 `EXTRACT_RULES` dict;改规则=改该文件+重启 worker(`RULES_VERSION` 手动 +1 便于溯源)。无 Swagger 端点、无前端页。
+- **LLM JSON 容错**：`extract_doc_fields` 解析失败重试一次(模型偶发字符串内未转义双引号);prompt 已要求值内引用用中文「」。
 - **复用脱敏文本的表现**：证件号抽成 `[身份证]` → `skipped_masked`,归因退化为按姓名并标 `masked_id` 待复核；姓名/性别/出生日期等不脱敏字段仍可写入。
-- 加新证件类型：draft+activate 新规则 + matcher 加组关键词 + `llm_service.DOC_EXTRACT_TYPES`/recognize 白名单加一项(小改三处);若要写新目标表(如资产)再扩 `target.entity` 分派。
+- 加新证件类型：`extract_rules.py` 加一条规则 + matcher 加组关键词 + `llm_service.DOC_EXTRACT_TYPES`/recognize 白名单加一项(小改三处);若要写新目标表(如资产)再扩 `target.entity` 分派。
 - **前端交互(画像弹窗)**：人员卡片字段按 4 大组分段(基础个人信息/护照信息/公司收入/其他证件)+分割线,组内字段横向 3 列(`utils/labels.js` 的 `groupPersonFields`);人员卡 **inline 编辑**(编辑→字段变 input→保存/取消,`POST /api/profile/persons/{id}/field` 走 `correct_person_field`);「查看文件」按钮开 `PersonEditDrawer`(左人员文件列表+右原件);字段「多源」按钮开**多源字段核对抽屉**(上字段编辑+确定,下左来源文件列表+右原件,保存同 `correct_person_field`)。
 - **文件清单 tab**：上方文件表格(含「提取」列=`latest_extract_status`,`list_task_files` 用 DISTINCT ON 取最新提取状态)+点行/查看详情弹三栏弹窗(左原件 iframe/中 OCR/右提取结果详情,`profile.extractions` 按 customer_file_id 前端过滤);三栏详情已从 inline 改弹窗。
 - **抽屉并排模式**：多源核对/查看文件抽屉 `:modal=false` + `modal-class=side-drawer-overlay`(CSS pointer-events none 穿透 + 抽屉 auto),客户画像 el-dialog 用 `profileShift` 动态让出右侧(`:width=profileDialogWidth` + marginRight),两者并排同时操作;抽屉左边缘可拖拽调宽;关闭客户画像 watch 联动关右侧抽屉。

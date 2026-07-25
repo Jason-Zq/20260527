@@ -1,7 +1,9 @@
 # 客户画像 · Excel 导入 → 全量 OCR → 精准筛 4 类证件 → 规则提取 → 客户档案 实施方案
 
+> **2026-07-25 更新**：提取规则子系统已从 DB（`doc_extract_rules` 表 + AI 起草/审核/激活生命周期 + `/api/doc-extract/rules/*` 端点）**迁至代码常量** `backend/extract_rules.py`（table 已 drop，migration 020）。改规则=改该文件+重启 worker。本文下面涉及 `doc_extract_rules`/draft/activate/规则 CRUD/规则端点的描述均为历史设计，**当前实现以 `backend/extract_rules.py` 为准**；提取/归因/只补空写库、`fields` 结构（`target:{entity,column}`）、结果表留痕与复核闭环均不变。
+>
 > 2026-07-23 定稿。**状态：已实现并端到端验证通过**（migration 018；真实 Excel 62 文件导入，重复导入幂等验证 0 重复写入）。
-> 取代 [08-客户基本信息提取方案.md](08-客户基本信息提取方案.md) 中的**触发方式**（worker hook / 回填端点）；08 的**规则子系统**（doc_extract_rules、AI 起草→人工审核→激活、提取/归因/只补空写库）原样保留并并入本方案。
+> 取代 [08-客户基本信息提取方案.md](08-客户基本信息提取方案.md) 中的**触发方式**（worker hook / 回填端点）；08 的**规则子系统**（提取/归因/只补空写库）并入本方案。
 
 ## 1. 背景与目标
 

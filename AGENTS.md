@@ -11,7 +11,7 @@
 1. **文件留底检测 / 业务审核**（主线）：接收业务方传入的客户+项目+进展+文件 URL，后台 OCR/文本抽取 + LLM 按公司留底分类体系判定，持久化单文件结果、OCR 脱敏文本、批次总体报告。
 2. **AI 材料解析**：上传 PDF/图片 → OCR + LLM 提取结构化字段 → 人工复核 → 归档到客户档案。
 3. **客户档案结构化生成**：从业务审核完成的 OCR 文件中批量抽取客户/家庭成员/资产事实，自动写入结构化表；**只补空字段，不覆盖已有非空人工数据**。
-4. **客户画像（Excel 导入）**：上传客户文件清单 Excel → 全量 OCR 入客户文件库（fresh 存原文，原件落盘留存 30 天可在线查看）→ 关键词+LLM 分类（12 类：身份证/户口本/学位证/出生证明/护照/KYC表/结婚证/房产证/无犯罪/批复/递交包/签收回执）→ 按 DB 规则（AI 起草、人工审核激活）提取 → 归因写独立 profile_* 领域表（不写 clients/family_members；entity=asset 写 profile_assets、entity=case 写 profile_cases 案件时间线）；纯规则质量评级驱动复核闭环（待复核队列+人工修正永远覆盖）+ 完备度矩阵（人×材料）。详见 docs/09 + docs/10。
+4. **客户画像（Excel 导入）**：上传客户文件清单 Excel → 全量 OCR 入客户文件库（fresh 存原文，原件落盘留存 30 天可在线查看）→ 关键词+LLM 分类（12 类：身份证/户口本/学位证/出生证明/护照/KYC表/结婚证/房产证/无犯罪/批复/递交包/签收回执）→ 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 领域表（不写 clients/family_members；entity=asset 写 profile_assets、entity=case 写 profile_cases 案件时间线）；纯规则质量评级驱动复核闭环（待复核队列+人工修正永远覆盖）+ 完备度矩阵（人×材料）。详见 docs/09 + docs/10。
 5. **AI 填写文件（Word 模板）**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
 6. **处理超长 PDF**：上传多证件合并 PDF → 全页 OCR + LLM 判断证件边界 → 按类型拆为独立子 PDF。
 7. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
@@ -71,7 +71,7 @@
 │   └── src/components/*.vue         # 各业务页面组件
 ├── migrations/                      # Alembic 迁移
 │   ├── env.py
-│   └── versions/001_initial.py … 017_ai_api_calls.py
+│   └── versions/001_initial.py … 020_drop_extract_rules.py
 ├── docs/                            # 重构参考开发文档(01-系统概览 ~ 07-重构规划 + 客户数据库-PRD)
 ├── frontend2/DocReview.ArchiveDetect/ # .NET(net10.0) 业务后端重写 PoC(目录名误导,不是前端);
 │                                      #   对标 /api/archive-detect/* 契约,EF Core 连同一 PG,RapidOcrNet 内置 OCR

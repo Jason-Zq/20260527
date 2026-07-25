@@ -10,7 +10,7 @@ client_info 仍保留作为没纳入强 schema 的字段的 KV 兜底。
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, BigInteger, String, Text, Float, Numeric, Boolean, Date,
-    DateTime, ForeignKey, Index, CheckConstraint, text as sa_text
+    DateTime, ForeignKey, Index, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -757,29 +757,6 @@ class CustomerFile(Base):
         Index("ix_customer_files_client", "client_id"),
         Index("ix_customer_files_status", "status"),
         Index("ix_customer_files_review", "review_status", "quality_score"),
-    )
-
-
-class DocExtractRule(Base):
-    """证件字段提取规则:AI 起草、人工审核激活;每 doc_type 至多一条 active。"""
-    __tablename__ = "doc_extract_rules"
-
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    doc_type = Column(String(32), nullable=False, comment="证件类型:id_card/hukou/degree_cert/birth_cert")
-    version = Column(Integer, nullable=False, comment="同 doc_type 内递增,从 1 开始")
-    status = Column(String(16), nullable=False, default="draft", comment="draft/active/disabled")
-    fields = Column(JSONB, nullable=False, comment="字段定义数组 [{key,label,description,required,target:{entity,column},example}]")
-    prompt_extra = Column(Text, nullable=True, comment="追加到抽取 prompt 的类型级注意事项")
-    drafted_by = Column(String(16), nullable=False, default="ai", comment="ai/human")
-    reviewed_by = Column(String(64), nullable=True, comment="审核人")
-    reviewed_at = Column(DateTime, nullable=True, comment="审核时间")
-    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
-
-    __table_args__ = (
-        Index("ix_doc_extract_rules_type_status", "doc_type", "status"),
-        Index("ux_doc_extract_rules_active", "doc_type", unique=True,
-              postgresql_where=sa_text("status = 'active'")),
     )
 
 

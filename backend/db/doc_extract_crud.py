@@ -1,7 +1,6 @@
-"""doc_extract CRUD: 证件提取规则(doc_extract_rules) + 提取结果(doc_extract_results) + 归因写库。
+"""doc_extract CRUD: 提取结果(doc_extract_results) + 归因写库。
 
-规则生命周期: AI 起草(draft) -> 人工审核编辑(仅 draft 可改) -> activate(每 doc_type 至多一条
-active,DB 部分唯一索引兜底) -> disable。提取结果一次运行一行,全程留痕可回溯。
+提取规则已迁至代码常量 backend/extract_rules.py(不再走 DB);提取结果一次运行一行,全程留痕可回溯。
 
 归因写库: find_person_match 在本客户范围内按 证件号->姓名 匹配 client/member,
 apply_extracted_fields 按规则 target.column 只补空写入(不覆盖已有非空值)。
@@ -9,12 +8,12 @@ apply_extracted_fields 按规则 target.column 只补空写入(不覆盖已有�
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Date, select, func, update as sa_update
+from sqlalchemy import Date, select, func
 
 from db.ai_api_call_crud import _clean_text
 from db.client_profile_crud import _parse_date, _clean_str
 from db.engine import async_session_maker
-from db.models import Client, DocExtractResult, DocExtractRule, FamilyMember
+from db.models import Client, DocExtractResult, FamilyMember
 
 
 # ==================== person 可写列(规则 target.column 的取值范围) ====================
@@ -84,22 +83,6 @@ def valid_id_number(v) -> bool:
 
 # ==================== 序列化 ====================
 
-def _to_rule_dict(r: DocExtractRule) -> dict:
-    return {
-        "id": r.id,
-        "doc_type": r.doc_type,
-        "version": r.version,
-        "status": r.status,
-        "fields": r.fields,
-        "prompt_extra": r.prompt_extra,
-        "drafted_by": r.drafted_by,
-        "reviewed_by": r.reviewed_by,
-        "reviewed_at": r.reviewed_at.strftime("%Y-%m-%d %H:%M:%S") if r.reviewed_at else None,
-        "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "",
-        "updated_at": r.updated_at.strftime("%Y-%m-%d %H:%M:%S") if r.updated_at else "",
-    }
-
-
 def _to_result_dict(r: DocExtractResult) -> dict:
     return {
         "id": r.id,
@@ -123,127 +106,6 @@ def _to_result_dict(r: DocExtractResult) -> dict:
         "reviewed_at": r.reviewed_at.strftime("%Y-%m-%d %H:%M:%S") if r.reviewed_at else None,
         "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "",
     }
-
-
-# ==================== 规则 CRUD ====================
-
-async def create_rule(*, doc_type: str, fields: list, prompt_extra: Optional[str] = None,
-                      drafted_by: str = "ai", status: str = "draft",
-                      reviewed_by: Optional[str] = None) -> dict:
-    """新建规则,version = 同 doc_type 当前最大 version + 1。"""
-    async with async_session_maker() as session:
-        max_ver = await session.scalar(
-            select(func.max(DocExtractRule.version)).where(DocExtractRule.doc_type == doc_type)
-        )
-        row = DocExtractRule(
-            doc_type=doc_type,
-            version=(max_ver or 0) + 1,
-            status=status,
-            fields=fields,
-            prompt_extra=_clean_text(prompt_extra),
-            drafted_by=drafted_by,
-            reviewed_by=reviewed_by,
-            reviewed_at=datetime.now() if status == "active" else None,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        )
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
-        return _to_rule_dict(row)
-
-
-async def get_rule(rule_id: int) -> Optional[dict]:
-    async with async_session_maker() as session:
-        row = await session.get(DocExtractRule, rule_id)
-        return _to_rule_dict(row) if row else None
-
-
-async def get_active_rule(doc_type: str) -> Optional[dict]:
-    async with async_session_maker() as session:
-        row = await session.scalar(
-            select(DocExtractRule).where(
-                DocExtractRule.doc_type == doc_type,
-                DocExtractRule.status == "active",
-            )
-        )
-        return _to_rule_dict(row) if row else None
-
-
-async def list_rules(*, doc_type: Optional[str] = None, status: Optional[str] = None,
-                     limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
-    async with async_session_maker() as session:
-        stmt = select(DocExtractRule)
-        cnt = select(func.count(DocExtractRule.id))
-        if doc_type:
-            stmt = stmt.where(DocExtractRule.doc_type == doc_type)
-            cnt = cnt.where(DocExtractRule.doc_type == doc_type)
-        if status:
-            stmt = stmt.where(DocExtractRule.status == status)
-            cnt = cnt.where(DocExtractRule.status == status)
-        total = await session.scalar(cnt) or 0
-        rows = (await session.execute(
-            stmt.order_by(DocExtractRule.doc_type, DocExtractRule.version.desc())
-                .limit(limit).offset(offset)
-        )).scalars().all()
-        return [_to_rule_dict(r) for r in rows], total
-
-
-async def update_rule_draft(rule_id: int, *, fields: Optional[list] = None,
-                            prompt_extra: Optional[str] = None,
-                            reviewed_by: Optional[str] = None) -> dict:
-    """编辑规则,仅 draft 状态可改(否则抛 ValueError,端点转 409)。"""
-    async with async_session_maker() as session:
-        row = await session.get(DocExtractRule, rule_id)
-        if not row:
-            raise LookupError(f"规则不存在: {rule_id}")
-        if row.status != "draft":
-            raise ValueError(f"仅 draft 状态规则可编辑,当前状态: {row.status}")
-        if fields is not None:
-            row.fields = fields
-        if prompt_extra is not None:
-            row.prompt_extra = _clean_text(prompt_extra)
-        if reviewed_by is not None:
-            row.reviewed_by = reviewed_by
-        row.updated_at = datetime.now()
-        await session.commit()
-        await session.refresh(row)
-        return _to_rule_dict(row)
-
-
-async def activate_rule(rule_id: int, reviewed_by: Optional[str] = None) -> dict:
-    """激活规则:单事务内把同 doc_type 其他 active 置 disabled,本行置 active。"""
-    async with async_session_maker() as session:
-        row = await session.get(DocExtractRule, rule_id)
-        if not row:
-            raise LookupError(f"规则不存在: {rule_id}")
-        await session.execute(
-            sa_update(DocExtractRule)
-            .where(DocExtractRule.doc_type == row.doc_type,
-                   DocExtractRule.status == "active",
-                   DocExtractRule.id != rule_id)
-            .values(status="disabled", updated_at=datetime.now())
-        )
-        row.status = "active"
-        row.reviewed_at = datetime.now()
-        if reviewed_by is not None:
-            row.reviewed_by = reviewed_by
-        row.updated_at = datetime.now()
-        await session.commit()
-        await session.refresh(row)
-        return _to_rule_dict(row)
-
-
-async def disable_rule(rule_id: int) -> dict:
-    async with async_session_maker() as session:
-        row = await session.get(DocExtractRule, rule_id)
-        if not row:
-            raise LookupError(f"规则不存在: {rule_id}")
-        row.status = "disabled"
-        row.updated_at = datetime.now()
-        await session.commit()
-        await session.refresh(row)
-        return _to_rule_dict(row)
 
 
 # ==================== 结果 CRUD ====================
