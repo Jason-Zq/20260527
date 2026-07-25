@@ -31,6 +31,7 @@ const routes = [
   { path: '/external-api-logs', component: () => import('./components/ExternalApiLogsPage.vue') },
   { path: '/ai-api-calls', component: () => import('./components/AiApiCallsPage.vue') },
   { path: '/child-age-leads', component: () => import('./components/ChildAgeLeadsPage.vue') },
+  { path: '/doc-extract-rules', component: () => import('./components/DocExtractRulesPage.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

@@ -33,6 +33,7 @@
         <button class="nav-item" :class="{ active: isActive('/file-info') }" @click="go('/file-info')">文件信息</button>
         <button class="nav-item" :class="{ active: isActive('/profile') }" @click="go('/profile')">客户画像</button>
         <button class="nav-item" :class="{ active: isActive('/review-center') }" @click="go('/review-center')">复核中心</button>
+        <button class="nav-item" :class="{ active: isActive('/doc-extract-rules') }" @click="go('/doc-extract-rules')">提取规则</button>
 
         <!-- <el-dropdown trigger="click">
           <button class="nav-item more">更多工具</button>

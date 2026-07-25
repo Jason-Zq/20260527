@@ -737,6 +737,20 @@ export async function getAiApiCallDetail(rowId) {
   return response.data
 }
 
+/**
+ * 证件提取规则列表(doc_extract_rules)
+ * @param {Object} params - { doc_type, status, limit, offset }
+ */
+export async function listDocExtractRules(params = {}) {
+  const response = await axios.get(`${API_BASE}/doc-extract/rules`, { params })
+  return response.data
+}
+
+export async function getDocExtractRule(ruleId) {
+  const response = await axios.get(`${API_BASE}/doc-extract/rules/${ruleId}`)
+  return response.data
+}
+
 // ==================== 客户画像(Excel 导入) ====================
 
 /**
