@@ -11,13 +11,18 @@ from sqlalchemy.orm import undefer
 
 from db.ai_api_call_crud import _clean_text
 from db.engine import async_session_maker
-from db.models import ArchiveDetectFile, CustomerFile, ProfileImportTask
+from db.models import (
+    ArchiveDetectFile, CustomerFile, DocExtractResult, ProfileAsset,
+    ProfileImportTask, ProfilePerson, ProfilePersonField,
+)
 
 
 # ==================== 序列化 ====================
 
-def _to_task_dict(t: ProfileImportTask) -> dict:
-    return {
+def _to_task_dict(t: ProfileImportTask, *,
+                   asset_counts: Optional[dict[int, int]] = None,
+                   main_passport: Optional[dict[int, dict]] = None) -> dict:
+    base = {
         "id": t.id,
         "filename": t.filename,
         "client_name": t.client_name,
@@ -41,6 +46,13 @@ def _to_task_dict(t: ProfileImportTask) -> dict:
         "created_at": t.created_at.strftime("%Y-%m-%d %H:%M:%S") if t.created_at else "",
         "updated_at": t.updated_at.strftime("%Y-%m-%d %H:%M:%S") if t.updated_at else "",
     }
+    if asset_counts is not None and t.household_id:
+        base["asset_count"] = asset_counts.get(t.household_id, 0)
+    if main_passport is not None and t.household_id:
+        p = main_passport.get(t.household_id, {})
+        base["main_passport_issue_date"] = p.get("issue_date")
+        base["main_passport_expiry_date"] = p.get("expiry_date")
+    return base
 
 
 def _to_file_dict(f: CustomerFile, *, with_text: bool = False) -> dict:
@@ -150,7 +162,35 @@ async def list_import_tasks(*, status: Optional[str] = None, client_name: Option
             stmt.order_by(ProfileImportTask.created_at.desc(), ProfileImportTask.id.desc())
                 .limit(limit).offset(offset)
         )).scalars().all()
-        return [_to_task_dict(r) for r in rows], total
+
+        # 附加家庭资产数 + 户主护照签发/到期日期(表格快速筛查用)
+        hh_ids = {r.household_id for r in rows if r.household_id}
+        asset_counts: dict[int, int] = {}
+        main_passport: dict[int, dict] = {}
+        if hh_ids:
+            ac_rows = (await session.execute(
+                select(ProfileAsset.household_id, func.count(ProfileAsset.id))
+                .where(ProfileAsset.household_id.in_(hh_ids))
+                .group_by(ProfileAsset.household_id)
+            )).all()
+            asset_counts = {hid: n for hid, n in ac_rows}
+
+            pp_rows = (await session.execute(
+                select(ProfilePerson.household_id, ProfilePersonField.field, ProfilePersonField.value)
+                .join(ProfilePersonField, ProfilePersonField.person_id == ProfilePerson.id)
+                .where(ProfilePerson.is_main.is_(True),
+                       ProfilePerson.household_id.in_(hh_ids),
+                       ProfilePersonField.field.in_(("passport_issue_date", "passport_expiry_date")))
+            )).all()
+            for hid, field, value in pp_rows:
+                slot = main_passport.setdefault(hid, {})
+                if field == "passport_issue_date":
+                    slot["issue_date"] = value
+                elif field == "passport_expiry_date":
+                    slot["expiry_date"] = value
+
+        return [_to_task_dict(r, asset_counts=asset_counts, main_passport=main_passport)
+                for r in rows], total
 
 
 async def update_task_progress(task_id: int, **fields) -> None:
@@ -245,7 +285,7 @@ async def upsert_task_files(task_id: int, client_id: Optional[int], files: list)
 
 
 async def list_task_files(task_id: int, *, limit: int = 500, offset: int = 0) -> tuple[list[dict], int]:
-    """任务文件列表(不含 ocr_text 大字段)。"""
+    """任务文件列表(不含 ocr_text 大字段;带最新提取状态)。"""
     async with async_session_maker() as session:
         stmt = select(CustomerFile).where(CustomerFile.import_task_id == task_id)
         cnt = select(func.count(CustomerFile.id)).where(CustomerFile.import_task_id == task_id)
@@ -253,7 +293,41 @@ async def list_task_files(task_id: int, *, limit: int = 500, offset: int = 0) ->
         rows = (await session.execute(
             stmt.order_by(CustomerFile.id).limit(limit).offset(offset)
         )).scalars().all()
-        return [_to_file_dict(r) for r in rows], total
+        # 批量查每个文件最新一条提取结果的状态(DISTINCT ON 取 id 最大=最新)
+        latest_status: dict[int, str] = {}
+        if rows:
+            cfids = [r.id for r in rows]
+            sub = (
+                select(DocExtractResult.customer_file_id, DocExtractResult.status)
+                .where(DocExtractResult.customer_file_id.in_(cfids))
+                .order_by(DocExtractResult.customer_file_id, DocExtractResult.id.desc())
+                .distinct(DocExtractResult.customer_file_id)
+            )
+            for cfid, status in (await session.execute(sub)).all():
+                latest_status[cfid] = status
+        out = []
+        for r in rows:
+            d = _to_file_dict(r)
+            d["latest_extract_status"] = latest_status.get(r.id)
+            out.append(d)
+        return out, total
+
+
+async def list_person_files(person_id: int) -> list[dict]:
+    """该人员关联的文件(通过提取结果 write_stats.person_id 归因,按 id 升序)。"""
+    async with async_session_maker() as session:
+        cfids = (await session.execute(
+            select(DocExtractResult.customer_file_id)
+            .where(DocExtractResult.write_stats["person_id"].as_string() == str(person_id))
+            .distinct()
+        )).scalars().all()
+        if not cfids:
+            return []
+        rows = (await session.execute(
+            select(CustomerFile).where(CustomerFile.id.in_(cfids))
+            .order_by(CustomerFile.id)
+        )).scalars().all()
+        return [_to_file_dict(r) for r in rows]
 
 
 async def list_pending_files(task_id: int) -> list[dict]:

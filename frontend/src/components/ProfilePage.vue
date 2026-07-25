@@ -11,8 +11,7 @@
           accept=".xlsx"
           :http-request="handleUpload"
           :disabled="uploading"
-          style="display: inline-block; margin-right: 12px"
-        >
+          style="display: inline-block; margin-right: 12px">
           <el-button type="primary" :loading="uploading">
             <el-icon style="margin-right: 4px"><Upload /></el-icon>
             导入客户文件清单(.xlsx)
@@ -26,41 +25,61 @@
     </div>
 
     <div class="profile-main">
+      <section class="card filter-card">
+        <div class="filter-grid">
+          <el-select v-model="taskStatus" placeholder="状态" clearable size="small" style="width: 110px">
+            <el-option label="进行中" value="running" />
+            <el-option label="完成" value="done" />
+            <el-option label="失败" value="error" />
+          </el-select>
+          <el-input v-model="taskClientName" placeholder="客户名" clearable size="small" style="width: 180px" @keyup.enter="onTaskQuery" />
+          <el-button size="small" type="primary" @click="onTaskQuery">查询</el-button>
+          <el-button size="small" @click="onTaskReset">重置</el-button>
+        </div>
+      </section>
       <section class="card">
-        <div class="card-title">导入任务</div>
         <el-table :data="tasks" v-loading="loading" stripe empty-text="暂无任务,点击右上角导入 Excel 开始" style="width: 100%">
           <el-table-column label="ID" width="70" align="center" prop="id" />
           <el-table-column label="客户" min-width="100" show-overflow-tooltip prop="client_name" />
-          <el-table-column label="清单文件" min-width="180" show-overflow-tooltip prop="filename" />
-          <el-table-column label="状态" width="90" align="center">
+                    <el-table-column label="家庭资产" width="90" align="center">
             <template #default="{ row }">
-              <el-tag :type="taskTag(row.status)" size="small">{{ taskLabel(row.status) }}</el-tag>
+              <span :class="{ dim: !row.asset_count }">{{ row.asset_count || 0 }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="护照签发" width="110" align="center">
+            <template #default="{ row }">
+              <span v-if="row.main_passport_issue_date" class="mono">{{ row.main_passport_issue_date }}</span>
+              <span v-else class="dim">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="护照到期" width="110" align="center">
+            <template #default="{ row }">
+              <span v-if="row.main_passport_expiry_date"
+                    class="mono"
+                    :class="passportExpiryClass(row.main_passport_expiry_date)">
+                {{ row.main_passport_expiry_date }}
+              </span>
+              <span v-else class="dim">-</span>
             </template>
           </el-table-column>
           <el-table-column label="进度" width="110" align="center">
             <template #default="{ row }">{{ row.processed_files }}/{{ row.total_files }}</template>
           </el-table-column>
-          <el-table-column label="当前文件" min-width="150" show-overflow-tooltip>
-            <template #default="{ row }"><span class="dim">{{ row.current_file || '-' }}</span></template>
-          </el-table-column>
-          <el-table-column label="四类证件" min-width="170">
+          <el-table-column label="四类证件" min-width="210">
             <template #default="{ row }">
               <span class="type-counts">
                 身份证 {{ row.id_card_count }} · 户口 {{ row.hukou_count }} · 学位 {{ row.degree_cert_count }} · 出生 {{ row.birth_cert_count }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="提取" width="70" align="center" prop="extracted_count" />
-          <el-table-column label="待复核" width="80" align="center">
+          <el-table-column label="状态" width="90" align="center">
             <template #default="{ row }">
-              <span v-if="row.needs_review_count > 0" class="err-text" style="font-weight: 600">{{ row.needs_review_count }}</span>
-              <span v-else class="dim">0</span>
+              <el-tag :type="taskTag(row.status)" size="small">{{ taskLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="失败" width="70" align="center">
-            <template #default="{ row }">
-              <span :class="{ 'err-text': row.failed_count > 0 }">{{ row.failed_count }}</span>
-            </template>
+          <el-table-column label="清单文件" min-width="180" show-overflow-tooltip prop="filename" />
+          <el-table-column label="当前文件" min-width="100" show-overflow-tooltip>
+            <template #default="{ row }"><span class="dim">{{ row.current_file || '-' }}</span></template>
           </el-table-column>
           <el-table-column label="创建时间" min-width="150">
             <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
@@ -71,11 +90,22 @@
             </template>
           </el-table-column>
         </el-table>
+        <div class="pagination-row">
+          <el-pagination
+            v-model:current-page="taskPage"
+            v-model:page-size="taskPageSize"
+            :page-sizes="[10, 25, 50, 100]"
+            :total="taskTotal"
+            layout="total, sizes, prev, pager, next"
+            @current-change="loadTasks"
+            @size-change="onTaskSizeChange"
+          />
+        </div>
       </section>
     </div>
 
     <!-- 客户画像详情 -->
-    <el-dialog v-model="profileVisible" :title="`客户画像 · ${profile?.task?.client_name || ''}`" width="88%" top="4vh">
+    <el-dialog v-model="profileVisible" :title="`客户画像 · ${profile?.task?.client_name || ''}`" top="4vh" :modal="true" modal-class="side-drawer-overlay" :width="profileDialogWidth" :style="{ marginRight: profileShift > 0 ? (profileShift + 20) + 'px' : null }">
       <div v-if="profileLoading" style="padding: 40px; text-align: center"><el-icon class="is-loading"><Loading /></el-icon> 加载中...</div>
       <div v-else-if="profile" class="profile-body">
         <div class="task-summary">
@@ -91,18 +121,13 @@
 
         <el-tabs v-model="activeTab">
           <el-tab-pane label="客户档案" name="profile">
-            <div v-if="profile.task.needs_review_count > 0" class="review-banner" @click="openReviewCenter">
-              <el-icon><WarningFilled /></el-icon>
-              <span>{{ profile.task.needs_review_count }} 个文件待复核(含识别失败/质量差/无法归属),点击前往复核中心</span>
-              <el-icon><ArrowRight /></el-icon>
-            </div>
             <div v-if="passportAlerts.length" class="expiry-banner" :class="{ expired: passportAlerts.some(a => a.level === 'expired') }">
               <el-icon><WarningFilled /></el-icon>
               <span>护照到期提醒:{{ passportAlerts.map(a => a.text).join(';') }}</span>
             </div>
             <div v-if="conflictAlerts.length" class="conflict-banner">
               <el-icon><WarningFilled /></el-icon>
-              <span>字段冲突提醒(多来源不一致,只提示不改值):{{ conflictAlerts.join(';') }},详见成员卡字段「冲突」标</span>
+              <span>多源字段提醒(多来源不一致,点「多源」核对):{{ conflictAlerts.join(';') }},详见成员卡字段「多源」标</span>
             </div>
             <div class="person-grid">
               <section v-for="p in profile.persons" :key="p.id" class="card inner-card person-card">
@@ -111,32 +136,51 @@
                   <div class="person-title">
                     <span class="person-name">{{ p.name }}</span>
                     <el-tag v-if="p.is_main" type="primary" size="small" effect="dark">户主</el-tag>
+                    <template v-else-if="editingPersonId === p.id">
+                      <el-select v-model="editRelation" size="small" style="width: 110px" placeholder="关系">
+                        <el-option v-for="r in relationOptions" :key="r" :label="r" :value="r" />
+                      </el-select>
+                    </template>
                     <el-tag v-else-if="p.relation_to_main === '待确认'" type="warning" size="small">待确认</el-tag>
                     <el-tag v-else size="small" effect="plain">{{ p.relation_to_main }}</el-tag>
                   </div>
+                  <div class="person-actions">
+                    <template v-if="editingPersonId === p.id">
+                      <el-button size="small" type="success" :loading="editSaving" @click="saveEdit(p)">保存</el-button>
+                      <el-button size="small" @click="cancelEdit">取消</el-button>
+                    </template>
+                    <template v-else>
+                      <el-button size="small" type="primary" @click="startEdit(p)">编辑</el-button>
+                    </template>
+                    <el-button size="small" @click="openPersonFiles(p)">查看文件</el-button>
+                  </div>
                 </div>
                 <div class="person-fields">
-                  <div v-for="f in p.fields" :key="f.field" class="field-row">
-                    <span class="field-label">{{ f.label || f.field }}</span>
-                    <span class="field-value">
-                      {{ f.value || '-' }}
-                      <el-tooltip v-if="f.status === 'corrected'" content="人工已修正" placement="top">
-                        <span class="status-mark corrected">已修正</span>
-                      </el-tooltip>
-                      <span v-else-if="f.status === 'confirmed'" class="status-mark confirmed">已确认</span>
-                      <span v-if="f.layer === 'declared'" class="layer-tag">自报</span>
-                      <span v-if="f.field === 'passport_expiry_date' && p.passport_expiry && p.passport_expiry.level !== 'ok'"
-                            class="expiry-tag" :class="p.passport_expiry.level">{{ expiryTagText(p.passport_expiry) }}</span>
-                      <el-tooltip v-if="p.field_conflicts && p.field_conflicts[f.field]" placement="top">
-                        <template #content>
-                          <div v-for="(v, i) in p.field_conflicts[f.field].values" :key="i" style="max-width: 360px">
-                            {{ v.value }} ← {{ v.sources.map(s => s.source).join('、') }}
-                          </div>
-                        </template>
-                        <span class="conflict-tag">冲突</span>
-                      </el-tooltip>
-                    </span>
-                  </div>
+                  <template v-for="grp in groupPersonFields(p.fields)" :key="grp.group">
+                    <div class="field-group-title">{{ grp.label }}</div>
+                    <div class="field-group-grid">
+                      <div v-for="f in grp.items" :key="f.field" class="field-row">
+                        <span class="field-label">{{ f.label || f.field }}</span>
+                        <span class="field-value">
+                          <el-input v-if="editingPersonId === p.id" v-model="editBuffer[f.field]" size="small" />
+                          <template v-else>
+                            {{ f.value || '-' }}
+                            <span v-if="f.status === 'confirmed'" class="status-mark confirmed">已确认</span>
+                            <span v-if="f.field === 'passport_expiry_date' && p.passport_expiry && p.passport_expiry.level !== 'ok'"
+                                  class="expiry-tag" :class="p.passport_expiry.level">{{ expiryTagText(p.passport_expiry) }}</span>
+                            <el-tooltip v-if="p.field_conflicts && p.field_conflicts[f.field]" placement="top">
+                              <template #content>
+                                <div v-for="(v, i) in p.field_conflicts[f.field].values" :key="i" style="max-width: 360px">
+                                  {{ v.value }} ← {{ v.sources.map(s => s.source).join('、') }}
+                                </div>
+                              </template>
+                              <span class="conflict-tag clickable" @click.stop="openConflict(p, f)">多源</span>
+                            </el-tooltip>
+                          </template>
+                        </span>
+                      </div>
+                    </div>
+                  </template>
                   <div v-if="!p.fields.length" class="dim" style="padding: 8px 0">暂无提取字段</div>
                 </div>
               </section>
@@ -144,14 +188,18 @@
             </div>
 
             <section v-if="profile.assets?.length" class="card inner-card">
-              <div class="card-title">家庭资产({{ profile.assets.length }})</div>
+              <div class="card-title asset-card-title">
+                <span>家庭资产({{ profile.assets.length }})</span>
+                <el-button size="small" type="primary" :loading="dedupePreviewLoading" @click="openDedupePreview">
+                  <el-icon style="margin-right: 4px"><MagicStick /></el-icon>AI 处理
+                </el-button>
+              </div>
               <section v-for="a in profile.assets" :key="a.id" class="card inner-card person-card asset-card">
                 <div class="person-head">
                   <div class="person-avatar asset">产</div>
                   <div class="person-title">
                     <span class="person-name">{{ a.name }}</span>
                     <el-tag size="small" effect="plain">{{ a.asset_type }}</el-tag>
-                    <el-tag v-if="a.status === 'corrected'" type="primary" size="small" effect="dark">已修正</el-tag>
                   </div>
                 </div>
                 <div class="person-fields">
@@ -165,35 +213,6 @@
                   </div>
                 </div>
               </section>
-            </section>
-
-            <section class="card inner-card">
-              <div class="card-title">提取明细({{ profile.extraction_total }})</div>
-              <el-table :data="profile.extractions" stripe size="small" empty-text="暂无提取记录">
-                <el-table-column label="文件编码" min-width="100" show-overflow-tooltip prop="file_id" />
-                <el-table-column label="类型" width="90" align="center">
-                  <template #default="{ row }">{{ docTypeLabel(row.doc_type) }}</template>
-                </el-table-column>
-                <el-table-column label="状态" width="110" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="extractTag(row.status)" size="small">{{ extractLabel(row) }}</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="规则版本" width="90" align="center">
-                  <template #default="{ row }">{{ row.rule_version != null ? 'v' + row.rule_version : '-' }}</template>
-                </el-table-column>
-                <el-table-column label="写入统计" min-width="180">
-                  <template #default="{ row }">{{ writeStatsText(row.write_stats) }}</template>
-                </el-table-column>
-                <el-table-column label="时间" min-width="150">
-                  <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
-                </el-table-column>
-                <el-table-column label="操作" width="90" align="center">
-                  <template #default="{ row }">
-                    <el-button size="small" type="primary" link @click="openExtractDetail(row)">详情</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
             </section>
           </el-tab-pane>
 
@@ -247,13 +266,21 @@
           </el-tab-pane>
 
           <el-tab-pane :label="`文件清单(${filesTotal})`" name="files">
-            <el-table :data="files" v-loading="filesLoading" stripe size="small" empty-text="暂无文件">
+            <el-table :data="files" v-loading="filesLoading" stripe size="small" empty-text="暂无文件" @row-click="selectFile" highlight-current-row>
               <el-table-column label="文件编码" min-width="95" show-overflow-tooltip prop="file_code" />
               <el-table-column label="文件名" min-width="170" show-overflow-tooltip prop="filename" />
               <el-table-column label="文件夹" min-width="110" show-overflow-tooltip prop="folder_name" />
               <el-table-column label="状态" width="90" align="center">
                 <template #default="{ row }">
                   <el-tag :type="fileTag(row.status)" size="small">{{ fileLabel(row.status) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="提取" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.latest_extract_status === 'done'" type="success" size="small">完成</el-tag>
+                  <el-tag v-else-if="row.latest_extract_status === 'error'" type="danger" size="small">失败</el-tag>
+                  <el-tag v-else-if="row.latest_extract_status === 'skipped'" type="info" size="small">跳过</el-tag>
+                  <span v-else class="dim">-</span>
                 </template>
               </el-table-column>
               <el-table-column label="OCR 来源" width="100" align="center">
@@ -271,22 +298,12 @@
                   <span v-else class="dim">-</span>
                 </template>
               </el-table-column>
-              <el-table-column label="复核" width="110" align="center">
-                <template #default="{ row }">
-                  <el-tag v-if="row.review_status === 'needs_review'" type="danger" size="small" class="review-link" @click="openReviewCenter(row)">
-                    {{ reviewReasonLabel(row.review_reason) }}
-                  </el-tag>
-                  <span v-else-if="row.review_status === 'reviewed'" class="dim">已复核</span>
-                  <span v-else class="dim">-</span>
-                </template>
-              </el-table-column>
               <el-table-column label="错误" min-width="150" show-overflow-tooltip>
                 <template #default="{ row }"><span class="err-text">{{ row.error_msg || '' }}</span></template>
               </el-table-column>
-              <el-table-column label="操作" width="170" align="center" fixed="right">
+              <el-table-column label="操作" width="110" align="center" fixed="right">
                 <template #default="{ row }">
-                  <el-button size="small" type="primary" link :disabled="!(row.char_count > 0)" @click="openOcr(row)">查看 OCR</el-button>
-                  <el-button size="small" type="primary" link @click="openRaw(row)">原件</el-button>
+                  <el-button size="small" type="primary" link @click.stop="selectFile(row)">查看详情</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -308,83 +325,153 @@
 
     <!-- 复核中心抽屉(共享组件;复核中心页用同一组件,不传 importTaskId 即全局队列) -->
     <ReviewDrawer ref="reviewDrawerRef" :import-task-id="profile?.task?.id || null" @done="onReviewDone" />
+    <PersonEditDrawer v-model:visible="personFilesVisible" v-model:drawerWidth="personFilesDrawerWidth" :person-id="personFilesPid" />
 
-    <!-- 原件查看弹窗(图片) -->
-    <el-dialog v-model="rawVisible" title="原件" width="70%" top="4vh" append-to-body>
-      <div style="text-align: center">
-        <img v-if="rawState.url" :src="rawState.url" style="max-width: 100%; max-height: 76vh" alt="原件" />
-      </div>
+    <!-- 文件详情弹窗:原件 | OCR 文本 | 提取结果详情 -->
+    <el-dialog v-model="fileDetailVisible" title="文件详情" width="90%" top="4vh" append-to-body>
+            <div v-if="selectedFile" class="file-detail-layout">
+              <div class="pane">
+                <div class="pane-title">原件 · {{ ocrFileData?.filename || selectedFile.filename || selectedFile.file_code }}</div>
+                <div class="pane-body raw-view">
+                  <img v-if="rawState.url && rawState.isImage" :src="rawState.url" class="raw-img" alt="原件" />
+                  <iframe v-else-if="rawState.url" :src="rawState.url" class="raw-iframe" title="原件"></iframe>
+                  <span v-else class="dim">{{ rawState.hint || '原件加载中…' }}</span>
+                </div>
+              </div>
+              <div class="pane">
+                <div class="pane-title">OCR 文本</div>
+                <pre class="pane-body ocr-view">{{ ocrFileData?.ocr_text || '(无文本)' }}</pre>
+              </div>
+              <div class="pane">
+                <div class="pane-title">提取结果详情</div>
+                <div class="pane-body extract-view">
+                  <div v-if="!fileExtractions.length" class="dim">该文件无提取记录</div>
+                  <template v-else>
+                    <div class="extract-list">
+                      <div v-for="ex in fileExtractions" :key="ex.id" class="extract-item" :class="{ active: selectedExtraction?.id === ex.id }" @click="selectedExtraction = ex">
+                        <span class="dim mono">v{{ ex.rule_version ?? '-' }}</span>
+                        <el-tag size="small" :type="extractTag(ex.status)">{{ extractLabel(ex) }}</el-tag>
+                        <span class="dim">{{ writeStatsText(ex.write_stats) }}</span>
+                      </div>
+                    </div>
+                    <div v-if="selectedExtraction" class="extract-detail">
+                      <div class="json-block">
+                        <div class="json-title">提取字段</div>
+                        <pre>{{ prettyJson(selectedExtraction.extracted) }}</pre>
+                      </div>
+                      <div class="json-block">
+                        <div class="json-title">写入明细</div>
+                        <pre>{{ prettyJson(selectedExtraction.mapped) }}</pre>
+                      </div>
+                      <div class="json-block">
+                        <div class="json-title">写入统计</div>
+                        <pre>{{ prettyJson(selectedExtraction.write_stats) }}</pre>
+                      </div>
+                      <div v-if="selectedExtraction.error_msg" class="json-block">
+                        <div class="json-title err-text">错误</div>
+                        <pre class="err-text">{{ selectedExtraction.error_msg }}</pre>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
     </el-dialog>
 
-    <!-- OCR 全文弹窗(原件 | 文本 对照) -->
-    <el-dialog v-model="ocrVisible" title="OCR 对照" width="85%" top="4vh" append-to-body>
-      <div v-if="ocrLoading" style="padding: 40px; text-align: center"><el-icon class="is-loading"><Loading /></el-icon> 加载中...</div>
-      <div v-else-if="ocrFile" class="ocr-body">
-        <div class="detail-meta">
-          <span><b>文件:</b> {{ ocrFile.filename || '-' }}</span>
-          <span><b>编码:</b> {{ ocrFile.file_code }}</span>
-          <span><b>类型:</b> {{ docTypeLabel(ocrFile.doc_type) }}</span>
-          <span><b>字符数:</b> {{ ocrFile.char_count ?? '-' }}</span>
-          <el-tag v-if="ocrFile.ocr_source === 'reused'" type="warning" size="small">复用留底检测的脱敏文本,证件号等已打码</el-tag>
-          <el-tag v-else-if="ocrFile.ocr_source === 'fresh'" type="success" size="small">新识别原文</el-tag>
+    <!-- 多源字段核对弹窗:上编辑+确定,下来源文件原件并列 -->
+    <el-drawer v-model="conflictVisible" title="多源字段核对" :size="conflictDrawerWidth + 'px'" :modal="false" modal-class="side-drawer-overlay" append-to-body>
+      <div class="drawer-resize-handle" @mousedown="startResizeConflict"></div>
+      <div v-if="conflictData" class="conflict-dialog-body">
+        <div class="conflict-edit">
+          <span class="conflict-field-label">{{ conflictData.label }}</span>
+          <el-input v-model="conflictEditValue" size="small" style="flex: 1" />
+          <el-button type="primary" size="small" :loading="conflictSaving" @click="saveConflict">确定</el-button>
         </div>
-        <div class="ocr-panes">
-          <div class="pane">
-            <div class="pane-title">原件</div>
-            <div class="pane-body raw-view">
-              <img v-if="rawState.url && rawState.isImage" :src="rawState.url" class="raw-img" alt="原件" />
-              <el-button v-else-if="rawState.url" type="primary" size="small" @click="openRawInTab">在新窗口打开 PDF/文件</el-button>
-              <span v-else class="dim">{{ rawState.hint }}</span>
+        <el-divider />
+        <div class="conflict-sources">
+          <div class="conflict-source-list">
+            <div v-for="src in conflictSources" :key="src.customer_file_id" class="conflict-source-item" :class="{ active: selectedSource?.customer_file_id === src.customer_file_id }" @click="selectedSource = src">
+              {{ src.source }}
+            </div>
+            <div v-if="!conflictSources.length" class="dim">无来源文件</div>
+          </div>
+          <div class="conflict-source-view raw-view">
+            <img v-if="selectedSource?.url && selectedSource.isImage" :src="selectedSource.url" class="raw-img" alt="原件" />
+            <iframe v-else-if="selectedSource?.url && selectedSource.isPdf" :src="selectedSource.url" class="raw-iframe" title="原件"></iframe>
+            <span v-else-if="selectedSource?.url" class="dim">该文件类型({{ selectedSource.mime || '未知' }})不支持在线预览</span>
+            <span v-else class="dim">{{ selectedSource?.hint || '选择左侧文件查看' }}</span>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- AI 家庭资产合并预览 -->
+    <el-dialog v-model="dedupeVisible" title="AI 家庭资产合并预览" width="70%" top="6vh" append-to-body>
+      <div v-if="dedupePreviewLoading" style="padding: 40px; text-align: center">
+        <el-icon class="is-loading"><Loading /></el-icon> AI 分析中,请稍候…
+      </div>
+      <div v-else-if="!dedupeGroups.length" class="dim" style="padding: 24px; text-align: center">
+        AI 分析未发现明显重复,当前家庭资产无需合并。
+      </div>
+      <div v-else>
+        <div class="dim" style="margin-bottom: 12px">
+          AI 建议合并以下 {{ dedupeGroups.length }} 组资产,请核对合并后的信息,确认无误再点「确认合并」。
+          <span v-if="dedupeManualCount" class="warn-text">(另有 {{ dedupeManualCount }} 条人工修正过的资产不参与合并)</span>
+        </div>
+        <section v-for="(g, gi) in dedupeGroups" :key="gi" class="card dedupe-group">
+          <div class="card-title">
+            <span>合并组 #{{ gi + 1 }}</span>
+            <span class="dim" style="font-weight: normal; margin-left: 10px">{{ g.reason }}</span>
+          </div>
+          <div class="dedupe-src">
+            <div class="dedupe-src-title dim">被合并的原始资产 ({{ g.merge_ids.length + 1 }} 条):</div>
+            <div v-for="aid in [g.keep_id, ...g.merge_ids]" :key="aid" class="dedupe-src-item">
+              <el-tag v-if="aid === g.keep_id" type="success" size="small">保留</el-tag>
+              <el-tag v-else type="info" size="small">合并</el-tag>
+              <span class="mono dim">id={{ aid }}</span>
+              <span>{{ dedupeAssetOf(aid)?.name || '(未知)' }}</span>
+              <span class="dim">证号 {{ dedupeAssetOf(aid)?.attrs?.cert_no || '-' }}</span>
             </div>
           </div>
-          <div class="pane">
-            <div class="pane-title">OCR 文本</div>
-            <pre class="pane-body ocr-view">{{ ocrFile.ocr_text || '(无文本)' }}</pre>
+          <div class="dedupe-target">
+            <div class="dedupe-target-title">合并后:</div>
+            <div class="field-row">
+              <span class="field-label">名称</span>
+              <span class="field-value">{{ g.merged_name || '-' }}</span>
+            </div>
+            <div v-for="(v, k) in g.merged_attrs" :key="k" class="field-row">
+              <span class="field-label">{{ assetAttrLabel(k) }}</span>
+              <span class="field-value">{{ v }}</span>
+            </div>
           </div>
-        </div>
+        </section>
       </div>
+      <template #footer>
+        <el-button @click="dedupeVisible = false">取消</el-button>
+        <el-button type="primary" :loading="dedupeCommitLoading"
+                   :disabled="!dedupeGroups.length" @click="commitDedupe">
+          确认合并
+        </el-button>
+      </template>
     </el-dialog>
 
-    <!-- 提取结果 JSON 详情 -->
-    <el-dialog v-model="extractVisible" title="提取结果详情" width="70%" top="6vh" append-to-body>
-      <div v-if="extractDetail" class="extract-detail">
-        <div class="detail-meta">
-          <span><b>文件编码:</b> {{ extractDetail.file_id || '-' }}</span>
-          <span><b>类型:</b> {{ docTypeLabel(extractDetail.doc_type) }}</span>
-          <span><b>规则:</b> {{ extractDetail.rule_id ? `#${extractDetail.rule_id} v${extractDetail.rule_version}` : '-' }}</span>
-          <span><b>耗时:</b> {{ extractDetail.elapsed_ms != null ? (extractDetail.elapsed_ms / 1000).toFixed(1) + 's' : '-' }}</span>
-        </div>
-        <div class="json-block">
-          <div class="json-title">提取字段(extracted)</div>
-          <pre>{{ prettyJson(extractDetail.extracted) }}</pre>
-        </div>
-        <div class="json-block">
-          <div class="json-title">写入明细(mapped)</div>
-          <pre>{{ prettyJson(extractDetail.mapped) }}</pre>
-        </div>
-        <div class="json-block">
-          <div class="json-title">写入统计(write_stats)</div>
-          <pre>{{ prettyJson(extractDetail.write_stats) }}</pre>
-        </div>
-        <div v-if="extractDetail.error_msg" class="json-block">
-          <div class="json-title err-text">错误</div>
-          <pre class="err-text">{{ extractDetail.error_msg }}</pre>
-        </div>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowRight, Loading, Refresh, Upload, WarningFilled } from '@element-plus/icons-vue'
+import { Loading, MagicStick, Refresh, Upload, WarningFilled } from '@element-plus/icons-vue'
+import PersonEditDrawer from './PersonEditDrawer.vue'
 import ReviewDrawer from './ReviewDrawer.vue'
-import { docTypeLabel, fieldLabelOf, reviewReasonLabel } from '../utils/labels'
+import { docTypeLabel, fieldLabelOf, groupPersonFields } from '../utils/labels'
 import {
+  correctPersonField,
+  dedupeAssetsCommit,
+  dedupeAssetsPreview,
   fetchCustomerFileRawUrl,
   getCustomerFile,
-  getDocExtractResult,
+  listPersonFiles,
   getProfileTaskMatrix,
   getProfileTaskProfile,
   importProfileExcel,
@@ -394,6 +481,11 @@ import {
 
 const tasks = ref([])
 const loading = ref(false)
+const taskStatus = ref('')
+const taskClientName = ref('')
+const taskPage = ref(1)
+const taskPageSize = ref(10)
+const taskTotal = ref(0)
 const uploading = ref(false)
 
 const profileVisible = ref(false)
@@ -406,33 +498,139 @@ const filesLoading = ref(false)
 const filesPage = ref(1)
 const filesPageSize = ref(10)
 
-const extractVisible = ref(false)
-const extractDetail = ref(null)
+const selectedFile = ref(null)
+const ocrFileData = ref(null)
+const selectedExtraction = ref(null)
+const fileDetailVisible = ref(false)
+const conflictVisible = ref(false)
+const conflictDrawerWidth = ref(Math.round(window.innerWidth / 3))
+const personFilesVisible = ref(false)
+const personFilesDrawerWidth = ref(Math.round(window.innerWidth / 3))
+const personFilesPid = ref(null)
+const profileShift = computed(() => {
+  if (conflictVisible.value) return conflictDrawerWidth.value
+  if (personFilesVisible.value) return personFilesDrawerWidth.value
+  return 0
+})
+const profileDialogWidth = computed(() => {
+  if (profileShift.value > 0) return (window.innerWidth - profileShift.value - 40) + 'px'
+  return '88%'
+})
+const conflictData = ref(null)
+const conflictEditValue = ref('')
+const conflictSources = ref([])
+const selectedSource = ref(null)
+const conflictSaving = ref(false)
 
-const ocrVisible = ref(false)
-const ocrLoading = ref(false)
-const ocrFile = ref(null)
+// AI 家庭资产合并预览
+const dedupeVisible = ref(false)
+const dedupePreviewLoading = ref(false)
+const dedupeCommitLoading = ref(false)
+const dedupeGroups = ref([])
+const dedupeAssetsAll = ref([])  // 预览拉的资产快照,用于展示原始信息
+const dedupeManualCount = ref(0)
 
-const rawVisible = ref(false)
+function dedupeAssetOf(aid) {
+  return dedupeAssetsAll.value.find(a => a.id === aid)
+}
+
+async function openDedupePreview() {
+  const hid = profile.value?.task?.household_id
+  if (!hid) {
+    ElMessage.warning('该任务无家庭上下文')
+    return
+  }
+  dedupeVisible.value = true
+  dedupePreviewLoading.value = true
+  dedupeGroups.value = []
+  dedupeAssetsAll.value = []
+  dedupeManualCount.value = 0
+  try {
+    const r = await dedupeAssetsPreview(hid)
+    dedupeAssetsAll.value = r.assets || []
+    dedupeGroups.value = r.groups || []
+    dedupeManualCount.value = (r.assets || []).filter(a => a.status !== 'ai').length
+    if (r.fallback) ElMessage.warning('AI 分析异常已降级,请稍后再试')
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message)
+    dedupeVisible.value = false
+  } finally {
+    dedupePreviewLoading.value = false
+  }
+}
+
+async function commitDedupe() {
+  const hid = profile.value?.task?.household_id
+  if (!hid || !dedupeGroups.value.length) return
+  dedupeCommitLoading.value = true
+  try {
+    const r = await dedupeAssetsCommit(hid, dedupeGroups.value.map(g => ({
+      keep_id: g.keep_id,
+      merge_ids: g.merge_ids,
+      merged_attrs: g.merged_attrs || {},
+      merged_name: g.merged_name || '',
+      reason: g.reason || '',
+    })))
+    ElMessage.success(`已合并 ${r.merged_groups} 组,删除 ${r.deleted_rows} 条重复资产`)
+    dedupeVisible.value = false
+    if (profile.value?.task?.id) await reloadProfile(profile.value.task.id)
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message)
+  } finally {
+    dedupeCommitLoading.value = false
+  }
+}
+const fileExtractions = computed(() => {
+  const sid = selectedFile.value?.id
+  if (!sid) return []
+  return (profile.value?.extractions || []).filter((e) => e.customer_file_id === sid)
+})
 const rawState = ref({ url: '', isImage: false, hint: '原件加载中…', _revoke: null })
 
 const reviewDrawerRef = ref(null)
+const editingPersonId = ref(null)
+const editBuffer = ref({})
+const editRelation = ref('')
+const editSaving = ref(false)
+
+const relationOptions = ['配偶', '子', '女', '父', '母', '待确认']
 
 const matrix = ref({ persons: [], columns: [], cells: {} })
 const matrixLoading = ref(false)
 
-let pollTimer = null
-
 async function loadTasks() {
   loading.value = true
   try {
-    const data = await listProfileTasks({ limit: 50 })
+    const data = await listProfileTasks({
+      status: taskStatus.value || undefined,
+      client_name: taskClientName.value || undefined,
+      limit: taskPageSize.value,
+      offset: (taskPage.value - 1) * taskPageSize.value,
+    })
     tasks.value = data.items
+    taskTotal.value = data.total
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || err.message)
   } finally {
     loading.value = false
   }
+}
+
+function onTaskQuery() {
+  taskPage.value = 1
+  loadTasks()
+}
+
+function onTaskReset() {
+  taskStatus.value = ''
+  taskClientName.value = ''
+  taskPage.value = 1
+  loadTasks()
+}
+
+function onTaskSizeChange() {
+  taskPage.value = 1
+  loadTasks()
 }
 
 async function handleUpload({ file }) {
@@ -453,8 +651,16 @@ async function openProfile(row) {
   profileVisible.value = true
   activeTab.value = 'profile'
   filesPage.value = 1
+  selectedFile.value = null
   await reloadProfile(row.id)
 }
+
+watch(profileVisible, (v) => {
+  if (!v) {
+    conflictVisible.value = false
+    personFilesVisible.value = false
+  }
+})
 
 async function reloadProfile(taskId) {
   profileLoading.value = true
@@ -524,7 +730,8 @@ async function onCellClick(person, col) {
     const target = cell.files.find((f) => f.review_status === 'needs_review') || cell.files[0]
     if (target) await openReviewCenter({ id: target.id })
   } else if (cell.status === 'ok' && cell.files.length) {
-    await openOcr({ id: cell.files[0].id })
+    activeTab.value = 'files'
+    await selectFile({ id: cell.files[0].id })
   }
 }
 
@@ -553,27 +760,82 @@ function onFilesSizeChange() {
   onFilesPageChange()
 }
 
-async function openExtractDetail(row) {
+async function selectFile(row) {
+  selectedFile.value = row
+  fileDetailVisible.value = true
+  ocrFileData.value = null
+  selectedExtraction.value = null
+  loadRaw(row.id)
   try {
-    extractDetail.value = await getDocExtractResult(row.id)
-    extractVisible.value = true
+    ocrFileData.value = await getCustomerFile(row.id)
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || err.message)
   }
+  const exs = fileExtractions.value
+  if (exs.length) selectedExtraction.value = exs[0]
 }
 
-async function openOcr(row) {
-  ocrVisible.value = true
-  ocrLoading.value = true
-  ocrFile.value = null
-  loadRaw(row.id)
+// ---- 多源字段核对(冲突解决) ----
+
+function startResizeConflict(e) {
+  e.preventDefault()
+  const onMove = (ev) => {
+    const w = window.innerWidth - ev.clientX
+    conflictDrawerWidth.value = Math.min(Math.max(w, 300), window.innerWidth - 120)
+  }
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+
+async function openConflict(p, f) {
+  const conflict = p.field_conflicts[f.field]
+  conflictData.value = { personId: p.id, field: f.field, label: f.label || f.field }
+  conflictEditValue.value = f.value || ''
+  conflictVisible.value = true
+  // 收集所有来源文件(按 customer_file_id 去重)
+  const sources = []
+  const seen = new Set()
+  for (const v of conflict.values) {
+    for (const s of v.sources) {
+      if (s.customer_file_id && !seen.has(s.customer_file_id)) {
+        seen.add(s.customer_file_id)
+        sources.push({ customer_file_id: s.customer_file_id, source: s.source, url: '', isImage: false, isPdf: false, mime: '', hint: '加载中…' })
+      }
+    }
+  }
+  conflictSources.value = sources
+  selectedSource.value = sources[0] || null
+  // 并行加载原件
+  for (const src of sources) {
+    fetchCustomerFileRawUrl(src.customer_file_id).then((raw) => {
+      src.url = raw.blobUrl
+      src.isImage = (raw.mime || '').startsWith('image/')
+      src.isPdf = (raw.mime || '').includes('pdf')
+      src.mime = raw.mime
+      src._revoke = raw.revoke
+    }).catch(() => { src.hint = '原件不可用' })
+  }
+}
+
+async function saveConflict() {
+  conflictSaving.value = true
   try {
-    ocrFile.value = await getCustomerFile(row.id)
+    await correctPersonField(conflictData.value.personId, { [conflictData.value.field]: conflictEditValue.value })
+    ElMessage.success('已更新')
+    conflictVisible.value = false
+    if (profile.value?.task?.id) await reloadProfile(profile.value.task.id)
   } catch (err) {
-    ocrVisible.value = false
     ElMessage.error(err.response?.data?.detail || err.message)
   } finally {
-    ocrLoading.value = false
+    conflictSaving.value = false
   }
 }
 
@@ -595,29 +857,47 @@ async function loadRaw(fileId) {
   }
 }
 
-async function openRaw(row) {
-  try {
-    const raw = await fetchCustomerFileRawUrl(row.id)
-    if ((raw.mime || '').startsWith('image/')) {
-      if (rawState.value._revoke) rawState.value._revoke()
-      rawState.value = { url: raw.blobUrl, isImage: true, hint: '', _revoke: raw.revoke }
-      rawVisible.value = true
-    } else {
-      window.open(raw.blobUrl, '_blank')  // blob URL 随页面生命周期释放
-    }
-  } catch (err) {
-    ElMessage.error(err.response?.data?.detail || '原件不可用')
-  }
-}
-
-function openRawInTab() {
-  if (rawState.value.url) window.open(rawState.value.url, '_blank')
-}
-
 // ---- 复核中心(抽屉已抽为 ReviewDrawer 组件,全局复核中心页复用) ----
 
 function openReviewCenter(targetItem = null) {
   reviewDrawerRef.value?.open(targetItem)
+}
+
+function openPersonFiles(p) {
+  personFilesPid.value = p.id
+  personFilesVisible.value = true
+}
+
+function startEdit(p) {
+  editingPersonId.value = p.id
+  editBuffer.value = Object.fromEntries((p.fields || []).map((f) => [f.field, f.value || '']))
+  editRelation.value = p.is_main ? '' : (p.relation_to_main || '待确认')
+}
+
+function cancelEdit() {
+  editingPersonId.value = null
+  editBuffer.value = {}
+  editRelation.value = ''
+}
+
+async function saveEdit(p) {
+  editSaving.value = true
+  try {
+    const relationChanged = !p.is_main && editRelation.value && editRelation.value !== p.relation_to_main
+    await correctPersonField(
+      p.id, editBuffer.value, undefined,
+      relationChanged ? editRelation.value : undefined,
+    )
+    ElMessage.success('已保存')
+    editingPersonId.value = null
+    editBuffer.value = {}
+    editRelation.value = ''
+    if (profile.value?.task?.id) await reloadProfile(profile.value.task.id)
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message)
+  } finally {
+    editSaving.value = false
+  }
 }
 
 function onReviewDone() {
@@ -625,23 +905,21 @@ function onReviewDone() {
   if (profile.value?.task?.id) reloadProfile(profile.value.task.id)
 }
 
-function startPolling() {
-  pollTimer = setInterval(async () => {
-    const hasRunning = tasks.value.some((t) => t.status === 'running')
-    if (hasRunning) {
-      await loadTasks()
-      if (profileVisible.value && profile.value?.task?.status === 'running') {
-        await reloadProfile(profile.value.task.id)
-      }
-    }
-  }, 3000)
-}
-
 function taskTag(s) {
   return { running: 'warning', done: 'success', error: 'danger' }[s] || 'info'
 }
 function taskLabel(s) {
   return { running: '进行中', done: '完成', error: '失败' }[s] || s
+}
+function passportExpiryClass(dateStr) {
+  // 与画像弹窗一致的 180 天预警阈值,过期红色/临期橙色
+  if (!dateStr) return ''
+  const d = Date.parse(dateStr)
+  if (isNaN(d)) return ''
+  const days = Math.floor((d - Date.now()) / 86400000)
+  if (days < 0) return 'err-text'
+  if (days <= 180) return 'warn-text'
+  return ''
 }
 function fileTag(s) {
   return { done: 'success', error: 'danger', fetching: 'warning', ocr: 'warning', pending: 'info' }[s] || 'info'
@@ -696,47 +974,67 @@ function prettyJson(v) {
 
 onMounted(() => {
   loadTasks()
-  startPolling()
-})
-onBeforeUnmount(() => {
-  if (pollTimer) clearInterval(pollTimer)
 })
 </script>
 
 <style scoped>
 .profile-page {
-  padding: 16px 20px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #f0f2f8;
+  overflow: hidden;
 }
 .profile-header {
+  height: 56px;
+  flex-shrink: 0;
+  padding: 0 24px;
+  background: #fff;
+  border-bottom: 1px solid #e8ebf5;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
+}
+.profile-main {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 18px 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 .profile-title {
-  font-size: 18px;
-  font-weight: 600;
   display: flex;
   align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e293b;
 }
 .title-indicator {
   display: inline-block;
-  width: 4px;
-  height: 18px;
-  background: #409eff;
+  width: 3px;
+  height: 16px;
+  background: linear-gradient(180deg, #409eff, #337ecc);
   border-radius: 2px;
-  margin-right: 8px;
 }
 .card {
   background: #fff;
-  border: 1px solid #e4e7ed;
-  border-radius: 8px;
-  padding: 14px 16px;
+  border: 1px solid #e8ebf5;
+  border-radius: 12px;
+  padding: 16px 18px;
 }
 .card-title {
   font-size: 14px;
   font-weight: 600;
   margin-bottom: 10px;
+}
+.filter-grid {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 .inner-card {
   margin-bottom: 14px;
@@ -749,6 +1047,48 @@ onBeforeUnmount(() => {
 }
 .err-text {
   color: #f56c6c;
+}
+.warn-text {
+  color: #e6a23c;
+}
+.asset-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.dedupe-group {
+  margin-bottom: 14px;
+  background: #f8f9fb;
+}
+.dedupe-src {
+  margin-bottom: 12px;
+}
+.dedupe-src-title {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.dedupe-src-item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 13px;
+  border-bottom: 1px dashed #ebeef5;
+}
+.dedupe-src-item:last-child {
+  border-bottom: none;
+}
+.dedupe-target {
+  background: #fff;
+  padding: 10px 12px;
+  border: 1px solid #c2e7b0;
+  border-radius: 6px;
+}
+.dedupe-target-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #67c23a;
+  margin-bottom: 6px;
 }
 .type-counts {
   font-size: 12px;
@@ -781,24 +1121,6 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
-}
-
-/* ---- 复核横幅 ---- */
-.review-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  margin-bottom: 14px;
-  background: #fef0f0;
-  border: 1px solid #fde2e2;
-  border-radius: 8px;
-  color: #f56c6c;
-  font-size: 13px;
-  cursor: pointer;
-}
-.review-banner:hover {
-  background: #fde2e2;
 }
 
 /* ---- 护照到期提醒 ---- */
@@ -855,20 +1177,84 @@ onBeforeUnmount(() => {
   background: #fdf6ec;
   color: #b88230;
   border: 1px solid #faecd8;
-  cursor: help;
+}
+.conflict-tag.clickable {
+  cursor: pointer;
+}
+.drawer-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: col-resize;
+  background: #dcdfe6;
+  z-index: 10;
+}
+.drawer-resize-handle:hover,
+.drawer-resize-handle:active {
+  background: #409eff;
+}
+.conflict-dialog-body {
+  padding: 0 4px;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 140px);
+}
+.conflict-edit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.conflict-field-label {
+  width: 110px;
+  flex-shrink: 0;
+  color: #909399;
+  font-size: 13px;
+}
+.conflict-sources {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.conflict-source-list {
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  overflow-y: auto;
+  height: 100%;
+}
+.conflict-source-item {
+  padding: 8px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #f0f0f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conflict-source-item:hover {
+  background: #f5f7fa;
+}
+.conflict-source-item.active {
+  background: #ecf5ff;
+  color: #409eff;
+}
+.conflict-source-view {
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  height: 100%;
+  padding: 10px;
+  background: #f5f7fa;
 }
 
 /* ---- 成员卡 ---- */
 .person-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 14px;
   margin-bottom: 14px;
-}
-@media (max-width: 1200px) {
-  .person-grid {
-    grid-template-columns: 1fr;
-  }
 }
 .person-card {
   margin-bottom: 0 !important;
@@ -880,6 +1266,14 @@ onBeforeUnmount(() => {
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid #ebeef5;
+}
+.person-title {
+  flex: 1;
+}
+.person-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .person-avatar {
   width: 40px;
@@ -902,6 +1296,24 @@ onBeforeUnmount(() => {
   font-weight: 600;
   margin-right: 8px;
 }
+.field-group-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 2px 16px;
+}
+.field-group-title {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid #ebeef5;
+  font-size: 12px;
+  color: #909399;
+  font-weight: 600;
+}
+.field-group-title:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
 .field-row {
   display: flex;
   padding: 3px 0;
@@ -916,14 +1328,6 @@ onBeforeUnmount(() => {
   color: #303133;
   word-break: break-all;
 }
-.layer-tag {
-  margin-left: 6px;
-  font-size: 11px;
-  color: #909399;
-  border: 1px solid #dcdfe6;
-  border-radius: 3px;
-  padding: 0 4px;
-}
 .status-mark {
   margin-left: 6px;
   font-size: 11px;
@@ -933,9 +1337,6 @@ onBeforeUnmount(() => {
 }
 .status-mark.confirmed {
   color: #67c23a;
-}
-.review-link {
-  cursor: pointer;
 }
 
 /* ---- OCR 对照弹窗面板 ---- */
@@ -974,6 +1375,42 @@ onBeforeUnmount(() => {
   word-break: break-all;
   user-select: text;
   margin: 0;
+}
+.raw-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+/* ---- 文件清单三栏详情 ---- */
+.file-detail-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+.extract-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e4e7ed;
+}
+.extract-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.extract-item:hover {
+  background: #ecf5ff;
+}
+.extract-item.active {
+  background: #d9ecff;
 }
 
 /* ---- 完备度矩阵 ---- */
@@ -1067,5 +1504,15 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   word-break: break-all;
   user-select: text;
+}
+</style>
+
+<style>
+.side-drawer-overlay {
+  pointer-events: none;
+}
+.side-drawer-overlay .el-drawer,
+.side-drawer-overlay .el-dialog {
+  pointer-events: auto;
 }
 </style>

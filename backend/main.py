@@ -3211,6 +3211,12 @@ class ReviewCorrectPayload(BaseModel):
     reviewed_by: Optional[str] = Field(None, description="复核人")
 
 
+class PersonFieldPayload(BaseModel):
+    fields: dict = Field(default_factory=dict, description="修正字段 {field: value},value 为空表示清除")
+    relation: Optional[str] = Field(None, description="与户主关系:配偶/子/女/父/母/待确认(户主行不允许改)")
+    reviewed_by: Optional[str] = Field(None, description="操作人")
+
+
 @app.get(
     "/api/review/files",
     tags=["复核"],
@@ -3331,6 +3337,87 @@ async def review_file_dismiss(file_id: int, payload: ReviewActionPayload):
             result["id"], status="dismissed", reviewed_by=payload.reviewed_by)
     await customer_file_crud.set_file_reviewed(file_id)
     return {"ok": True}
+
+
+@app.post(
+    "/api/profile/persons/{person_id}/field",
+    tags=["客户画像"],
+    summary="人工修正人员字段(永远覆盖,status=corrected;供多源解决/人员编辑)",
+)
+async def person_field_correct(person_id: int, payload: PersonFieldPayload):
+    from db import profile_crud
+    if payload.relation is not None:
+        await profile_crud.set_person_relation(person_id, payload.relation)
+    for field, value in payload.fields.items():
+        try:
+            await profile_crud.correct_person_field(
+                person_id, field, value, corrected_by=payload.reviewed_by)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"字段 {field}: {e}")
+    return {"ok": True, "person_id": person_id}
+
+
+@app.get(
+    "/api/profile/persons/{person_id}/files",
+    tags=["客户画像"],
+    summary="人员的关联文件(按提取归因 person_id 查)",
+)
+async def person_files(person_id: int):
+    from db import customer_file_crud
+    return await customer_file_crud.list_person_files(person_id)
+
+
+class AssetMergeGroup(BaseModel):
+    keep_id: int = Field(..., description="保留的资产 id")
+    merge_ids: list[int] = Field(..., description="被合并的资产 id 列表(至少 1 个)")
+    merged_attrs: dict = Field(default_factory=dict, description="合并后的 attrs")
+    merged_name: Optional[str] = Field(None, description="合并后的资产名")
+    reason: Optional[str] = Field(None, description="AI 判定理由(仅存档)")
+
+
+class AssetMergePayload(BaseModel):
+    groups: list[AssetMergeGroup] = Field(..., description="合并组列表")
+
+
+@app.post(
+    "/api/profile/households/{household_id}/dedupe-assets/preview",
+    tags=["客户画像"],
+    summary="AI 分析家庭资产是否有重复,返回合并建议(不写库)",
+)
+async def dedupe_assets_preview(household_id: int):
+    import asyncio
+    from db import profile_crud
+    import llm_service
+
+    assets = await profile_crud.list_assets(household_id)
+    # 只让 AI 分析 status='ai' 的资产;人工修正过的直接列出但不参与合并
+    ai_assets = [a for a in assets if a.get("status") == "ai"]
+    if len(ai_assets) < 2:
+        return {"groups": [], "assets": assets, "message": "AI 生成资产少于 2 条,无需分析"}
+
+    result = await asyncio.to_thread(
+        llm_service.merge_household_assets, ai_assets,
+        client_code=str(household_id))
+    return {
+        "groups": result.get("groups") or [],
+        "assets": assets,
+        "fallback": result.get("_fallback", False),
+    }
+
+
+@app.post(
+    "/api/profile/households/{household_id}/dedupe-assets/commit",
+    tags=["客户画像"],
+    summary="按前端确认后的合并方案执行合并(事务写入,合并前会校验)",
+)
+async def dedupe_assets_commit(household_id: int, payload: AssetMergePayload):
+    from db import profile_crud
+    try:
+        merged, deleted = await profile_crud.merge_assets(
+            household_id, [g.model_dump() for g in payload.groups])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "merged_groups": merged, "deleted_rows": deleted}
 
 
 @app.get(

@@ -1303,6 +1303,186 @@ def extract_doc_fields(text: str, rule: dict, **context) -> dict:
     return {"fields": out}
 
 
+def judge_asset_duplicate(new_attrs: dict, candidates: list, **context) -> dict:
+    """AI 判定新资产是否与家庭已有资产重复。
+
+    入参:
+        new_attrs: 本次提取的字段字典 {address, cert_no, area, ...}
+        candidates: 家庭内同类型已有资产列表,每行是 ProfileAsset 类实例或 dict,
+                    至少含 id, name, attrs 三个字段。
+        **context: 透传给 _call_llm 用于 ai_api_calls 埋点(如 household_id 等)。
+
+    返回:
+        {"match_id": int|null, "confidence": 0-100, "reason": "简述判定依据",
+         "_fallback": bool} - 失败/无候选时返回 match_id=None + _fallback=True。
+    """
+    fallback = {"match_id": None, "confidence": 0, "reason": "无候选或 AI 判定失败", "_fallback": True}
+    if not candidates:
+        return fallback
+
+    # 构造候选列表文本,每行截断避免过长
+    c_lines = []
+    for i, c in enumerate(candidates):
+        cid = c.id if hasattr(c, "id") else c.get("id")
+        cattrs = c.attrs if hasattr(c, "attrs") else c.get("attrs", {}) or {}
+        cname_raw = c.name if hasattr(c, "name") else c.get("name")
+        cname = cattrs.get("address") or cattrs.get("cert_no") or cname_raw or ""
+        ccert = cattrs.get("cert_no") or ""
+        carea = cattrs.get("area") or ""
+        c_lines.append(
+            f"  候选{i+1}: id={cid}\n"
+            f"    坐落: {str(cname)[:60]}\n"
+            f"    证号: {str(ccert)[:30]}\n"
+            f"    面积: {carea}"
+        )
+
+    n_addr = new_attrs.get("address") or ""
+    n_cert = new_attrs.get("cert_no") or ""
+    n_area = new_attrs.get("area") or ""
+
+    prompt = f"""你是房产去重助手。判断【新资产】是否与下方【已有资产列表】中的任一条为"同一处房产"。
+
+判定原则(按优先级):
+  1. 产权证号/不动产权证号:如果两个证号的数字序列完全一致,不管前缀字母/中文/括号差异,
+     必是同一处(如:杨2015021659 == HFDYZI(2015) No.021659 → 同一处)。
+  2. 坐落地址核心:路名+门牌号+单元/室号相同即为同一处,忽略差异包括:
+     - 是否带"上海市杨浦区"等行政区前缀
+     - 是否带"(复式)""(精装修)"等户型或状态修饰
+     - 末尾带"室"与不带"室"
+     - 空格、全角半角、大小写差异
+  3. 辅助佐证:面积、登记日期、土地使用期限、共有情况等字段高度吻合时加强判定。
+  4. 如果"新资产"与多个候选都疑似重复,选匹配度最高的那一个,返回 confidence 最高。
+
+请严格返回 JSON 对象,不要输出任何额外解释文字:
+  {{
+    "match_id": 整数(匹配的候选 id),或 null(与所有候选都不重复),
+    "confidence": 0-100 的整数,
+    "reason": "一句话简述判定依据(30字内)"
+  }}
+
+【新资产】
+  坐落: {n_addr[:80]}
+  证号: {n_cert[:30]}
+  面积: {n_area}
+
+【已有资产列表】
+{chr(10).join(c_lines)}
+"""
+
+    try:
+        raw = _call_llm(prompt, operation="asset_dedup", max_retries=2, **context)
+        data = _load_llm_json(raw)
+        # 类型保证
+        match_id = data.get("match_id")
+        confidence = data.get("confidence") or 0
+        if confidence and not isinstance(confidence, int):
+            confidence = int(str(confidence))
+        reason = data.get("reason") or ""
+        return {"match_id": match_id, "confidence": confidence, "reason": reason, "_fallback": False}
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return fallback
+
+
+def merge_household_assets(assets: list, **context) -> dict:
+    """AI 全局分析家庭内所有资产,输出建议合并的资产组。
+
+    入参:
+        assets: list[dict],每条至少含 {id, name, attrs}(profile_assets 行序列化后)。
+        **context: 透传给 _call_llm 用于 ai_api_calls 埋点(household_id 等)。
+
+    返回:
+        {"groups": [{"keep_id": int, "merge_ids": [int,...],
+                     "merged_attrs": {...}, "merged_name": str, "reason": str}],
+         "_fallback": bool}
+        - 只返回真正需要合并的组(至少 1 个 merge_id)。
+        - LLM 失败/JSON 错误 → {"groups": [], "_fallback": True}(前端提示"无需合并")。
+    """
+    fallback = {"groups": [], "_fallback": True}
+    if not assets or len(assets) < 2:
+        return {"groups": [], "_fallback": False}
+
+    # 构造资产列表文本
+    a_lines = []
+    for a in assets:
+        aid = a.get("id")
+        aname = a.get("name") or ""
+        aattrs = a.get("attrs") or {}
+        a_lines.append(
+            f"  id={aid}\n"
+            f"    坐落: {aattrs.get('address', aname)[:80]}\n"
+            f"    证号: {str(aattrs.get('cert_no', ''))[:40]}\n"
+            f"    面积: {aattrs.get('area', '')}\n"
+            f"    登记日期: {aattrs.get('register_date', '')}\n"
+            f"    共有情况: {aattrs.get('co_ownership', '')}\n"
+            f"    完整 attrs: {json.dumps(aattrs, ensure_ascii=False)[:400]}"
+        )
+
+    prompt = f"""你是家庭资产去重助手。下方是某家庭全部房产资产,请分析其中哪些是"同一处房产但被录成了多条",并输出合并方案。
+
+判定原则:
+  1. 产权证号数字序列一致 → 同一处(如 杨2015021659 与 HFDYZI(2015) No.021659,数字都是 2015021659)
+  2. 坐落地址核心(路名+门牌号+单元/室号)相同 → 同一处,忽略以下差异:
+     - 是否带"上海市杨浦区"等行政区前缀
+     - 是否带"(复式)"等户型/状态修饰
+     - "室"字尾缀有无
+     - 空格、全角半角
+  3. 面积、登记日期高度吻合作为佐证。
+
+合并 attrs 时:
+  - 相同 key 有多值时取信息更完整/规范的那份(如带完整地址的、带明确共有情况的)
+  - 不同 key 直接合并(多份资产的字段可以互相补充)
+  - 保留最有代表性的 name(优先带完整"上海市xx区xxx路xx号xx室"的)
+
+严格返回 JSON,groups 是数组,每组代表一次合并:
+  {{
+    "groups": [
+      {{
+        "keep_id": <保留哪个 id(建议选信息最全的)>,
+        "merge_ids": [<被合并的 id, 至少 1 个>],
+        "merged_attrs": {{"address": "...", "cert_no": "...", ...合并后的完整属性}},
+        "merged_name": "合并后的资产名(通常等于 merged_attrs.address)",
+        "reason": "简短说明为何判定同一处(30字内)"
+      }}
+    ]
+  }}
+
+若确实全部是不同资产、无需合并 → 返回 {{"groups": []}}。不要杜撰不存在的 id。
+
+【家庭全部资产】
+{chr(10).join(a_lines)}
+"""
+
+    try:
+        raw = _call_llm(prompt, operation="asset_merge", max_retries=2, **context)
+        data = _load_llm_json(raw)
+        groups = data.get("groups") or []
+        # 过滤明显不合法的组:keep_id/merge_ids 类型、id 必须都在 assets 里
+        known_ids = {a.get("id") for a in assets}
+        clean_groups = []
+        for g in groups:
+            keep = g.get("keep_id")
+            mids = g.get("merge_ids") or []
+            if not isinstance(keep, int) or keep not in known_ids:
+                continue
+            valid_mids = [m for m in mids if isinstance(m, int) and m in known_ids and m != keep]
+            if not valid_mids:
+                continue
+            clean_groups.append({
+                "keep_id": keep,
+                "merge_ids": valid_mids,
+                "merged_attrs": g.get("merged_attrs") or {},
+                "merged_name": g.get("merged_name") or "",
+                "reason": g.get("reason") or "",
+            })
+        return {"groups": clean_groups, "_fallback": False}
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return fallback
+
+
 def draft_extract_rule(doc_type: str, target_columns: str, **context) -> dict:
     """AI 起草某证件类型的提取规则(字段定义 + 目标列映射)。
 

@@ -90,14 +90,14 @@ def test_profile_domain():
             m = await profile_crud.find_person_match(hh_id, None, None, "LIU XIAOJUAN")
             assert m == {"person_id": None, "matched_by": None}, m
 
-            # ---- declared 不覆盖 verified ----
+            # ---- declared 与 verified 同等,可更新(不因来源层跳过) ----
             res = await profile_crud.apply_extracted_fields_v2(hh_id,
                 {"person_id": main_id, "matched_by": "id_number"}, [
                     {"key": "birth_date", "value": "1969/03/26", "column": "birth_date", "layer": "declared"},
                     {"key": "gender", "value": "女", "column": "gender"},  # AI 可更新 AI 值
                 ])
             actions = {m["field"]: m["action"] for m in res["mapped"]}
-            assert actions["birth_date"] == "skipped_layer", actions
+            assert actions["birth_date"] == "updated", actions
             assert actions["gender"] == "updated", actions
 
             # ---- 人工修正后 AI 不再覆盖 ----
@@ -142,36 +142,95 @@ def test_profile_domain():
             except ValueError:
                 pass
 
-            # ---- 资产写入(entity=asset):新建 → 同证号去重更新 → masked 跳过 ----
-            aw = await profile_crud.apply_extracted_asset(hh_id, main_id, [
-                {"key": "address", "value": "政和路388弄35号301室"},
-                {"key": "area", "value": "344.31"},
-                {"key": "cert_no", "value": "杨2015021659"},
-                {"key": "account", "value": "[银行卡]"},  # masked 不入 attrs
-            ], source_file_id=1)
-            assert aw["stats"]["asset_created"] == 1, aw
-            asset_id = aw["asset_id"]
-            assert asset_id
-            assets = await profile_crud.list_assets(hh_id)
-            assert len(assets) == 1, assets
-            a = assets[0]
-            assert a["name"] == "政和路388弄35号301室" and a["owner_person_id"] == main_id, a
-            assert a["attrs"].get("cert_no") == "杨2015021659" and "account" not in a["attrs"], a
+            # ---- 资产写入(entity=asset):新建 → AI 判定去重 → masked 跳过 ----
+            # 方案 C:去重靠 llm_service.judge_asset_duplicate,测试环境 mock 掉 LLM
+            import llm_service
+            _orig_judge = llm_service.judge_asset_duplicate
+            _judge_calls: list = []
+            _judge_response: dict = {"match_id": None, "confidence": 0, "reason": "mock 默认不匹配", "_fallback": False}
 
-            # 同证号再提取:去重更新不新建
-            aw2 = await profile_crud.apply_extracted_asset(hh_id, main_id, [
-                {"key": "address", "value": "政和路388弄35号301室"},
-                {"key": "cert_no", "value": "杨2015021659"},
-                {"key": "right_type", "value": "公寓"},
-            ], source_file_id=2)
-            assert aw2["stats"]["asset_updated"] == 1 and aw2["asset_id"] == asset_id, aw2
-            assets = await profile_crud.list_assets(hh_id)
-            assert len(assets) == 1, assets
-            assert assets[0]["attrs"].get("right_type") == "公寓", assets[0]["attrs"]
+            def _mock_judge(new_attrs, candidates, **ctx):
+                _judge_calls.append({"attrs": dict(new_attrs), "n_candidates": len(candidates),
+                                     "candidate_ids": [c.id for c in candidates]})
+                resp = dict(_judge_response)
+                # 若响应指定 candidate_index,把它翻译成实际 candidates 里的 id
+                if resp.get("_use_candidate_index") is not None:
+                    idx = resp["_use_candidate_index"]
+                    if 0 <= idx < len(candidates):
+                        resp["match_id"] = candidates[idx].id
+                    resp.pop("_use_candidate_index")
+                return resp
 
-            # 全空不建行
-            aw3 = await profile_crud.apply_extracted_asset(hh_id, None, [{"key": "area", "value": None}])
-            assert aw3["asset_id"] is None and aw3["stats"]["asset_created"] == 0, aw3
+            llm_service.judge_asset_duplicate = _mock_judge
+
+            try:
+                # 首次:无候选,LLM 不调
+                aw = await profile_crud.apply_extracted_asset(hh_id, main_id, [
+                    {"key": "address", "value": "政和路388弄35号301室"},
+                    {"key": "area", "value": "344.31"},
+                    {"key": "cert_no", "value": "杨2015021659"},
+                    {"key": "account", "value": "[银行卡]"},  # masked 不入 attrs
+                ], source_file_id=1)
+                assert aw["stats"]["asset_created"] == 1, aw
+                assert len(_judge_calls) == 0, f"首次无候选不该调 LLM: {_judge_calls}"
+                asset_id = aw["asset_id"]
+                assert asset_id
+                assets = await profile_crud.list_assets(hh_id)
+                assert len(assets) == 1, assets
+                a = assets[0]
+                assert a["name"] == "政和路388弄35号301室" and a["owner_person_id"] == main_id, a
+                assert a["attrs"].get("cert_no") == "杨2015021659" and "account" not in a["attrs"], a
+
+                # AI 判定命中 candidates[0]:去重更新不新建
+                _judge_response = {"match_id": None, "confidence": 95, "reason": "mock 命中",
+                                   "_fallback": False, "_use_candidate_index": 0}
+                aw2 = await profile_crud.apply_extracted_asset(hh_id, main_id, [
+                    {"key": "address", "value": "上海市杨浦区政和路388弄35号301室"},
+                    {"key": "cert_no", "value": "HFDYZI(2015) No.021659"},
+                    {"key": "right_type", "value": "公寓"},
+                ], source_file_id=2)
+                assert aw2["stats"]["asset_updated"] == 1 and aw2["asset_id"] == asset_id, aw2
+                assert len(_judge_calls) == 1 and _judge_calls[0]["n_candidates"] == 1
+                assets = await profile_crud.list_assets(hh_id)
+                assert len(assets) == 1, assets
+                assert assets[0]["attrs"].get("right_type") == "公寓", assets[0]["attrs"]
+
+                # 全空不建行(LLM 不调)
+                aw3 = await profile_crud.apply_extracted_asset(hh_id, None, [{"key": "area", "value": None}])
+                assert aw3["asset_id"] is None and aw3["stats"]["asset_created"] == 0, aw3
+                assert len(_judge_calls) == 1, "全空不该调 LLM"
+
+                # 低置信(<60):新建
+                _judge_response = {"match_id": None, "confidence": 55, "reason": "mock 低置信",
+                                   "_fallback": False, "_use_candidate_index": 0}
+                aw4 = await profile_crud.apply_extracted_asset(hh_id, main_id, [
+                    {"key": "address", "value": "怀疑相关的一处房"},
+                ], source_file_id=3)
+                assert aw4["stats"]["asset_created"] == 1 and aw4["asset_id"] != asset_id, aw4
+
+                # AI 判定为不同资产:新建
+                _judge_response = {"match_id": None, "confidence": 0, "reason": "mock 不匹配",
+                                   "_fallback": False}
+                aw5 = await profile_crud.apply_extracted_asset(hh_id, main_id, [
+                    {"key": "address", "value": "闵行区龙茗路100号501室"},
+                    {"key": "cert_no", "value": "沪2020000001"},
+                ], source_file_id=4)
+                assert aw5["stats"]["asset_created"] == 1, aw5
+                assets = await profile_crud.list_assets(hh_id)
+                assert len(assets) == 3, assets
+
+                # LLM 异常降级(_fallback=True):新建
+                _judge_response = {"match_id": None, "confidence": 0, "reason": "LLM 超时",
+                                   "_fallback": True}
+                aw6 = await profile_crud.apply_extracted_asset(hh_id, main_id, [
+                    {"key": "address", "value": "政和路388弄35号301(复式)"},
+                    {"key": "cert_no", "value": "杨2015021659"},
+                ], source_file_id=5)
+                assert aw6["stats"]["asset_created"] == 1, aw6
+                assets = await profile_crud.list_assets(hh_id)
+                assert len(assets) == 4, assets
+            finally:
+                llm_service.judge_asset_duplicate = _orig_judge
 
             # ---- 案件时间线(entity=case):建案 → 里程碑 upsert → 状态派生 → case_type 占位替换 ----
             cw = await profile_crud.apply_case_milestones(hh_id, [

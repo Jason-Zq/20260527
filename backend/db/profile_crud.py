@@ -3,7 +3,7 @@
 画像 v2 独立领域模型:不写 clients/family_members 老表,仅 legacy_client_id 软关联。
 字段写入语义(证据链 + 人工主权 + 可信度分层):
   - 已有字段 status 为 confirmed/corrected(人工) → 一律不覆盖(skipped_confirmed)
-  - 已有字段 layer=verified(官方证件),新值 layer=declared(自报) → 不覆盖(skipped_layer)
+  - declared(自报)与 verified(官方证件)同等对待,不因来源层跳过(layer 列仅作信息留存)
   - 其余情况 AI 值可更新 AI 值(written/updated)
   - 复核修正(correct_person_field) → 永远覆盖,status='corrected'
 """
@@ -27,7 +27,7 @@ PROFILE_FIELDS: dict[str, tuple[str, str]] = {
     "name": ("姓名", "verified"),
     "name_en": ("拼音/英文名", "verified"),
     "gender": ("性别", "verified"),
-    "birth_date": ("出生日期(YYYY-MM-DD)", "verified"),
+    "birth_date": ("出生日期", "verified"),
     "birth_place": ("出生地", "verified"),
     "nationality": ("国籍", "verified"),
     "ethnicity": ("民族", "verified"),
@@ -35,21 +35,21 @@ PROFILE_FIELDS: dict[str, tuple[str, str]] = {
     "hukou_address": ("户籍地址", "verified"),
     "marital_status": ("婚姻状况", "verified"),
     "passport_no": ("护照号", "verified"),
-    "passport_issue_date": ("护照签发日期(YYYY-MM-DD)", "verified"),
-    "passport_expiry_date": ("护照到期日期(YYYY-MM-DD)", "verified"),
+    "passport_issue_date": ("护照签发日期", "verified"),
+    "passport_expiry_date": ("护照到期日期", "verified"),
     "birth_cert_no": ("出生医学证编号", "verified"),
     "birth_hospital": ("出生医院", "verified"),
-    "marriage_date": ("结婚登记日期(YYYY-MM-DD)", "verified"),
+    "marriage_date": ("结婚登记日期", "verified"),
     "marriage_authority": ("结婚登记机关", "verified"),
     "marriage_cert_no": ("结婚证编号", "verified"),
     "no_crime_cert_no": ("无犯罪记录证明编号", "verified"),
-    "no_crime_issue_date": ("无犯罪证明开具日期(YYYY-MM-DD)", "verified"),
+    "no_crime_issue_date": ("无犯罪证明开具日期", "verified"),
     "approval_no": ("批复号/获批卡号", "verified"),
-    "approval_date": ("批复/签发日期(YYYY-MM-DD)", "verified"),
+    "approval_date": ("批复/签发日期", "verified"),
     "school_name": ("学校名", "verified"),
     "major": ("专业", "verified"),
     "degree": ("学位", "verified"),
-    "graduation_date": ("毕业日期(YYYY-MM-DD)", "verified"),
+    "graduation_date": ("毕业日期", "verified"),
     "graduation_cert_no": ("毕业证编号", "verified"),
     "degree_cert_no": ("学位证编号", "verified"),
     # declared 层(客户自报,如 KYC 表)
@@ -284,7 +284,7 @@ def collect_field_conflicts(samples: list) -> dict:
     同一人同一字段出现 ≥2 个不同归一化值即冲突;values 按归一化值分组列出全部来源。
     """
     by_key: dict[tuple, dict] = {}
-    for person_id, field, raw_value, source, doc_type in samples:
+    for person_id, field, raw_value, source, doc_type, cfid in samples:
         if not person_id or field not in _CROSS_CHECK_FIELDS:
             continue
         norm = _normalize_field_value(field, raw_value)
@@ -292,7 +292,7 @@ def collect_field_conflicts(samples: list) -> dict:
             continue
         variants = by_key.setdefault((person_id, field), {})
         entry = variants.setdefault(norm, {"value": str(raw_value).strip(), "sources": []})
-        s = {"source": source, "doc_type": doc_type}
+        s = {"source": source, "doc_type": doc_type, "customer_file_id": cfid}
         if s not in entry["sources"]:
             entry["sources"].append(s)
     out: dict[int, dict] = {}
@@ -341,7 +341,7 @@ async def attach_field_conflicts(persons: list[dict], household_id: int) -> list
             key = m.get("key")
             if key not in extracted:
                 continue
-            samples.append((pid, field, extracted.get(key), source, r.doc_type))
+            samples.append((pid, field, extracted.get(key), source, r.doc_type, r.customer_file_id))
     conflicts = collect_field_conflicts(samples)
     for p in persons:
         p["field_conflicts"] = conflicts.get(p["id"], {})
@@ -496,9 +496,6 @@ async def apply_extracted_fields_v2(household_id: int, match: dict, field_items:
             if row is not None and row.status in _HUMAN_STATUSES:
                 mapped.append({**entry, "action": "skipped_confirmed"})
                 continue
-            if row is not None and row.layer == "verified" and layer == "declared":
-                mapped.append({**entry, "action": "skipped_layer"})
-                continue
             if row is not None and (row.value or "") == value:
                 mapped.append({**entry, "action": "skipped_same"})
                 continue
@@ -577,8 +574,11 @@ async def apply_extracted_asset(household_id: int, owner_person_id: Optional[int
                                 source_file_id: Optional[int] = None) -> dict:
     """把 entity=asset 的提取字段写入 profile_assets(attrs JSONB 存 key:value)。
 
-    去重: attrs->>'cert_no' 命中 → 复用该行;否则按 (asset_type, name) 命中;
-    已有行 status='ai' 才可被 AI 更新(人工 confirmed/corrected 不动)。
+    去重(方案 C:纯 AI 判定):
+      - 家庭内同 asset_type 无候选 → 直接新建(0 次 LLM)
+      - 有候选 → llm_service.judge_asset_duplicate 判定,match_id + confidence≥60 才合并
+      - LLM 失败/无结果 → 保底新建(不阻塞主流程)
+      - 已有行 status='ai' 才可被 AI 更新(人工 confirmed/corrected 不动)
     返回 {asset_id, mapped, stats}
     """
     attrs: dict[str, str] = {}
@@ -594,22 +594,35 @@ async def apply_extracted_asset(household_id: int, owner_person_id: Optional[int
         return {"asset_id": None, "mapped": [], "stats": stats}
 
     name = attrs.get("address") or attrs.get("cert_no") or asset_type
-    cert_no = attrs.get("cert_no")
     mapped = [{"key": k, "field": f"asset:{k}", "action": "asset_field"} for k in attrs]
 
     async with async_session_maker() as session:
+        # 拉家庭内同类型全部候选
+        candidates = list((await session.scalars(
+            select(ProfileAsset).where(
+                ProfileAsset.household_id == household_id,
+                ProfileAsset.asset_type == asset_type))).all())
+
         row = None
-        if cert_no:
-            row = await session.scalar(
-                select(ProfileAsset).where(
-                    ProfileAsset.household_id == household_id,
-                    ProfileAsset.attrs["cert_no"].astext == cert_no))
-        if row is None:
-            row = await session.scalar(
-                select(ProfileAsset).where(
-                    ProfileAsset.household_id == household_id,
-                    ProfileAsset.asset_type == asset_type,
-                    ProfileAsset.name == name))
+        dedup_info: dict = {}
+        if candidates:
+            # 调 LLM 判定是否与已有资产重复(同步函数,包在 to_thread 里避免阻塞事件循环)
+            import asyncio
+            import llm_service
+            dedup_info = await asyncio.to_thread(
+                llm_service.judge_asset_duplicate, attrs, candidates,
+                task_id=str(source_file_id) if source_file_id else None)
+            match_id = dedup_info.get("match_id")
+            confidence = dedup_info.get("confidence") or 0
+            if match_id and confidence >= 60:
+                row = next((c for c in candidates if c.id == match_id), None)
+            mapped.append({
+                "key": "asset", "field": "asset:dedup",
+                "action": "dedup_matched" if row else "dedup_new",
+                "match_id": match_id, "confidence": confidence,
+                "reason": dedup_info.get("reason", ""),
+            })
+
         if row is None:
             row = ProfileAsset(
                 household_id=household_id, owner_person_id=owner_person_id,
@@ -656,6 +669,64 @@ async def list_assets(household_id: int) -> list[dict]:
             .order_by(ProfileAsset.id)
         )).scalars().all()
         return [_to_asset_dict(a) for a in rows]
+
+
+async def merge_assets(household_id: int, groups: list[dict]) -> tuple[int, int]:
+    """执行资产合并,返回 (合并的组数, 删除的行数)。
+
+    groups: [{keep_id, merge_ids, merged_attrs, merged_name}]
+    安全校验:
+      - keep_id / merge_ids 必须都属于该 household
+      - 所有 keep_id / merge_ids 都必须是 status='ai' (人工修正过的不动)
+      - 同一条不得在多个组出现(每个资产最多参与一次)
+      - 每个组至少有 1 个 merge_id
+    """
+    if not groups:
+        return 0, 0
+
+    async with async_session_maker() as session:
+        all_ids = set()
+        for g in groups:
+            all_ids.add(g["keep_id"])
+            all_ids.update(g["merge_ids"])
+        all_rows = (await session.execute(
+            select(ProfileAsset).where(ProfileAsset.id.in_(all_ids))
+        )).scalars().all()
+        by_id = {a.id: a for a in all_rows}
+
+        # 校验
+        if len(all_rows) != len(all_ids):
+            missing = all_ids - set(by_id.keys())
+            raise ValueError(f"部分资产 id 不存在: {sorted(missing)}")
+        for a in all_rows:
+            if a.household_id != household_id:
+                raise ValueError(f"资产 {a.id} 不属于目标家庭")
+            if a.status != "ai":
+                raise ValueError(f"资产 {a.id} status={a.status},非 AI 生成,禁止合并(人工修正过的需手动处理)")
+
+        seen = set()
+        for g in groups:
+            if not g["merge_ids"]:
+                raise ValueError(f"组 {g['keep_id']} 无合并目标")
+            ids_in_group = {g["keep_id"]} | set(g["merge_ids"])
+            if seen & ids_in_group:
+                raise ValueError(f"资产 id 重复出现在多个组: {sorted(seen & ids_in_group)}")
+            seen |= ids_in_group
+
+        # 执行
+        merged_groups = 0
+        deleted_rows = 0
+        for g in groups:
+            keep = by_id[g["keep_id"]]
+            keep.attrs = g.get("merged_attrs") or {}
+            keep.name = g.get("merged_name") or keep.name
+            keep.updated_at = datetime.now()
+            for mid in g["merge_ids"]:
+                await session.delete(by_id[mid])
+                deleted_rows += 1
+            merged_groups += 1
+        await session.commit()
+        return merged_groups, deleted_rows
 
 
 # ==================== 案件时间线(AI 提取,entity=case) ====================

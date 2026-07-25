@@ -38,3 +38,32 @@ const _FIELD_LABELS = {
 export function fieldLabelOf(key) {
   return _FIELD_LABELS[key] || key
 }
+
+// 字段分组(画像成员卡按组分段展示:基础个人信息/护照信息/公司收入/其他证件)
+const _FIELD_GROUP_OF = {
+  name: 'basic', name_en: 'basic', gender: 'basic', birth_date: 'basic', birth_place: 'basic',
+  nationality: 'basic', ethnicity: 'basic', id_number: 'basic', hukou_address: 'basic', marital_status: 'basic',
+  passport_no: 'passport', passport_issue_date: 'passport', passport_expiry_date: 'passport',
+  phone: 'income', email: 'income', current_address: 'income', postal_code: 'income',
+  occupation: 'income', employer: 'income', business_nature: 'income', annual_income: 'income',
+  shareholding: 'income', source_of_funds: 'income', planned_deposit: 'income', residence_plan: 'income',
+  birth_cert_no: 'other', birth_hospital: 'other', marriage_date: 'other', marriage_authority: 'other',
+  marriage_cert_no: 'other', no_crime_cert_no: 'other', no_crime_issue_date: 'other', approval_no: 'other',
+  approval_date: 'other', school_name: 'other', major: 'other', degree: 'other', graduation_date: 'other',
+  graduation_cert_no: 'other', degree_cert_no: 'other',
+}
+const _FIELD_GROUP_LABELS = { basic: '基础个人信息', passport: '护照信息', income: '公司收入', other: '其他证件' }
+const _FIELD_GROUP_ORDER = ['basic', 'passport', 'income', 'other']
+
+// 把扁平 fields 按 4 大分组,返回 [{group,label,items}],只含有字段的组,按固定顺序
+export function groupPersonFields(fields) {
+  const buckets = {}
+  for (const f of fields) {
+    const g = _FIELD_GROUP_OF[f.field] || 'other'
+    if (!buckets[g]) buckets[g] = []
+    buckets[g].push(f)
+  }
+  return _FIELD_GROUP_ORDER
+    .filter(g => buckets[g] && buckets[g].length)
+    .map(g => ({ group: g, label: _FIELD_GROUP_LABELS[g], items: buckets[g] }))
+}

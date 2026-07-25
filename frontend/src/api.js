@@ -827,6 +827,28 @@ export async function fetchCustomerFileRawUrl(fileId) {
   }
 }
 
+export async function correctPersonField(personId, fields, reviewedBy, relation) {
+  const payload = { fields, reviewed_by: reviewedBy }
+  if (relation !== undefined) payload.relation = relation
+  const r = await axios.post(`${API_BASE}/profile/persons/${personId}/field`, payload)
+  return r.data
+}
+
+export async function listPersonFiles(personId) {
+  const r = await axios.get(`${API_BASE}/profile/persons/${personId}/files`)
+  return r.data
+}
+
+export async function dedupeAssetsPreview(householdId) {
+  const r = await axios.post(`${API_BASE}/profile/households/${householdId}/dedupe-assets/preview`)
+  return r.data
+}
+
+export async function dedupeAssetsCommit(householdId, groups) {
+  const r = await axios.post(`${API_BASE}/profile/households/${householdId}/dedupe-assets/commit`, { groups })
+  return r.data
+}
+
 export async function getProfileTaskMatrix(taskId) {
   const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}/matrix`)
   return r.data

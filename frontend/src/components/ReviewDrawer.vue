@@ -33,7 +33,7 @@
               <div class="pane-title">原件</div>
               <div class="pane-body raw-view">
                 <img v-if="rawState.url && rawState.isImage" :src="rawState.url" class="raw-img" alt="原件" />
-                <el-button v-else-if="rawState.url" type="primary" size="small" @click="openRawInTab">在新窗口打开 PDF/文件</el-button>
+                <iframe v-else-if="rawState.url" :src="rawState.url" class="raw-iframe" title="原件"></iframe>
                 <span v-else class="dim">{{ rawState.hint }}</span>
               </div>
             </div>
@@ -197,7 +197,7 @@ async function submitReviewDismiss() {
   }
 }
 
-// ---- 原件查看(blob 带鉴权;图片内联,PDF 新窗口) ----
+// ---- 原件查看(blob 带鉴权;图片/PDF 均内联) ----
 
 async function loadRaw(fileId) {
   if (rawState.value._revoke) rawState.value._revoke()
@@ -213,10 +213,6 @@ async function loadRaw(fileId) {
   } catch (err) {
     rawState.value = { url: '', isImage: false, hint: '原件不可用(可能已清理且无法重下)', _revoke: null }
   }
-}
-
-function openRawInTab() {
-  if (rawState.value.url) window.open(rawState.value.url, '_blank')
 }
 
 defineExpose({ open })
@@ -309,6 +305,11 @@ defineExpose({ open })
 .raw-img {
   max-width: 100%;
   max-height: 100%;
+}
+.raw-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
 }
 .ocr-view {
   font-size: 12px;
