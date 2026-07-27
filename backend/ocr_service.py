@@ -71,14 +71,38 @@ def run_ocr(img_path: str, cls: bool = True):
     return [converted]
 
 
+def _page_has_big_image(plumber_page, cover_threshold: float = 0.6) -> bool:
+    """该页是否含覆盖整页的大图(扫描件特征)。
+
+    扫描仪 App 常把自家劣质 OCR 文本层嵌进扫描 PDF:文本层里栏位名是正确汉字
+    但字段值全是乱码。判断 PDF 是不是扫描件不能看文本层,要看页面是否被大图覆盖。
+    """
+    page_area = (plumber_page.width or 0) * (plumber_page.height or 0)
+    if page_area <= 0:
+        return False
+    for im in plumber_page.images:
+        w = (im.get("x1") or 0) - (im.get("x0") or 0)
+        h = (im.get("bottom") or 0) - (im.get("top") or 0)
+        if w * h > cover_threshold * page_area:
+            return True
+    return False
+
+
 def detect_pdf_type(pdf_path: str) -> str:
-    """检测 PDF 类型：文字型还是图片型。"""
+    """检测 PDF 类型：文字型还是图片型。
+
+    判定顺序:
+    1. 前 3 页有任一页面含大图 → image(扫描件或含扫描页的混合件,需 OCR 扫描页)。
+    2. 无大图且文本量达标 → text(Word/WPS 导出的真文字 PDF)。
+    3. 否则 → image。
+    """
     try:
         with pdfplumber.open(pdf_path) as pdf:
             total_text = ""
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                total_text += text
+            for i, page in enumerate(pdf.pages):
+                if i < 3 and _page_has_big_image(page):
+                    return "image"
+                total_text += page.extract_text() or ""
             effective_length = len(total_text.strip().replace(" ", "").replace("\n", ""))
             if effective_length >= TEXT_LENGTH_THRESHOLD:
                 return "text"
@@ -169,6 +193,78 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
     return results
 
 
+def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> list:
+    """逐页混合提取:含大图的页 → 渲染+OCR;无大图的页 → 直接读文本层。
+
+    用于「含扫描页的 PDF」(detect_pdf_type=image 但可能有数字页):
+    - 纯扫描件(如户口本):每页都是大图 → 全部 OCR,忽略扫描仪内嵌的垃圾文本层。
+    - 混合件(如封面扫描+数字表单的递交包):封面 OCR、数字页走文本层,
+      保留数字页的精确文本且不浪费 OCR。
+
+    max_ocr_pages 语义同 extract_image_pdf(限制处理的页数,文本页同样计入)。
+    返回格式同 extract_image_pdf;文本页 image=None, ocr_details=[]。
+    """
+    pdf = pypdfium2.PdfDocument(pdf_path)
+    total_pages = len(pdf)
+
+    img_dir = os.path.join(OUTPUT_DIR, task_id, "images")
+    os.makedirs(img_dir, exist_ok=True)
+
+    page_limit = total_pages if max_ocr_pages <= 0 else min(max_ocr_pages, total_pages)
+
+    results = []
+    with pdfplumber.open(pdf_path) as plumber:
+        for i in range(page_limit):
+            ppage = plumber.pages[i]
+            if not _page_has_big_image(ppage):
+                # 数字页:直接读文本层(无大图,文本层是可信内容)
+                page_text = (ppage.extract_text() or "").strip()
+                results.append({
+                    "page": i + 1,
+                    "text": page_text,
+                    "image": None,
+                    "ocr_details": []
+                })
+                continue
+
+            # 扫描页:渲染 + OCR(忽略可能存在的内嵌垃圾文本层)
+            page = pdf[i]
+            bitmap = page.render(scale=OCR_RENDER_SCALE)
+            pil_image = bitmap.to_pil()
+            pil_image, _shrunk = _downscale_if_too_large(pil_image)
+
+            img_filename = f"page_{i + 1}.png"
+            img_path = os.path.join(img_dir, img_filename)
+            pil_image.save(img_path, "PNG")
+
+            ocr_result = run_ocr(img_path, cls=True)
+            page_text_lines = []
+            ocr_details = []
+            if ocr_result and ocr_result[0]:
+                for line in ocr_result[0]:
+                    bbox = line[0]
+                    text = line[1][0]
+                    confidence = float(line[1][1])
+                    if confidence > 0.3:
+                        page_text_lines.append(text)
+                        ocr_details.append({
+                            "text": text,
+                            "confidence": round(confidence, 4),
+                            "bbox": bbox
+                        })
+
+            page_text = "\n".join(page_text_lines)
+            results.append({
+                "page": i + 1,
+                "text": page_text,
+                "image": f"{task_id}/images/{img_filename}",
+                "ocr_details": ocr_details
+            })
+
+    pdf.close()
+    return results
+
+
 def extract_image_file(image_path: str, task_id: str) -> list:
     """
     对单张图片进行 OCR 识别，保留坐标框信息。
@@ -238,7 +334,7 @@ def process_file(file_path: str, task_id: str, max_ocr_pages: int = 0) -> list:
         if pdf_type == "text":
             return extract_text_pdf(file_path)
         else:
-            return extract_image_pdf(file_path, task_id, max_ocr_pages)
+            return extract_mixed_pdf(file_path, task_id, max_ocr_pages)
     elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"):
         return extract_image_file(file_path, task_id)
     else:

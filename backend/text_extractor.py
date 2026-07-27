@@ -476,12 +476,21 @@ def _cleanup_ocr_dir(task_id: str) -> None:
 
 
 def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int) -> str:
-    """只 OCR 指定页(0-based 索引)。用于大文件 early-exit 时抓末页盖章/合计。
+    """只取指定页(0-based 索引)的文本。用于大文件 early-exit 时抓末页盖章/合计。
 
-    内联实现,不污染 ocr_service 接口。
-    复用 ocr_service.run_ocr 引擎锁,跨线程池安全。
+    逐页混合:该页含大图 → 渲染+OCR;无大图 → 直接读文本层(数字页不浪费 OCR)。
+    内联实现,不污染 ocr_service 接口。复用 ocr_service.run_ocr 引擎锁,跨线程池安全。
     """
+    import pdfplumber
     import pypdfium2
+
+    # 数字页:无大图 → 文本层直接返回
+    with pdfplumber.open(file_path) as plumber:
+        ppage = plumber.pages[page_index_0based]
+        if not ocr_service._page_has_big_image(ppage):
+            return (ppage.extract_text() or "").strip()
+
+    # 扫描页:渲染 + OCR
     img_dir = os.path.join(ocr_service.OUTPUT_DIR, task_id, "images")
     os.makedirs(img_dir, exist_ok=True)
 
@@ -545,9 +554,9 @@ def _extract_pdf(file_path: str) -> dict:
         finally:
             pdf.close()
 
-        # === 3. 小文件直接全 OCR ===
+        # === 3. 小文件直接全 OCR(逐页混合:扫描页 OCR,数字页读文本层) ===
         if total_pages <= OCR_EARLY_EXIT_THRESHOLD:
-            pages = ocr_service.extract_image_pdf(file_path, task_id, max_ocr_pages=0)
+            pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=0)
             text = "\n\n".join(p.get("text", "") for p in pages).strip()
             return {
                 "text": text,
@@ -556,8 +565,8 @@ def _extract_pdf(file_path: str) -> dict:
                 "char_count": len(text),
             }
 
-        # === 4. 大文件 early-exit:先 OCR 前 2 页 ===
-        head_pages = ocr_service.extract_image_pdf(file_path, task_id, max_ocr_pages=2)
+        # === 4. 大文件 early-exit:先取前 2 页(逐页混合) ===
+        head_pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=2)
         head_text = "\n\n".join(p.get("text", "") for p in head_pages[:2]).strip()
 
         # === 5. LLM 初判 ===
@@ -607,9 +616,8 @@ def _extract_pdf(file_path: str) -> dict:
                 "char_count": len(sampled_text),
             }
 
-        # === 6b. 不是大表类 → OCR 全文(继续把剩余页 OCR 完) ===
-        # 直接重新跑一次全 OCR(前 2 页缓存重复跑,代价小,逻辑简单)
-        pages = ocr_service.extract_image_pdf(file_path, task_id, max_ocr_pages=0)
+        # === 6b. 不是大表类 → 取全文(逐页混合;前 2 页缓存重复跑,代价小,逻辑简单) ===
+        pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=0)
         text = "\n\n".join(p.get("text", "") for p in pages).strip()
         return {
             "text": text,
