@@ -6,14 +6,16 @@ OCR 复用:全局查 archive_detect_files 同 file_id 的最新 done 且有 ocr_
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import cast, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONPATH
 from sqlalchemy.orm import undefer
 
 from db.ai_api_call_crud import _clean_text
 from db.engine import async_session_maker
 from db.models import (
     ArchiveDetectFile, CustomerFile, DocExtractResult, ProfileAsset,
-    ProfileImportTask, ProfilePerson, ProfilePersonField,
+    ProfileHousehold, ProfileImportTask, ProfilePerson, ProfilePersonField,
 )
 
 
@@ -21,7 +23,8 @@ from db.models import (
 
 def _to_task_dict(t: ProfileImportTask, *,
                    asset_counts: Optional[dict[int, int]] = None,
-                   main_passport: Optional[dict[int, dict]] = None) -> dict:
+                   main_passport: Optional[dict[int, dict]] = None,
+                   household_codes: Optional[dict[int, str]] = None) -> dict:
     base = {
         "id": t.id,
         "filename": t.filename,
@@ -46,6 +49,8 @@ def _to_task_dict(t: ProfileImportTask, *,
         "created_at": t.created_at.strftime("%Y-%m-%d %H:%M:%S") if t.created_at else "",
         "updated_at": t.updated_at.strftime("%Y-%m-%d %H:%M:%S") if t.updated_at else "",
     }
+    if household_codes is not None:
+        base["customer_code"] = household_codes.get(t.household_id) if t.household_id else None
     if asset_counts is not None and t.household_id:
         base["asset_count"] = asset_counts.get(t.household_id, 0)
     if main_passport is not None and t.household_id:
@@ -79,6 +84,9 @@ def _to_file_dict(f: CustomerFile, *, with_text: bool = False) -> dict:
         "review_status": f.review_status,
         "review_reason": f.review_reason,
         "quality_score": f.quality_score,
+        "person_id": f.person_id,
+        "affter_entryoid": f.affter_entryoid,
+        "project_name": f.project_name,
         "created_at": f.created_at.strftime("%Y-%m-%d %H:%M:%S") if f.created_at else "",
         "updated_at": f.updated_at.strftime("%Y-%m-%d %H:%M:%S") if f.updated_at else "",
     }
@@ -147,6 +155,7 @@ async def get_import_task(task_id: int) -> Optional[dict]:
 
 
 async def list_import_tasks(*, status: Optional[str] = None, client_name: Optional[str] = None,
+                            customer_code: Optional[str] = None,
                             limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
     async with async_session_maker() as session:
         stmt = select(ProfileImportTask)
@@ -157,17 +166,29 @@ async def list_import_tasks(*, status: Optional[str] = None, client_name: Option
         if client_name:
             stmt = stmt.where(ProfileImportTask.client_name.ilike(f"%{client_name}%"))
             cnt = cnt.where(ProfileImportTask.client_name.ilike(f"%{client_name}%"))
+        if customer_code:
+            hh_by_code = select(ProfileHousehold.id).where(
+                ProfileHousehold.customer_code.ilike(f"%{customer_code}%"))
+            stmt = stmt.where(ProfileImportTask.household_id.in_(hh_by_code))
+            cnt = cnt.where(ProfileImportTask.household_id.in_(hh_by_code))
         total = await session.scalar(cnt) or 0
         rows = (await session.execute(
             stmt.order_by(ProfileImportTask.created_at.desc(), ProfileImportTask.id.desc())
                 .limit(limit).offset(offset)
         )).scalars().all()
 
-        # 附加家庭资产数 + 户主护照签发/到期日期(表格快速筛查用)
+        # 附加家庭客户编码 + 家庭资产数 + 户主护照签发/到期日期(表格快速筛查用)
         hh_ids = {r.household_id for r in rows if r.household_id}
+        household_codes: dict[int, str] = {}
         asset_counts: dict[int, int] = {}
         main_passport: dict[int, dict] = {}
         if hh_ids:
+            code_rows = (await session.execute(
+                select(ProfileHousehold.id, ProfileHousehold.customer_code)
+                .where(ProfileHousehold.id.in_(hh_ids))
+            )).all()
+            household_codes = {hid: code for hid, code in code_rows if code}
+
             ac_rows = (await session.execute(
                 select(ProfileAsset.household_id, func.count(ProfileAsset.id))
                 .where(ProfileAsset.household_id.in_(hh_ids))
@@ -189,7 +210,8 @@ async def list_import_tasks(*, status: Optional[str] = None, client_name: Option
                 elif field == "passport_expiry_date":
                     slot["expiry_date"] = value
 
-        return [_to_task_dict(r, asset_counts=asset_counts, main_passport=main_passport)
+        return [_to_task_dict(r, asset_counts=asset_counts, main_passport=main_passport,
+                              household_codes=household_codes)
                 for r in rows], total
 
 
@@ -225,6 +247,102 @@ async def finish_import_task(task_id: int, status: str, error: Optional[str] = N
             await session.commit()
 
 
+async def list_household_files(household_id: int) -> list[dict]:
+    """家庭名下全部客户文件(跨任务并集),重新生成画像的输入。
+
+    file_code 全局唯一,同一文件被多任务先后 link 时只有当前所在任务的一行,
+    天然无重复;只返回 upsert_task_files 需要的字段。
+    """
+    async with async_session_maker() as session:
+        rows = (await session.execute(
+            select(CustomerFile)
+            .join(ProfileImportTask,
+                  CustomerFile.import_task_id == ProfileImportTask.id)
+            .where(ProfileImportTask.household_id == household_id)
+            .order_by(CustomerFile.id)
+        )).scalars().all()
+        return [{
+            "file_code": r.file_code,
+            "filename": r.filename,
+            "folder_name": r.folder_name,
+            "rel_path": r.rel_path,
+            "client_name": r.client_name,
+            "affter_entryoid": r.affter_entryoid,
+            "project_name": r.project_name,
+        } for r in rows]
+
+
+async def has_running_task(household_id: int) -> bool:
+    """家庭是否有 running 状态任务(重新生成的并发保护)。"""
+    async with async_session_maker() as session:
+        return (await session.execute(
+            select(func.count(ProfileImportTask.id)).where(
+                ProfileImportTask.household_id == household_id,
+                ProfileImportTask.status == "running")
+        )).scalar_one() > 0
+
+
+async def delete_household_profile(household_id: int) -> tuple[bool, list[str], dict]:
+    """删除画像:只删客户画像数据(家庭/人员/字段/资产/案件),文件与 OCR 全保留。
+
+    只 DELETE profile_households 行:DB CASCADE 删 persons/person_fields/assets/cases;
+    profile_import_tasks.household_id 被 FK(SET NULL)自动置空 → 任务/customer_files/
+    ocr_text/doc_extract_results/磁盘原件全部保留,重新导入可按 file_code re-link 复用 OCR。
+    customer_files.person_id 是指向画像域的裸列(无 FK),删前清 NULL 避免悬挂。
+    返回 (是否删除成功, 恒空路径列表, {"tasks": 任务数, "files_kept": 保留文件数})。
+    """
+    async with async_session_maker() as session:
+        if await session.get(ProfileHousehold, household_id) is None:
+            return False, [], {"tasks": 0, "files_kept": 0}
+        task_ids = (await session.execute(
+            select(ProfileImportTask.id).where(
+                ProfileImportTask.household_id == household_id)
+        )).scalars().all()
+        files_kept = 0
+        if task_ids:
+            files_kept = (await session.execute(
+                select(func.count(CustomerFile.id)).where(
+                    CustomerFile.import_task_id.in_(task_ids))
+            )).scalar_one()
+            await session.execute(
+                update(CustomerFile).where(CustomerFile.import_task_id.in_(task_ids))
+                .values(person_id=None))
+        await session.execute(
+            sa_delete(ProfileHousehold).where(ProfileHousehold.id == household_id))
+        await session.commit()
+        return True, [], {"tasks": len(task_ids), "files_kept": files_kept}
+
+
+async def delete_import_task(task_id: int) -> tuple[bool, list[str], dict]:
+    """删除导入任务。
+
+    任务有 household_id 时 = 删除画像(委托 delete_household_profile:只删画像数据,
+    任务/文件/OCR/提取结果/磁盘原件全保留);无 household 时删任务级数据
+    (customer_files/doc_extract_results 由 DB CASCADE 级联,返回磁盘路径)。
+    返回 (是否删除, local_path 列表, 统计 dict)。
+    """
+    async with async_session_maker() as session:
+        household_id = (await session.execute(
+            select(ProfileImportTask.household_id).where(ProfileImportTask.id == task_id)
+        )).scalar_one_or_none()
+    if household_id is not None:
+        deleted, paths, stats = await delete_household_profile(household_id)
+        stats["household_deleted"] = deleted
+        return deleted, paths, stats
+    async with async_session_maker() as session:
+        paths = (await session.execute(
+            select(CustomerFile.local_path).where(
+                CustomerFile.import_task_id == task_id,
+                CustomerFile.local_path.isnot(None),
+            )
+        )).scalars().all()
+        res = await session.execute(
+            sa_delete(ProfileImportTask).where(ProfileImportTask.id == task_id))
+        await session.commit()
+        return (res.rowcount or 0) > 0, [p for p in paths if p], {
+            "tasks": 1, "household_deleted": False}
+
+
 # ==================== 文件 ====================
 
 async def upsert_task_files(task_id: int, client_id: Optional[int], files: list) -> dict:
@@ -253,6 +371,8 @@ async def upsert_task_files(task_id: int, client_id: Optional[int], files: list)
                 row.filename = f.get("filename") or row.filename
                 row.folder_name = f.get("folder_name")
                 row.rel_path = f.get("rel_path")
+                row.affter_entryoid = f.get("affter_entryoid")
+                row.project_name = f.get("project_name")
                 if row.status != "done":
                     row.status = "pending"
                     row.error_msg = None
@@ -268,6 +388,8 @@ async def upsert_task_files(task_id: int, client_id: Optional[int], files: list)
                     filename=f.get("filename"),
                     folder_name=f.get("folder_name"),
                     rel_path=f.get("rel_path"),
+                    affter_entryoid=f.get("affter_entryoid"),
+                    project_name=f.get("project_name"),
                     status="error" if synthetic else "pending",
                     ocr_source="none",
                     classify_by="none",
@@ -314,13 +436,20 @@ async def list_task_files(task_id: int, *, limit: int = 500, offset: int = 0) ->
 
 
 async def list_person_files(person_id: int) -> list[dict]:
-    """该人员关联的文件(通过提取结果 write_stats.person_id 归因,按 id 升序)。"""
+    """该人员关联的文件(并集):① customer_files.person_id 手动归属
+    ② 提取结果 write_stats 顶层 person_id ③ write_stats.persons[] 多人模式明细。按 id 升序。"""
     async with async_session_maker() as session:
-        cfids = (await session.execute(
+        cfids = set((await session.execute(
+            select(CustomerFile.id).where(CustomerFile.person_id == person_id)
+        )).scalars().all())
+        cfids.update((await session.execute(
             select(DocExtractResult.customer_file_id)
-            .where(DocExtractResult.write_stats["person_id"].as_string() == str(person_id))
+            .where(or_(
+                DocExtractResult.write_stats["person_id"].as_string() == str(person_id),
+                DocExtractResult.write_stats.contains({"persons": [{"person_id": person_id}]}),
+            ))
             .distinct()
-        )).scalars().all()
+        )).scalars().all())
         if not cfids:
             return []
         rows = (await session.execute(
@@ -328,6 +457,95 @@ async def list_person_files(person_id: int) -> list[dict]:
             .order_by(CustomerFile.id)
         )).scalars().all()
         return [_to_file_dict(r) for r in rows]
+
+
+async def assign_file_person(row_id: int, person_id: Optional[int]) -> None:
+    """设置/清除文件手动归属人(person_id=None 为清除)。"""
+    async with async_session_maker() as session:
+        row = await session.get(CustomerFile, row_id)
+        if row:
+            row.person_id = person_id
+            row.updated_at = datetime.now()
+            await session.commit()
+
+
+def _result_person_ids(write_stats: Optional[dict]) -> list:
+    """write_stats → 归因 person_id 列表(顶层单人 + persons[] 多人明细)。
+    与 profile_crud._result_person_ids 同逻辑;本地复制避免 crud 模块互相 import。"""
+    ws = write_stats or {}
+    ids = [p.get("person_id") for p in ws.get("persons") or [] if p.get("person_id")]
+    if not ids and ws.get("person_id"):
+        ids = [ws["person_id"]]
+    return ids
+
+
+async def list_files_for_assignment(*, client_name: Optional[str] = None,
+                                    doc_type: Optional[str] = None,
+                                    assigned: Optional[str] = None,
+                                    limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
+    """文件归属页全局文件列表(分页+筛选)。每行带 household_id、归属人(列优先,提取归因兜底)、
+    attributed_by(manual/extract/None)。"""
+    async with async_session_maker() as session:
+        # 有效归属(person_id 列 ∪ write_stats 归因)的 EXISTS 条件,assigned 筛选用
+        attr_exists = exists(
+            select(DocExtractResult.id)
+            .where(DocExtractResult.customer_file_id == CustomerFile.id)
+            .where(or_(
+                DocExtractResult.write_stats["person_id"].as_string().isnot(None),
+                func.jsonb_path_exists(
+                    DocExtractResult.write_stats,
+                    cast('$.persons[*].person_id ? (@ != null)', JSONPATH)),
+            ))
+        )
+        filters = []
+        if client_name:
+            filters.append(CustomerFile.client_name.ilike(f"%{client_name}%"))
+        if doc_type:
+            filters.append(CustomerFile.doc_type == doc_type)
+        if assigned == "none":
+            filters += [CustomerFile.person_id.is_(None), ~attr_exists]
+        elif assigned == "any":
+            filters.append(or_(CustomerFile.person_id.isnot(None), attr_exists))
+
+        total = await session.scalar(
+            select(func.count(CustomerFile.id)).where(*filters)) or 0
+        rows = (await session.execute(
+            select(CustomerFile, ProfileImportTask.household_id)
+            .join(ProfileImportTask, CustomerFile.import_task_id == ProfileImportTask.id)
+            .where(*filters)
+            .order_by(CustomerFile.id.desc())
+            .limit(limit).offset(offset)
+        )).all()
+
+        files = []
+        for cf, hid in rows:
+            d = _to_file_dict(cf)
+            d["household_id"] = hid
+            d["attributed_by"] = "manual" if d["person_id"] else None
+            files.append(d)
+        by_id = {f["id"]: f for f in files}
+        # 归属人兜底:无手动归属时取最新一条提取结果的 write_stats 归因
+        need = [fid for fid, f in by_id.items() if not f["person_id"]]
+        if need:
+            sub = (select(DocExtractResult.customer_file_id, DocExtractResult.write_stats)
+                   .where(DocExtractResult.customer_file_id.in_(need))
+                   .order_by(DocExtractResult.customer_file_id, DocExtractResult.id.desc())
+                   .distinct(DocExtractResult.customer_file_id))
+            for cfid, ws in (await session.execute(sub)).all():
+                ids = _result_person_ids(ws)
+                if ids:
+                    by_id[cfid]["person_id"] = ids[0]
+                    by_id[cfid]["attributed_by"] = "extract"
+        pids = {f["person_id"] for f in files if f.get("person_id")}
+        names = {}
+        if pids:
+            for pid, pname in (await session.execute(
+                    select(ProfilePerson.id, ProfilePerson.name)
+                    .where(ProfilePerson.id.in_(pids)))).all():
+                names[pid] = pname
+        for f in files:
+            f["person_name"] = names.get(f.get("person_id"))
+        return files, total
 
 
 async def list_pending_files(task_id: int) -> list[dict]:

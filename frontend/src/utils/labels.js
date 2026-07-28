@@ -13,6 +13,22 @@ export function docTypeLabel(t) {
   return _DOC_TYPES[t] || t || '-'
 }
 
+// 关系显示:DB 里主申请人关系值为「户主」,页面统一显示为「客户」(数据值不变)
+export function relationLabel(rel) {
+  return rel === '户主' ? '客户' : (rel || '')
+}
+
+/**
+ * 案件显示名:项目案件取二级项目名||一级项目名,默认案件回退 case_type。
+ * @param {{ projectname_detailed?: string|null, projectname?: string|null, case_type?: string }} c
+ * @returns {string}
+ */
+export function caseTitle(c) {
+  return c.projectname_detailed || c.projectname || c.case_type || '未命名案件'
+}
+
+export const DOC_TYPE_OPTIONS = Object.entries(_DOC_TYPES).map(([value, label]) => ({ value, label }))
+
 const _REVIEW_REASONS = {
   no_text: '无文本',
   garbled: 'OCR乱码',

@@ -45,11 +45,11 @@
               <div class="pane-title">归属与字段修正</div>
               <div class="pane-body edit-view">
                 <el-select v-model="reviewForm.person_id" placeholder="选择归属人" size="small" clearable style="width: 100%">
-                  <el-option v-for="p in reviewDetail.household_persons" :key="p.id" :label="`${p.name}(${p.is_main ? '户主' : p.relation_to_main})`" :value="p.id" />
+                  <el-option v-for="p in reviewDetail.household_persons" :key="p.id" :label="`${p.name}(${p.is_main ? '客户' : relationLabel(p.relation_to_main)})`" :value="p.id" />
                 </el-select>
                 <el-input v-model="reviewForm.new_person_name" placeholder="或输入新建人姓名" size="small" style="margin-top: 6px" />
                 <el-select v-model="reviewForm.person_relation" placeholder="修正关系(可选)" size="small" clearable style="width: 100%; margin-top: 6px">
-                  <el-option v-for="r in ['户主', '配偶', '子', '女', '父', '母', '待确认']" :key="r" :label="r" :value="r" />
+                  <el-option v-for="r in ['户主', '配偶', '子', '女', '父', '母', '待确认']" :key="r" :label="relationLabel(r)" :value="r" />
                 </el-select>
                 <div class="edit-fields">
                   <div v-for="(v, k) in reviewForm.fields" :key="k" class="edit-field">
@@ -84,7 +84,7 @@ import {
   getReviewFile,
   listReviewFiles,
 } from '../api'
-import { docTypeLabel, fieldLabelOf, reviewReasonLabel } from '../utils/labels'
+import { docTypeLabel, fieldLabelOf, reviewReasonLabel, relationLabel } from '../utils/labels'
 
 const props = defineProps({
   importTaskId: { type: Number, default: null },  // 不传 = 跨任务全局队列
@@ -128,7 +128,8 @@ async function openReviewItem(item) {
       new_person_name: '',
       person_relation: null,
       fields: Object.fromEntries(
-        Object.entries(src).filter(([, v]) => v != null && String(v).trim() !== ''),
+        // 过滤非标量:多人模式 extracted 为 {"persons":[...]},数组值进表单会误提交成字段
+        Object.entries(src).filter(([, v]) => v != null && typeof v !== 'object' && String(v).trim() !== ''),
       ),
     }
     loadRaw(item.id)
@@ -171,12 +172,13 @@ async function submitReviewCorrect() {
     const fields = Object.fromEntries(
       Object.entries(f.fields).filter(([, v]) => String(v ?? '').trim() !== ''),
     )
-    await correctReviewFile(reviewDetail.value.file.id, {
+    const r = await correctReviewFile(reviewDetail.value.file.id, {
       person_id: f.person_id || undefined,
       new_person_name: f.new_person_name?.trim() || undefined,
       person_relation: f.person_relation || undefined,
       fields,
     })
+    if (r?.deduped) ElMessage.info('已存在同名人员，已自动关联，未重复建卡')
     await _afterReviewAction('修正已保存')
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || err.message)

@@ -58,7 +58,7 @@
             <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
           </el-table-column>
           <el-table-column label="操作" min-width="180" show-overflow-tooltip prop="operation" />
-          <el-table-column label="模型" min-width="150" show-overflow-tooltip prop="model" />
+          <!-- <el-table-column label="模型" min-width="150" show-overflow-tooltip prop="model" /> -->
           <el-table-column label="状态" width="80" align="center">
             <template #default="{ row }">
               <el-tag :type="row.status === 'ok' ? 'success' : 'danger'" size="small">{{ row.status === 'ok' ? '成功' : '失败' }}</el-tag>
@@ -97,7 +97,7 @@
         <div class="detail-meta">
           <div><b>时间：</b><span class="mono">{{ selected.created_at }}</span></div>
           <div><b>操作：</b><span class="mono">{{ selected.operation || '-' }}</span></div>
-          <div><b>模型：</b><span class="mono">{{ selected.model || '-' }}</span></div>
+          <!-- <div><b>模型：</b><span class="mono">{{ selected.model || '-' }}</span></div> -->
           <div><b>状态：</b><el-tag :type="selected.status === 'ok' ? 'success' : 'danger'" size="small">{{ selected.status === 'ok' ? '成功' : '失败' }}</el-tag></div>
           <div><b>耗时：</b>{{ selected.elapsed_ms != null ? (selected.elapsed_ms / 1000).toFixed(3) + 's' : '-' }}</div>
           <div><b>批次：</b><span class="mono">{{ selected.batch_id || '-' }}</span></div>

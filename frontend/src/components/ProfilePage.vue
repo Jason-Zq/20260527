@@ -6,17 +6,10 @@
         客户画像
       </div>
       <div class="header-actions">
-        <el-upload
-          :show-file-list="false"
-          accept=".xlsx"
-          :http-request="handleUpload"
-          :disabled="uploading"
-          style="display: inline-block; margin-right: 12px">
-          <el-button type="primary" :loading="uploading">
-            <el-icon style="margin-right: 4px"><Upload /></el-icon>
-            导入客户文件清单(.xlsx)
-          </el-button>
-        </el-upload>
+        <el-button type="primary" style="margin-right: 12px" @click="openImportDialog">
+          <el-icon style="margin-right: 4px"><MagicStick /></el-icon>
+          选择客户生成画像
+        </el-button>
         <el-button @click="loadTasks" :loading="loading">
           <el-icon style="margin-right: 4px"><Refresh /></el-icon>
           刷新
@@ -32,15 +25,19 @@
             <el-option label="完成" value="done" />
             <el-option label="失败" value="error" />
           </el-select>
-          <el-input v-model="taskClientName" placeholder="客户名" clearable size="small" style="width: 180px" @keyup.enter="onTaskQuery" />
+          <el-input v-model="taskClientName" placeholder="客户名" clearable size="small" style="width: 140px" @keyup.enter="onTaskQuery" />
+          <el-input v-model="taskCustomerCode" placeholder="客户编码" clearable size="small" style="width: 180px" @keyup.enter="onTaskQuery" />
           <el-button size="small" type="primary" @click="onTaskQuery">查询</el-button>
           <el-button size="small" @click="onTaskReset">重置</el-button>
         </div>
       </section>
       <section class="card">
-        <el-table :data="tasks" v-loading="loading" stripe empty-text="暂无任务,点击右上角导入 Excel 开始" style="width: 100%">
+        <el-table :data="tasks" v-loading="loading" stripe empty-text="暂无任务,点击右上角选择客户生成画像开始" style="width: 100%">
           <el-table-column label="ID" width="70" align="center" prop="id" />
           <el-table-column label="客户" min-width="100" show-overflow-tooltip prop="client_name" />
+          <el-table-column label="客户编码" min-width="150" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono dim">{{ row.customer_code || '-' }}</span></template>
+          </el-table-column>
                     <el-table-column label="家庭资产" width="90" align="center">
             <template #default="{ row }">
               <span :class="{ dim: !row.asset_count }">{{ row.asset_count || 0 }}</span>
@@ -84,9 +81,10 @@
           <el-table-column label="创建时间" min-width="150">
             <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="110" align="center" fixed="right">
+          <el-table-column label="操作" width="170" align="center" fixed="right">
             <template #default="{ row }">
               <el-button size="small" type="primary" link @click="openProfile(row)">查看画像</el-button>
+              <el-button size="small" type="danger" link @click.stop="onDeleteTask(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -104,8 +102,73 @@
       </section>
     </div>
 
+    <!-- 接口导入客户文件清单 -->
+    <el-dialog v-model="importVisible" title="选择客户生成画像" width="760px" top="6vh">
+      <el-form label-width="90px" inline>
+        <el-form-item label="客户编号">
+          <el-input v-model="importForm.customer_code" clearable style="width: 240px"
+                    placeholder="留空查询最近 100 条" @keyup.enter="onPreview" />
+        </el-form-item>
+      </el-form>
+      <div style="margin-bottom: 8px">
+        <el-button type="primary" :loading="previewLoading" @click="onPreview">查询预览</el-button>
+        <span class="dim" style="margin-left: 8px; font-size: 12px">接口固定返回最近 100 条,不支持修改</span>
+        <span v-if="previewCustomers.length" class="dim" style="margin-left: 8px; font-size: 12px">
+          共 {{ previewCustomers.length }} 个客户,勾选后确认导入
+        </span>
+      </div>
+      <el-table v-if="previewCustomers.length" ref="previewTableRef" :data="previewCustomers"
+                height="380" stripe @selection-change="onPreviewSelectionChange">
+        <el-table-column type="selection" width="45" />
+        <el-table-column label="客户姓名" min-width="110" show-overflow-tooltip prop="customer_name" />
+        <el-table-column label="客户编号" min-width="170" show-overflow-tooltip prop="customer_code">
+          <template #default="{ row }">
+            <div><span class="mono dim">{{ row.customer_code || '-' }}</span></div>
+            <div v-if="row.crm_oid" class="mono dim" style="font-size: 11px">CRM {{ row.crm_oid }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="文件" width="80" align="center" prop="file_count" />
+        <el-table-column label="项目" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <el-tooltip v-if="row.projects?.length" placement="top">
+              <template #content>
+                <div v-for="(p, i) in row.projects" :key="i" style="line-height: 1.7">
+                  <div>{{ p.projectname_detailed || p.projectname || '未命名项目' }}
+                    <span v-if="p.projectno" class="mono" style="opacity:.75; font-size: 11px"> {{ p.projectno }}<template v-if="p.projectno_detailed">/{{ p.projectno_detailed }}</template></span>
+                  </div>
+                  <div v-if="p.affter_entryoid || p.project_create_time" class="mono" style="opacity:.6; font-size: 11px">
+                    <template v-if="p.affter_entryoid">OID {{ p.affter_entryoid }}</template><template v-if="p.project_create_time"> · {{ p.project_create_time }}</template>
+                  </div>
+                </div>
+              </template>
+              <span>{{ row.projects.length }} 个项目</span>
+            </el-tooltip>
+            <span v-else class="dim">-</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="importVisible = false">取消</el-button>
+        <el-button type="primary" :loading="importLoading" :disabled="!selectedNames.length"
+                   @click="onConfirmImport">
+          确认导入(已选 {{ selectedNames.length }} 户)
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 客户画像详情 -->
-    <el-dialog v-model="profileVisible" :title="`客户画像 · ${profile?.task?.client_name || ''}`" top="4vh" :modal="true" modal-class="side-drawer-overlay" :width="profileDialogWidth" :style="{ marginRight: profileShift > 0 ? (profileShift + 20) + 'px' : null }">
+    <el-dialog v-model="profileVisible" top="4vh" :modal="true" modal-class="side-drawer-overlay" :width="profileDialogWidth" :style="{ marginRight: profileShift > 0 ? (profileShift + 20) + 'px' : null }">
+      <template #header>
+        <div class="profile-dialog-header">
+          <div style="display: flex; align-items: baseline; gap: 12px">
+            <span class="profile-dialog-title">客户画像 · {{ profile?.task?.client_name || '' }}</span>
+            <span v-if="profile?.household?.customer_code" class="profile-dialog-title mono">{{ profile.household.customer_code }}</span>
+            <span v-if="profile?.household?.crm_oid" class="dim mono" style="font-size: 12px">CRM {{ profile.household.crm_oid }}</span>
+          </div>
+          <el-button size="small" type="warning" :loading="regenerating"
+                     :disabled="!profile?.household?.id" @click="onRegenerate">重新生成画像</el-button>
+        </div>
+      </template>
       <div v-if="profileLoading" style="padding: 40px; text-align: center"><el-icon class="is-loading"><Loading /></el-icon> 加载中...</div>
       <div v-else-if="profile" class="profile-body">
         <div class="task-summary">
@@ -135,14 +198,14 @@
                   <div class="person-avatar" :class="{ main: p.is_main }">{{ (p.name || '?')[0] }}</div>
                   <div class="person-title">
                     <span class="person-name">{{ p.name }}</span>
-                    <el-tag v-if="p.is_main" type="primary" size="small" effect="dark">户主</el-tag>
+                    <el-tag v-if="p.is_main" type="primary" size="small" effect="dark">客户</el-tag>
                     <template v-else-if="editingPersonId === p.id">
                       <el-select v-model="editRelation" size="small" style="width: 110px" placeholder="关系">
                         <el-option v-for="r in relationOptions" :key="r" :label="r" :value="r" />
                       </el-select>
                     </template>
                     <el-tag v-else-if="p.relation_to_main === '待确认'" type="warning" size="small">待确认</el-tag>
-                    <el-tag v-else size="small" effect="plain">{{ p.relation_to_main }}</el-tag>
+                    <el-tag v-else size="small" effect="plain">{{ relationLabel(p.relation_to_main) }}</el-tag>
                   </div>
                   <div class="person-actions">
                     <template v-if="editingPersonId === p.id">
@@ -221,7 +284,7 @@
               <el-table-column label="成员" width="130">
                 <template #default="{ row }">
                   <b>{{ row.name }}</b>
-                  <span class="dim" style="margin-left: 4px">{{ row.relation_to_main }}</span>
+                  <span class="dim" style="margin-left: 4px">{{ relationLabel(row.relation_to_main) }}</span>
                 </template>
               </el-table-column>
               <el-table-column v-for="col in matrix.columns" :key="col.key" :label="col.label" align="center" min-width="95">
@@ -244,8 +307,14 @@
             <div v-if="profile.cases?.length" class="case-list">
               <section v-for="c in profile.cases" :key="c.id" class="card inner-card">
                 <div class="card-title case-head">
-                  <span>{{ c.case_type }}</span>
+                  <span>{{ caseTitle(c) }}<span v-if="c.projectno" class="dim mono" style="margin-left: 8px; font-size: 12px">{{ c.projectno }}<template v-if="c.projectno_detailed">/{{ c.projectno_detailed }}</template></span></span>
                   <el-tag :type="caseStatusTag(c.status)" size="small" effect="dark">{{ c.status }}</el-tag>
+                </div>
+                <div v-if="c.affter_entryoid || c.projectname" class="case-meta dim">
+                  <span v-if="c.affter_entryoid">售后OID <span class="mono">{{ c.affter_entryoid }}</span></span>
+                  <span v-if="c.projectname">一级项目 <span v-if="c.projectno" class="mono">{{ c.projectno }}</span> {{ c.projectname }}</span>
+                  <span v-if="c.projectname_detailed">二级项目 <span v-if="c.projectno_detailed" class="mono">{{ c.projectno_detailed }}</span> {{ c.projectname_detailed }}</span>
+                  <span v-if="c.project_created_at">项目创建 {{ String(c.project_created_at).replace('T', ' ').slice(0, 16) }}</span>
                 </div>
                 <el-timeline class="case-timeline">
                   <el-timeline-item
@@ -270,19 +339,26 @@
               <el-table-column label="文件编码" min-width="95" show-overflow-tooltip prop="file_code" />
               <el-table-column label="文件名" min-width="170" show-overflow-tooltip prop="filename" />
               <el-table-column label="文件夹" min-width="110" show-overflow-tooltip prop="folder_name" />
+              <el-table-column label="项目" min-width="130" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div v-if="row.project_name">{{ row.project_name }}</div>
+                  <div v-if="row.affter_entryoid" class="mono dim" style="font-size: 11px">{{ row.affter_entryoid }}</div>
+                  <span v-if="!row.project_name && !row.affter_entryoid" class="dim">-</span>
+                </template>
+              </el-table-column>
               <el-table-column label="状态" width="90" align="center">
                 <template #default="{ row }">
                   <el-tag :type="fileTag(row.status)" size="small">{{ fileLabel(row.status) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="提取" width="90" align="center">
+              <!-- <el-table-column label="提取" width="90" align="center">
                 <template #default="{ row }">
                   <el-tag v-if="row.latest_extract_status === 'done'" type="success" size="small">完成</el-tag>
                   <el-tag v-else-if="row.latest_extract_status === 'error'" type="danger" size="small">失败</el-tag>
                   <el-tag v-else-if="row.latest_extract_status === 'skipped'" type="info" size="small">跳过</el-tag>
                   <span v-else class="dim">-</span>
                 </template>
-              </el-table-column>
+              </el-table-column> -->
               <el-table-column label="OCR 来源" width="100" align="center">
                 <template #default="{ row }">{{ ocrSourceLabel(row.ocr_source) }}</template>
               </el-table-column>
@@ -459,38 +535,51 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Loading, MagicStick, Refresh, Upload, WarningFilled } from '@element-plus/icons-vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Loading, MagicStick, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import PersonEditDrawer from './PersonEditDrawer.vue'
 import ReviewDrawer from './ReviewDrawer.vue'
-import { docTypeLabel, fieldLabelOf, groupPersonFields } from '../utils/labels'
+import { docTypeLabel, fieldLabelOf, groupPersonFields, caseTitle, relationLabel } from '../utils/labels'
 import {
   correctPersonField,
   dedupeAssetsCommit,
   dedupeAssetsPreview,
+  deleteProfileTask,
   fetchCustomerFileRawUrl,
   getCustomerFile,
   listPersonFiles,
   getProfileTaskMatrix,
   getProfileTaskProfile,
-  importProfileExcel,
+  importProfileRemote,
   listProfileTaskFiles,
   listProfileTasks,
+  previewProfileRemoteImport,
+  regenerateHouseholdProfile,
 } from '../api'
 
 const tasks = ref([])
 const loading = ref(false)
 const taskStatus = ref('')
 const taskClientName = ref('')
+const taskCustomerCode = ref('')
 const taskPage = ref(1)
 const taskPageSize = ref(10)
 const taskTotal = ref(0)
-const uploading = ref(false)
+
+// 接口导入弹窗
+const importVisible = ref(false)
+const importForm = ref({ customer_code: '', operation_user: 'Jason邹启' })
+const previewLoading = ref(false)
+const importLoading = ref(false)
+const previewCustomers = ref([])
+const previewTableRef = ref(null)
+const selectedNames = ref([])
 
 const profileVisible = ref(false)
 const profileLoading = ref(false)
 const profile = ref(null)
+const regenerating = ref(false)
 const activeTab = ref('profile')
 const files = ref([])
 const filesTotal = ref(0)
@@ -604,6 +693,7 @@ async function loadTasks() {
     const data = await listProfileTasks({
       status: taskStatus.value || undefined,
       client_name: taskClientName.value || undefined,
+      customer_code: taskCustomerCode.value || undefined,
       limit: taskPageSize.value,
       offset: (taskPage.value - 1) * taskPageSize.value,
     })
@@ -624,6 +714,7 @@ function onTaskQuery() {
 function onTaskReset() {
   taskStatus.value = ''
   taskClientName.value = ''
+  taskCustomerCode.value = ''
   taskPage.value = 1
   loadTasks()
 }
@@ -633,17 +724,109 @@ function onTaskSizeChange() {
   loadTasks()
 }
 
-async function handleUpload({ file }) {
-  uploading.value = true
+async function onDeleteTask(row) {
+  let msg = row.household_id
+    ? `确定删除任务 #${row.id}（${row.client_name}）的画像？将删除该家庭的客户画像数据(人员/字段/资产/案件)；文件记录、提取结果与 OCR 文本全部保留，重新导入可直接复用 OCR 重建画像。`
+    : `确定删除任务 #${row.id}（${row.client_name}）？将删除该任务的文件/OCR/提取结果及磁盘原件。删除后无法恢复。`
+  if (row.status === 'running') {
+    msg += ' 任务正在运行，删除后后台处理将停止。'
+  }
   try {
-    const r = await importProfileExcel(file)
-    ElMessage.success(`已创建导入任务 #${r.task_id}: ${r.client_name} 共 ${r.total_files} 个文件`)
-    await loadTasks()
-    openProfile({ id: r.task_id })
+    await ElMessageBox.confirm(msg, '确认删除', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+    await deleteProfileTask(row.id)
+    ElMessage.success('已删除')
   } catch (err) {
-    ElMessage.error(err.response?.data?.detail || err.message)
+    if (err === 'cancel') return
+    ElMessage.error('删除失败：' + (err.response?.data?.detail || err.message))
+    return
+  }
+  // 删除的是当前打开画像弹窗的任务,或整家庭强删波及同家庭任务时,关掉弹窗(右侧抽屉由 watch 联动关闭)
+  if (profileVisible.value && (profile.value?.task?.id === row.id
+      || (row.household_id && profile.value?.task?.household_id === row.household_id))) {
+    profileVisible.value = false
+  }
+  loadTasks()
+}
+
+async function onRegenerate() {
+  const household = profile.value?.household
+  if (!household?.id) {
+    ElMessage.warning('该任务没有关联家庭,无法重新生成')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定重新生成「${household.name}」的画像？将新建任务按流程重跑家庭名下全部文件：已有 OCR 直接复用，缺 OCR 重新识别，缺文件重新下载，按当前规则重新分类/提取。人工已确认/修正的字段不会被覆盖。`,
+      '确认重新生成',
+      { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' })
+  } catch { return }
+  regenerating.value = true
+  try {
+    const r = await regenerateHouseholdProfile(household.id)
+    ElMessage.success(`已创建重新生成任务 #${r.task_id},共 ${r.total_files} 个文件,后台运行中`)
+    profileVisible.value = false
+    loadTasks()
+  } catch (err) {
+    ElMessage.error('重新生成失败:' + (err.response?.data?.detail || err.message))
   } finally {
-    uploading.value = false
+    regenerating.value = false
+  }
+}
+
+function openImportDialog() {
+  previewCustomers.value = []
+  selectedNames.value = []
+  importVisible.value = true
+}
+
+async function onPreview() {
+  previewLoading.value = true
+  try {
+    const r = await previewProfileRemoteImport({
+      customer_code: importForm.value.customer_code.trim(),
+      operation_user: importForm.value.operation_user.trim(),
+    })
+    previewCustomers.value = r.customers || []
+    selectedNames.value = []
+    if (!previewCustomers.value.length) {
+      ElMessage.warning('接口未返回客户数据')
+      return
+    }
+    await nextTick()
+    previewTableRef.value?.toggleAllSelection()
+  } catch (err) {
+    ElMessage.error('预览失败:' + (err.response?.data?.detail || err.message))
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function onPreviewSelectionChange(rows) {
+  selectedNames.value = rows.map(r => r.customer_name)
+}
+
+async function onConfirmImport() {
+  importLoading.value = true
+  try {
+    const r = await importProfileRemote({
+      customer_code: importForm.value.customer_code.trim(),
+      operation_user: importForm.value.operation_user.trim(),
+      customer_names: selectedNames.value,
+    })
+    const created = r.tasks || []
+    const totalFiles = created.reduce((s, t) => s + (t.total_files || 0), 0)
+    ElMessage.success(`已创建 ${created.length} 个导入任务,共 ${totalFiles} 个文件,后台运行中`)
+    importVisible.value = false
+    await loadTasks()
+    if (created.length === 1) openProfile({ id: created[0].task_id })
+  } catch (err) {
+    ElMessage.error('导入失败:' + (err.response?.data?.detail || err.message))
+  } finally {
+    importLoading.value = false
   }
 }
 
@@ -957,6 +1140,7 @@ function extractLabel(row) {
 function writeStatsText(ws) {
   if (!ws) return '-'
   const parts = []
+  if (ws.person_count > 1) parts.push(`${ws.person_count}人`)
   if (ws.client_fields) parts.push(`客户+${ws.client_fields}`)
   if (ws.member_fields) parts.push(`成员+${ws.member_fields}`)
   if (ws.member_created) parts.push('新建成员')
@@ -978,6 +1162,16 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.profile-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 32px; /* 避开右上角关闭按钮 */
+}
+.profile-dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+}
 .profile-page {
   height: 100%;
   display: flex;
@@ -1460,6 +1654,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.case-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  margin-top: 6px;
 }
 .case-timeline {
   margin-top: 12px;

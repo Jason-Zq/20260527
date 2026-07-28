@@ -13,7 +13,8 @@ from sqlalchemy import delete, select
 
 from db import profile_crud
 from db.engine import async_session_maker
-from db.models import ProfileAsset, ProfileCase, ProfileHousehold, ProfilePerson, ProfilePersonField
+from db.models import (CustomerFile, DocExtractResult, ProfileAsset, ProfileCase,
+                       ProfileHousehold, ProfileImportTask, ProfilePerson, ProfilePersonField)
 
 _HH = "测试画像家庭"
 _IDN = "110101199001011234"
@@ -283,6 +284,9 @@ def test_profile_domain():
             # 同一事件循环内清理(async 引擎连接池绑 loop)
             if hh_id:
                 await _cleanup(hh_id)
+            # 释放连接池:本文件有多个 asyncio.run,旧 loop 关闭后池内连接全失效
+            from db.engine import async_engine
+            await async_engine.dispose()
 
     asyncio.run(run())
 
@@ -338,15 +342,15 @@ def test_field_conflicts():
     assert n("id_number", "[身份证]") == "" and n("name", "") == ""
 
     # 两源一致(归一化后同值)→ 无冲突
-    s = [(1, "birth_date", "1969-03-25", "身份证.jpg", "id_card"),
-         (1, "birth_date", "1969/03/25", "批复.pdf", "approval")]
+    s = [(1, "birth_date", "1969-03-25", "身份证.jpg", "id_card", 11),
+         (1, "birth_date", "1969/03/25", "批复.pdf", "approval", 12)]
     assert profile_crud.collect_field_conflicts(s) == {}
     # 拼音名粘连/空格差异 → 无冲突(真实数据样式)
     assert profile_crud.collect_field_conflicts(
-        [(2, "name_en", "NICHENG", "倪成.jpg", "passport"),
-         (2, "name_en", "NI CHENG", "倪成.jpg", "passport")]) == {}
+        [(2, "name_en", "NICHENG", "倪成.jpg", "passport", 13),
+         (2, "name_en", "NI CHENG", "倪成.jpg", "passport", 13)]) == {}
     # 第三源不一致 → 冲突,两种值的来源都列出
-    s.append((1, "birth_date", "1969-03-26", "无犯罪.pdf", "no_crime"))
+    s.append((1, "birth_date", "1969-03-26", "无犯罪.pdf", "no_crime", 14))
     c = profile_crud.collect_field_conflicts(s)
     assert "birth_date" in c.get(1, {}), c
     vals = c[1]["birth_date"]["values"]
@@ -355,14 +359,14 @@ def test_field_conflicts():
     assert srcs == {"身份证.jpg", "批复.pdf", "无犯罪.pdf"}, srcs
     # 非白名单字段(declared)不比
     assert profile_crud.collect_field_conflicts(
-        [(1, "phone", "138", "a", "kyc_form"), (1, "phone", "139", "b", "kyc_form")]) == {}
+        [(1, "phone", "138", "a", "kyc_form", 15), (1, "phone", "139", "b", "kyc_form", 16)]) == {}
     # 不同人互不影响
     assert profile_crud.collect_field_conflicts(
-        [(1, "gender", "男", "a", "id_card"), (2, "gender", "女", "b", "id_card")]) == {}
+        [(1, "gender", "男", "a", "id_card", 17), (2, "gender", "女", "b", "id_card", 18)]) == {}
     # masked 值被剔除,不与有效值构成冲突
     assert profile_crud.collect_field_conflicts(
-        [(1, "id_number", "[身份证]", "a", "id_card"),
-         (1, "id_number", "310110196903251619", "b", "no_crime")]) == {}
+        [(1, "id_number", "[身份证]", "a", "id_card", 19),
+         (1, "id_number", "310110196903251619", "b", "no_crime", 20)]) == {}
 
 
 def test_name_guard():
@@ -377,13 +381,175 @@ def test_name_guard():
     assert profile_crud.plausible_person_name(None) is False
 
 
+def test_normalize_relation():
+    n = profile_crud.normalize_relation
+    assert n("户主") == "户主" and n("本人") == "户主"
+    assert n("妻子") == "配偶" and n("丈夫") == "配偶" and n("爱人") == "配偶"
+    assert n("长子") == "子" and n("儿子") == "子" and n("长女") == "女"
+    assert n("父亲") == "父" and n("母亲") == "母"
+    # 超出 6 种合法关系 → None(skipped_invalid,人照建关系待确认)
+    assert n("祖父") is None and n("儿媳") is None and n("兄弟") is None
+    assert n("") is None and n(None) is None and n("  ") is None
+
+
+_HH2 = "测试关系推导家庭"
+_MAIN_IDN = "110101197001010011"
+_MOM_IDN = "110101197501010022"
+
+
+async def _mk_person(hh_id, name, fields):
+    """建待确认 person 并写字段,返回 person_id。"""
+    p = await profile_crud.create_person(hh_id, name)
+    if fields:
+        await profile_crud.apply_extracted_fields_v2(
+            hh_id, {"person_id": p["id"], "matched_by": "test"},
+            [{"key": k, "value": v, "column": k} for k, v in fields.items()])
+    return p["id"]
+
+
+async def _mk_result(task_id, file_id, doc_type, extracted, write_stats, code):
+    """直接建行:CustomerFile + DocExtractResult(done)。"""
+    async with async_session_maker() as s:
+        cf = CustomerFile(file_code=code, import_task_id=task_id, status="done",
+                          filename=f"{code}.pdf", doc_type=doc_type)
+        s.add(cf)
+        await s.flush()
+        r = DocExtractResult(customer_file_id=cf.id, import_task_id=task_id,
+                             file_id=code, doc_type=doc_type, status="done",
+                             extracted=extracted, write_stats=write_stats)
+        s.add(r)
+        await s.commit()
+        return r.id
+
+
+def test_relation_infer():
+    async def run():
+        hh_id, task_id = None, None
+        try:
+            await _cleanup(None)
+            async with async_session_maker() as s:  # 防历史残留
+                await s.execute(delete(ProfileImportTask).where(
+                    ProfileImportTask.client_name == _HH2))
+                await s.commit()
+            hh = await profile_crud.get_or_create_household(_HH2)
+            hh_id = hh["id"]
+            main_id = hh["main_person_id"]
+            # 户主档案:1970 男 + 户籍地址
+            await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": main_id, "matched_by": "test"}, [
+                    {"key": "id_number", "value": _MAIN_IDN, "column": "id_number"},
+                    {"key": "gender", "value": "男", "column": "gender"},
+                    {"key": "birth_date", "value": "1970-01-01", "column": "birth_date"},
+                    {"key": "hukou_address", "value": "测试省测试市测试路1号", "column": "hukou_address"},
+                ])
+            # 成员:B 妈妈 / C 小宝 / D 大弟(同姓同址小 20 岁) / E 李外人(异姓) / F 测邻居(异址)
+            b_id = await _mk_person(hh_id, "测妈妈", {
+                "id_number": _MOM_IDN, "gender": "女",
+                "birth_date": "1975-01-01", "hukou_address": "测试省测试市测试路1号"})
+            c_id = await _mk_person(hh_id, "测小宝", {
+                "gender": "男", "birth_date": "2005-06-01"})
+            d_id = await _mk_person(hh_id, "测大弟", {
+                "gender": "男", "birth_date": "1990-01-01",
+                "hukou_address": "测试省测试市测试路1号"})
+            e_id = await _mk_person(hh_id, "李外人", {
+                "gender": "男", "birth_date": "1990-01-01"})
+            f_id = await _mk_person(hh_id, "测邻居", {
+                "gender": "男", "birth_date": "1990-01-01",
+                "hukou_address": "别的省别的市别的路9号"})
+
+            # ---- _relation 通道:妻子→配偶落地;已有关系不再覆盖;非法值跳过 ----
+            w = await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": b_id, "matched_by": "test"},
+                [{"key": "relation", "value": "妻子", "column": "_relation"}])
+            assert w["mapped"][0]["action"] == "relation_written", w["mapped"]
+            rel = {p["id"]: p["relation_to_main"] for p in await profile_crud.list_persons(hh_id)}
+            assert rel[b_id] == "配偶", rel
+            w = await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": b_id, "matched_by": "test"},
+                [{"key": "relation", "value": "子", "column": "_relation"}])
+            assert w["mapped"][0]["action"] == "skipped_filled", w["mapped"]
+            w = await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": c_id, "matched_by": "test"},
+                [{"key": "relation", "value": "祖父", "column": "_relation"}])
+            assert w["mapped"][0]["action"] == "skipped_invalid", w["mapped"]
+            w = await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": main_id, "matched_by": "test"},
+                [{"key": "relation", "value": "配偶", "column": "_relation"}])
+            assert w["mapped"][0]["action"] == "skipped_filled", w["mapped"]
+            # 户主守卫:非主申请人的"户主"卡不落(户口本户主 ≠ 画像主申请人)
+            w = await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": c_id, "matched_by": "test"},
+                [{"key": "relation", "value": "户主", "column": "_relation"}])
+            assert w["mapped"][0]["action"] == "skipped_filled", w["mapped"]
+            rel = {p["id"]: p["relation_to_main"] for p in await profile_crud.list_persons(hh_id)}
+            assert rel[c_id] == "待确认", rel
+            # 复位 B 为待确认,交给推导来写
+            await profile_crud.set_person_relation(b_id, "待确认")
+
+            # ---- 造提取结果:出生证(父母齐)+结婚证(户主持证,配偶=测妈妈) ----
+            async with async_session_maker() as s:
+                t = ProfileImportTask(filename="t.xlsx", client_name=_HH2,
+                                      household_id=hh_id, status="done")
+                s.add(t)
+                await s.flush()
+                task_id = t.id
+                await s.commit()
+            await _mk_result(task_id, "f-birth", "birth_cert", {
+                "name": "测小宝", "father_name": _HH2, "father_id_number": _MAIN_IDN,
+                "mother_name": "测妈妈", "mother_id_number": _MOM_IDN},
+                {"person_id": c_id}, "test-code-birth")
+            await _mk_result(task_id, "f-marriage", "marriage_cert", {
+                "holder_name": _HH2, "spouse_name": "测妈妈"},
+                {"person_id": main_id}, "test-code-marriage")
+
+            # ---- 推导:C1 出生证父亲=户主 → 母亲写配偶;C3 同姓年长差 → D 写子 ----
+            n_before = await profile_crud.count_persons(hh_id)
+            r = await profile_crud.infer_family_relations(hh_id)
+            assert r["checked_results"] == 2, r
+            bases = {(i["person_id"], i["relation"], i["basis"]) for i in r["inferred"]}
+            assert (b_id, "配偶", "birth_cert:father_is_main") in bases, bases
+            assert (d_id, "子", "heuristic:surname+age_gap+addr") in bases, bases
+            rel = {p["id"]: p["relation_to_main"] for p in await profile_crud.list_persons(hh_id)}
+            assert rel[b_id] == "配偶", rel          # C1(或 C2)写配偶
+            assert rel[d_id] == "子", rel            # C3 启发式(同姓同址小 20 岁)
+            assert rel[c_id] == "子", rel            # C3 启发式(同姓无址小 35 岁)
+            assert rel[e_id] == "待确认", rel        # 异姓不推
+            assert rel[f_id] == "待确认", rel        # 地址冲突不推
+            assert await profile_crud.count_persons(hh_id) == n_before  # 不建人
+
+            # ---- 幂等:二次推导零写入 ----
+            r2 = await profile_crud.infer_family_relations(hh_id)
+            assert r2["inferred"] == [], r2
+        finally:
+            async with async_session_maker() as s:
+                if task_id:
+                    await s.execute(delete(DocExtractResult).where(
+                        DocExtractResult.import_task_id == task_id))
+                    await s.execute(delete(CustomerFile).where(
+                        CustomerFile.import_task_id == task_id))
+                    t = await s.get(ProfileImportTask, task_id)
+                    if t:
+                        await s.delete(t)
+                    await s.commit()
+            if hh_id:
+                await _cleanup(hh_id)
+            from db.engine import async_engine
+            await async_engine.dispose()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_name_guard()
     print("PASS test_name_guard")
+    test_normalize_relation()
+    print("PASS test_normalize_relation")
     test_passport_expiry_info()
     print("PASS test_passport_expiry_info")
     test_field_conflicts()
     print("PASS test_field_conflicts")
     test_profile_domain()
     print("PASS test_profile_domain")
-    print("\n全部 4 个测试通过")
+    test_relation_infer()
+    print("PASS test_relation_infer")
+    print("\n全部 6 个测试通过")

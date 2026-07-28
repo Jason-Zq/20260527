@@ -28,11 +28,11 @@
           </template>
         </el-dropdown>
         
-        <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button>
-        <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button>
+        <!-- <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button>
+        <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button> -->
         <button class="nav-item" :class="{ active: isActive('/file-info') }" @click="go('/file-info')">文件信息</button>
         <button class="nav-item" :class="{ active: isActive('/profile') }" @click="go('/profile')">客户画像</button>
-        <button class="nav-item" :class="{ active: isActive('/review-center') }" @click="go('/review-center')">复核中心</button>
+        <button class="nav-item" :class="{ active: isActive('/file-assign') }" @click="go('/file-assign')">文件归属</button>
 
         <!-- <el-dropdown trigger="click">
           <button class="nav-item more">更多工具</button>

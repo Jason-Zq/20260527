@@ -11,7 +11,7 @@ draft->activate->disable 生命周期已移除;提取结果(doc_extract_results)
 from typing import Optional
 
 # 规则整体版本号:写入 doc_extract_results.rule_version 供溯源(改规则时手动 +1)
-RULES_VERSION = 1
+RULES_VERSION = 2
 
 
 EXTRACT_RULES: dict[str, dict] = {
@@ -110,7 +110,8 @@ EXTRACT_RULES: dict[str, dict] = {
         "prompt_extra": "1. 身份证有正反面，正面为个人信息（姓名、性别、民族、出生日期、住址、身份证号），反面为签发机关和有效期限，需合并提取。\n2. 出生日期、有效期限中的日期部分一律转换为 YYYY-MM-DD 标准格式，注意年份可能为两位（需补全为四位）或四位。\n3. 身份证号倒数第二位为性别校验位（奇男偶女），但直接提取性别字段优先取版面文字。\n4. 注意与临时身份证、护照等区分，临时身份证无有效期或不同；居民身份证号码固定18位，末位可能为X（大写）。"
     },
     "hukou": {
-        "version": 1,
+        "version": 2,
+        "multi": True,
         "fields": [
             {
                 "key": "name",
@@ -212,7 +213,7 @@ EXTRACT_RULES: dict[str, dict] = {
                 "description": "若OCR识别为空则不提取"
             }
         ],
-        "prompt_extra": "1. 只提取户口簿中证件持有人（通常为户主或本人）的信息，忽略其他家庭成员。\n2. 所有日期字段统一转换为YYYY-MM-DD格式，如「1990年1月1日」转为1990-01-01。\n3. 民族字段需提取完整名称，如「汉族」「蒙古族」，不要省略为「汉」「蒙」。\n4. 公民身份号码可能为15位或18位，保持OCR识别结果原样，不进行格式修正。"
+        "prompt_extra": "1. 提取户口簿中所有常住人口登记卡成员（含户主本人），每张登记卡输出一条；索引页/封面/注意事项页忽略。\n2. 所有日期字段统一转换为YYYY-MM-DD格式，如「1990年1月1日」转为1990-01-01。\n3. 民族字段需提取完整名称，如「汉族」「蒙古族」，不要省略为「汉」「蒙」。\n4. 公民身份号码可能为15位或18位，保持OCR识别结果原样，不进行格式修正。"
     },
     "passport": {
         "version": 1,
@@ -1243,14 +1244,16 @@ EXTRACT_RULES: dict[str, dict] = {
 
 
 def get_rule(doc_type: str) -> Optional[dict]:
-    """取某证件类型的提取规则。返回 {doc_type, version, fields, prompt_extra} 或 None。
+    """取某证件类型的提取规则。返回 {doc_type, version, fields, prompt_extra, multi} 或 None。
 
     对齐原 doc_extract_crud.get_active_rule 的返回结构(去掉 id/status/reviewed_* 生命周期字段),
     调用方 profile_import_service 用到的 rule[version/fields/prompt_extra/doc_type] 均保留。
+    multi=True 表示多人模式(如户口本整本),由 extract_doc_fields_multi 处理。
     """
     r = EXTRACT_RULES.get(doc_type)
     if r is None:
         return None
     return {'doc_type': doc_type, 'version': r['version'],
-            'fields': r['fields'], 'prompt_extra': r.get('prompt_extra')}
+            'fields': r['fields'], 'prompt_extra': r.get('prompt_extra'),
+            'multi': r.get('multi', False)}
 

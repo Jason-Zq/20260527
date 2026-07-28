@@ -748,6 +748,9 @@ class CustomerFile(Base):
     review_status = Column(String(16), nullable=False, default="none", comment="复核状态:none/needs_review/reviewed")
     review_reason = Column(String(200), nullable=True, comment="待复核原因:no_text/garbled/ocr_short/low_confidence/extract_error/no_person/masked_id")
     quality_score = Column(Integer, nullable=True, comment="质量分 0-100(越小越急需复核)")
+    person_id = Column(Integer, nullable=True, comment="归属人(手动指定;权威归属载体,与 write_stats 归因并集使用)")
+    affter_entryoid = Column(String(64), nullable=True, comment="售后项目OID(项目案件路由键);NULL=扁平形态/旧数据")
+    project_name = Column(String(300), nullable=True, comment="项目显示名(反范式: projectname_detailed || projectname)")
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
 
@@ -757,6 +760,8 @@ class CustomerFile(Base):
         Index("ix_customer_files_client", "client_id"),
         Index("ix_customer_files_status", "status"),
         Index("ix_customer_files_review", "review_status", "quality_score"),
+        Index("ix_customer_files_person", "person_id"),
+        Index("ix_customer_files_entryoid", "affter_entryoid"),
     )
 
 
@@ -801,6 +806,8 @@ class ProfileHousehold(Base):
     name = Column(String(100), nullable=False, comment="家庭/客户组名称(主客户姓名)")
     legacy_client_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, comment="软关联老 clients.id(仅链接,不写老表)")
     main_person_id = Column(Integer, nullable=True, comment="主申请人 profile_persons.id")
+    customer_code = Column(String(100), nullable=True, comment="业务方客户编号(首个非空值,只补空)")
+    crm_oid = Column(String(64), nullable=True, comment="业务方 CRM OID(只补空)")
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
 
@@ -869,17 +876,27 @@ class ProfileAsset(Base):
 
 
 class ProfileCase(Base):
-    """案件 + 时间线(里程碑从文件名/内容抽取)。"""
+    """案件 + 时间线:一个售后项目=一个案件(按 affter_entryoid 路由);entryoid NULL=默认案件(旧数据/扁平形态)。"""
     __tablename__ = "profile_cases"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     household_id = Column(Integer, ForeignKey("profile_households.id", ondelete="CASCADE"), nullable=False, comment="所属家庭")
-    case_type = Column(String(100), nullable=False, comment="案件类型:如 瓦努阿图永居")
-    status = Column(String(30), nullable=False, default="进行中", comment="进行中/已获批/已签收/停滞")
+    case_type = Column(String(100), nullable=False, comment="案件类型:项目案件=项目名;默认案件=AI 抽取提示")
+    status = Column(String(30), nullable=False, default="进行中", comment="进行中/已递交/已获批/已交付/已签收")
     milestones = Column(JSONB, nullable=True, comment="时间线 [{name,date,source_file_id}]")
+    affter_entryoid = Column(String(64), nullable=True, comment="售后项目OID;NULL=默认案件(旧数据/扁平形态路由)")
+    projectno = Column(String(50), nullable=True, comment="办理的项目编码")
+    projectname = Column(String(200), nullable=True, comment="办理的项目名称")
+    projectno_detailed = Column(String(50), nullable=True, comment="二级项目编码")
+    projectname_detailed = Column(String(200), nullable=True, comment="二级项目名称")
+    project_created_at = Column(DateTime, nullable=True, comment="项目创建时间(接口 create_time)")
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
 
     __table_args__ = (
         Index("ix_profile_cases_household", "household_id"),
+        Index("ux_profile_cases_household_entryoid", "household_id", "affter_entryoid",
+              unique=True, postgresql_where=affter_entryoid.isnot(None)),
+        Index("ux_profile_cases_household_default", "household_id",
+              unique=True, postgresql_where=affter_entryoid.is_(None)),
     )

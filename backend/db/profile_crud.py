@@ -126,6 +126,8 @@ def _to_household_dict(h: ProfileHousehold) -> dict:
         "name": h.name,
         "legacy_client_id": h.legacy_client_id,
         "main_person_id": h.main_person_id,
+        "customer_code": h.customer_code,
+        "crm_oid": h.crm_oid,
         "created_at": h.created_at.strftime("%Y-%m-%d %H:%M:%S") if h.created_at else "",
         "updated_at": h.updated_at.strftime("%Y-%m-%d %H:%M:%S") if h.updated_at else "",
     }
@@ -161,14 +163,24 @@ def _to_person_dict(p: ProfilePerson, fields: Optional[list] = None) -> dict:
 
 # ==================== 家庭 / 人 ====================
 
-async def get_or_create_household(name: str, legacy_client_id: Optional[int] = None) -> dict:
-    """按名称找家庭,没有则创建(同时建主申请人:relation=户主,is_main=True)。"""
+async def get_or_create_household(name: str, legacy_client_id: Optional[int] = None,
+                                  customer_code: Optional[str] = None,
+                                  crm_oid: Optional[str] = None) -> dict:
+    """按名称找家庭(繁→简折叠去重,防客户名简/繁变体建重复家庭),没有则创建(同时建主申请人:relation=户主,is_main=True)。
+
+    customer_code/crm_oid 为接口属性:新建写入,已存在只补空(不覆盖)。
+    """
     async with async_session_maker() as session:
-        h = await session.scalar(
-            select(ProfileHousehold).where(ProfileHousehold.name == name)
-            .order_by(ProfileHousehold.id))
+        folded = _fold_cjk(name)
+        h = None
+        for cand in (await session.execute(
+                select(ProfileHousehold).order_by(ProfileHousehold.id))).scalars().all():
+            if _fold_cjk(cand.name) == folded:
+                h = cand
+                break
         if not h:
             h = ProfileHousehold(name=name, legacy_client_id=legacy_client_id,
+                                 customer_code=customer_code or None, crm_oid=crm_oid or None,
                                  created_at=datetime.now(), updated_at=datetime.now())
             session.add(h)
             await session.flush()
@@ -177,9 +189,19 @@ async def get_or_create_household(name: str, legacy_client_id: Optional[int] = N
             session.add(main)
             await session.flush()
             h.main_person_id = main.id
-        elif legacy_client_id and not h.legacy_client_id:
-            h.legacy_client_id = legacy_client_id
-            h.updated_at = datetime.now()
+        else:
+            dirty = False
+            if legacy_client_id and not h.legacy_client_id:
+                h.legacy_client_id = legacy_client_id
+                dirty = True
+            if customer_code and not h.customer_code:
+                h.customer_code = customer_code
+                dirty = True
+            if crm_oid and not h.crm_oid:
+                h.crm_oid = crm_oid
+                dirty = True
+            if dirty:
+                h.updated_at = datetime.now()
         await session.commit()
         await session.refresh(h)
         return _to_household_dict(h)
@@ -316,11 +338,14 @@ async def attach_field_conflicts(persons: list[dict], household_id: int) -> list
                 )).all())
     samples = []
     for r in results:
-        pid = (r.write_stats or {}).get("person_id")
-        if not pid:
+        pids = _result_person_ids(r.write_stats)
+        if not pids:
             continue
         extracted = r.extracted or {}
         source = fnames.get(r.customer_file_id) or r.file_id
+        # 多人模式:extracted 为 {"persons":[...]},mapped 条目自带 person_id 与 value;
+        # 单人模式:值从顶层 extracted[key] 取,归因到 write_stats 顶层 person_id
+        is_multi = isinstance(extracted, dict) and isinstance(extracted.get("persons"), list)
         for m in (r.mapped or []):
             field = m.get("field")
             if field not in _CROSS_CHECK_FIELDS:
@@ -328,9 +353,15 @@ async def attach_field_conflicts(persons: list[dict], household_id: int) -> list
             if m.get("action") in ("skipped_masked", "skipped_invalid"):
                 continue
             key = m.get("key")
+            if is_multi:
+                pid = m.get("person_id")
+                if pid and m.get("value") is not None:
+                    samples.append((pid, field, m["value"], source, r.doc_type, r.customer_file_id))
+                continue
             if key not in extracted:
                 continue
-            samples.append((pid, field, extracted.get(key), source, r.doc_type, r.customer_file_id))
+            for pid in pids:
+                samples.append((pid, field, extracted.get(key), source, r.doc_type, r.customer_file_id))
     conflicts = collect_field_conflicts(samples)
     for p in persons:
         p["field_conflicts"] = conflicts.get(p["id"], {})
@@ -346,43 +377,133 @@ def _normalize_name_en(value) -> str:
     return " ".join(sorted(tokens))
 
 
+_opencc_t2s = None  # 懒加载单例(OpenCC 构造要读词典,避免每次新建)
+
+
+def _fold_cjk(value) -> str:
+    """繁→简折叠 + 去全部空白(简体输入原样通过;非 CJK 字符不变)。"""
+    global _opencc_t2s
+    if not value:
+        return ""
+    if _opencc_t2s is None:
+        from opencc import OpenCC
+        _opencc_t2s = OpenCC("t2s")
+    return re.sub(r"\s+", "", _opencc_t2s.convert(str(value)))
+
+
+def _normalize_id_number(value) -> str:
+    """证件号归一化:去非字母数字 + 大写(容忍 OCR 空格/小写 x)。"""
+    if not value:
+        return ""
+    return re.sub(r"[^0-9A-Za-z]", "", str(value)).upper()
+
+
+def _pinyin_glued_variants(value) -> set:
+    """名 → 拼音连写变体集(全大写无分隔,含姓前/姓后两序),用于中文名 ↔ 英文证件名互比。
+
+    连写而非按词比较的原因:证件拼音常把名字音节粘连(ZHAOHUI),与按字切词不可逆;
+    连写后两序变体覆盖 倪朝晖 = NIZHAOHUI = ZHAOHUINI。多音字取 pypinyin 默认音(已知限制)。
+    """
+    if not value:
+        return set()
+    folded = _fold_cjk(value)
+    if not re.search(r"[一-鿿]", folded):
+        norm = re.sub(r"[^A-Za-z]", "", str(value)).upper()
+        return {norm} if norm else set()
+    from pypinyin import Style, pinyin
+    tokens = [t.upper() for (t,) in pinyin(folded, style=Style.NORMAL)
+              if re.fullmatch(r"[A-Za-z]+", t)]
+    if not tokens:
+        return set()
+    variants = {"".join(tokens)}
+    if len(tokens) >= 2:
+        variants.add("".join(tokens[1:] + tokens[:1]))
+    return variants
+
+
+def _result_person_ids(write_stats: Optional[dict]) -> list:
+    """write_stats → 归因 person_id 列表(兼容多人模式 persons 明细与单人顶层 person_id)。"""
+    ws = write_stats or {}
+    ids = [p.get("person_id") for p in ws.get("persons") or [] if p.get("person_id")]
+    if not ids and ws.get("person_id"):
+        ids = [ws["person_id"]]
+    return ids
+
+
 async def find_person_match(household_id: int, id_number: Optional[str] = None,
                             name: Optional[str] = None,
                             name_en: Optional[str] = None) -> dict:
-    """家庭内归因:证件号(走 person_fields)→ 姓名(走 persons.name)→ 拼音名(走 person_fields,词序无关)。"""
+    """家庭内归因(去重口径:简体/繁体/拼音 同一人不重复建卡)。
+
+    顺序:证件号(归一化,容忍空格/大小写)→ 姓名(繁→简折叠)→ name_en(词序无关)
+    → 拼音互转(matched_by="pinyin",连写两序变体;英文证件命中中文卡/中文名命中英文卡)。
+    """
     async with async_session_maker() as session:
-        if id_number:
-            row = (await session.execute(
-                select(ProfilePerson)
-                .join(ProfilePersonField, ProfilePersonField.person_id == ProfilePerson.id)
+        # 1) 证件号(归一化比较)
+        norm_id = _normalize_id_number(id_number)
+        if norm_id:
+            rows = (await session.execute(
+                select(ProfilePersonField)
+                .join(ProfilePerson, ProfilePerson.id == ProfilePersonField.person_id)
                 .where(ProfilePerson.household_id == household_id,
-                       ProfilePersonField.field == "id_number",
-                       ProfilePersonField.value == id_number)
-            )).scalars().first()
-            if row:
-                return {"person_id": row.id, "matched_by": "id_number"}
-        if name:
-            row = await session.scalar(
-                select(ProfilePerson).where(ProfilePerson.household_id == household_id,
-                                            ProfilePerson.name == name)
-                .order_by(ProfilePerson.id))
-            if row:
-                return {"person_id": row.id, "matched_by": "name"}
-        norm = _normalize_name_en(name_en)
-        if norm:
-            frows = (await session.execute(
+                       ProfilePersonField.field == "id_number")
+            )).scalars().all()
+            for f in rows:
+                if _normalize_id_number(f.value) == norm_id:
+                    return {"person_id": f.person_id, "matched_by": "id_number"}
+        # 2) 姓名(繁→简折叠)
+        folded = _fold_cjk(name)
+        norm_en = _normalize_name_en(name_en)
+        persons = []
+        if folded or norm_en:
+            persons = (await session.execute(
+                select(ProfilePerson).where(ProfilePerson.household_id == household_id)
+                .order_by(ProfilePerson.id))).scalars().all()
+        if folded:
+            for p in persons:
+                if _fold_cjk(p.name) == folded:
+                    return {"person_id": p.id, "matched_by": "name"}
+        # 3) name_en 词序无关
+        en_rows = []
+        if norm_en or folded:
+            en_rows = (await session.execute(
                 select(ProfilePersonField)
                 .join(ProfilePerson, ProfilePerson.id == ProfilePersonField.person_id)
                 .where(ProfilePerson.household_id == household_id,
                        ProfilePersonField.field == "name_en")
             )).scalars().all()
-            for f in frows:
-                if _normalize_name_en(f.value) == norm:
+        if norm_en:
+            for f in en_rows:
+                if _normalize_name_en(f.value) == norm_en:
                     return {"person_id": f.person_id, "matched_by": "name_en"}
+        # 4) 拼音互转:英文输入 ↔ 中文名连写拼音;中文输入 ↔ 已存 name_en 连写形式
+        glued_in = re.sub(r"[^A-Za-z]", "", str(name_en or "")).upper()
+        name_variants = _pinyin_glued_variants(name) if folded else set()
+        if glued_in or name_variants:
+            for p in persons:
+                pv = _pinyin_glued_variants(p.name)
+                if (glued_in and glued_in in pv) or (name_variants and pv & name_variants):
+                    return {"person_id": p.id, "matched_by": "pinyin"}
+            for f in en_rows:
+                fv = _pinyin_glued_variants(f.value)
+                if (glued_in and glued_in in fv) or (name_variants and fv & name_variants):
+                    return {"person_id": f.person_id, "matched_by": "pinyin"}
     return {"person_id": None, "matched_by": None}
 
 
 async def create_person(household_id: int, name: str, relation: str = "待确认") -> dict:
+    """新建成员;先按去重口径(繁简/拼音)查重,命中直接返回已有人(deduped=True)不重复建卡。"""
+    name = (name or "").strip()
+    is_latin = bool(re.fullmatch(r"[A-Za-z .'\-]+", name))
+    match = await find_person_match(household_id, name=None if is_latin else name,
+                                    name_en=name if is_latin else None)
+    if match.get("person_id"):
+        async with async_session_maker() as session:
+            p = await session.get(ProfilePerson, match["person_id"])
+            d = _to_person_dict(p)
+            d["deduped"] = True
+            d["matched_by"] = match.get("matched_by")
+            return d
     async with async_session_maker() as session:
         p = ProfilePerson(household_id=household_id, name=name, relation_to_main=relation,
                           is_main=False, created_at=datetime.now(), updated_at=datetime.now())
@@ -456,6 +577,10 @@ async def apply_extracted_fields_v2(household_id: int, match: dict, field_items:
                 rel = normalize_relation(value)
                 if not rel:
                     mapped.append({**entry, "action": "skipped_invalid"})
+                    continue
+                # 户口本户主 ≠ 画像主申请人:非主申请人的"户主"卡不落,避免多个"户主"
+                if rel == "户主" and person is not None and not person.is_main:
+                    mapped.append({**entry, "action": "skipped_filled"})
                     continue
                 if person is not None and person.relation_to_main and person.relation_to_main != "待确认":
                     mapped.append({**entry, "action": "skipped_filled"})
@@ -725,10 +850,75 @@ CASE_PLACEHOLDER_TYPE = "未命名案件"
 _CASE_STATUS_PROGRESSION = [("签收", "已签收"), ("交付", "已交付"), ("获批", "已获批"), ("递交", "已递交")]
 
 
-async def apply_case_milestones(household_id: int, case_items: list, *,
-                                source_file_id: Optional[int] = None) -> dict:
-    """把 entity=case 的提取字段写入 profile_cases(家庭单案件,v1)。
+def _parse_project_time(s: Optional[str]) -> Optional[datetime]:
+    """接口项目 create_time('2026-07-27 18:22:56')-> datetime;解析失败返回 None(不杀导入)。"""
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M:%S")
+    except (ValueError, AttributeError):
+        return None
 
+
+async def upsert_project_cases(household_id: int, projects: list) -> dict:
+    """导入时为本批全部项目建/联案件壳(一个售后项目=一个案件)。
+
+    projects: parse_api_manifest 的 projects[](affter_entryoid 非空才处理)。
+    新建: case_type=二级项目名||一级项目名||占位符, status=进行中, milestones=[];
+    已存在: 项目 6 列只补空(里程碑/状态不碰)。返回 {created, updated}。
+    """
+    created = 0
+    updated = 0
+    async with async_session_maker() as session:
+        for p in projects or []:
+            entryoid = (p.get("affter_entryoid") or "").strip()
+            if not entryoid:
+                continue
+            case = await session.scalar(
+                select(ProfileCase)
+                .where(ProfileCase.household_id == household_id,
+                       ProfileCase.affter_entryoid == entryoid)
+                .order_by(ProfileCase.id).limit(1))
+            vals = {
+                "projectno": (p.get("projectno") or "").strip() or None,
+                "projectname": (p.get("projectname") or "").strip() or None,
+                "projectno_detailed": (p.get("projectno_detailed") or "").strip() or None,
+                "projectname_detailed": (p.get("projectname_detailed") or "").strip() or None,
+                "project_created_at": _parse_project_time(p.get("project_create_time")),
+            }
+            if case is None:
+                case = ProfileCase(
+                    household_id=household_id,
+                    case_type=vals["projectname_detailed"] or vals["projectname"] or CASE_PLACEHOLDER_TYPE,
+                    status="进行中", milestones=[],
+                    affter_entryoid=entryoid, **vals,
+                    created_at=datetime.now(), updated_at=datetime.now())
+                session.add(case)
+                created += 1
+            else:
+                dirty = False
+                if case.case_type == CASE_PLACEHOLDER_TYPE and (vals["projectname_detailed"] or vals["projectname"]):
+                    case.case_type = vals["projectname_detailed"] or vals["projectname"]
+                    dirty = True
+                for k, v in vals.items():
+                    if v is not None and getattr(case, k) is None:
+                        setattr(case, k, v)
+                        dirty = True
+                if dirty:
+                    case.updated_at = datetime.now()
+                    updated += 1
+        await session.commit()
+    return {"created": created, "updated": updated}
+
+
+async def apply_case_milestones(household_id: int, case_items: list, *,
+                                source_file_id: Optional[int] = None,
+                                affter_entryoid: Optional[str] = None,
+                                project_name_hint: Optional[str] = None) -> dict:
+    """把 entity=case 的提取字段写入 profile_cases(按项目案件,v2)。
+
+    路由: affter_entryoid 非空 → (household_id, entryoid) 的项目案件;
+    空 → 默认案件(entryoid IS NULL,承接扁平形态/旧数据)。
     case_items: [{key, label, value}];key='case_type' → 案件类型(仅占位时可被覆盖);
     其余 → 里程碑 {name=label, date=value(需可解析), source_file_id},按 name upsert。
     状态从里程碑派生:签收>交付>获批>递交。返回 {case_id, mapped, stats}
@@ -756,14 +946,17 @@ async def apply_case_milestones(household_id: int, case_items: list, *,
     if not milestones_in and not case_type_hint:
         return {"case_id": None, "mapped": mapped, "stats": stats}
 
+    entryoid = (affter_entryoid or "").strip() or None
     async with async_session_maker() as session:
+        cond = (ProfileCase.affter_entryoid == entryoid) if entryoid else ProfileCase.affter_entryoid.is_(None)
         case = await session.scalar(
-            select(ProfileCase).where(ProfileCase.household_id == household_id)
+            select(ProfileCase).where(ProfileCase.household_id == household_id, cond)
             .order_by(ProfileCase.id.desc()).limit(1))
         if case is None:
             case = ProfileCase(household_id=household_id,
-                               case_type=case_type_hint or CASE_PLACEHOLDER_TYPE,
+                               case_type=project_name_hint or case_type_hint or CASE_PLACEHOLDER_TYPE,
                                status="进行中", milestones=[],
+                               affter_entryoid=entryoid,
                                created_at=datetime.now(), updated_at=datetime.now())
             session.add(case)
             await session.flush()
@@ -828,9 +1021,166 @@ async def list_cases(household_id: int) -> list[dict]:
                 "case_type": c.case_type,
                 "status": c.status,
                 "milestones": milestones,
+                "affter_entryoid": c.affter_entryoid,
+                "projectno": c.projectno,
+                "projectname": c.projectname,
+                "projectno_detailed": c.projectno_detailed,
+                "projectname_detailed": c.projectname_detailed,
+                "project_created_at": c.project_created_at.strftime("%Y-%m-%d %H:%M:%S") if c.project_created_at else None,
                 "updated_at": c.updated_at.strftime("%Y-%m-%d %H:%M:%S") if c.updated_at else "",
             })
         return out
+
+
+# ==================== 家庭关系交叉推导(自动写,不建人) ====================
+
+# 只写 relation_to_main='待确认' 的人(走 _relation 通道),人工已确认的关系永不回改;
+# 只匹配已有 person,绝不因推导建人。幂等:二次跑全部被 skipped_filled 挡掉。
+
+_CHILD_MIN_AGE_GAP_DAYS = 15 * 365  # 启发式:户主至少年长 15 岁才推 子/女
+
+
+async def _list_household_extract_results(household_id: int, doc_types: tuple) -> list:
+    """按家庭查 done 提取结果(走 import_tasks.household_id,同 attach_field_conflicts 路径)。"""
+    async with async_session_maker() as session:
+        task_ids = (await session.execute(
+            select(ProfileImportTask.id).where(ProfileImportTask.household_id == household_id)
+        )).scalars().all()
+        if not task_ids:
+            return []
+        return list((await session.execute(
+            select(DocExtractResult).where(
+                DocExtractResult.import_task_id.in_(task_ids),
+                DocExtractResult.status == "done",
+                DocExtractResult.doc_type.in_(doc_types))
+            .order_by(DocExtractResult.id)
+        )).scalars().all())
+
+
+async def _match_person_safe(household_id: int, id_number, name) -> dict:
+    """find_person_match 的安全封装:masked/假名/非法证件号先剔除,不命中不建人。"""
+    id_number = (id_number or "").strip() or None
+    name = (name or "").strip() or None
+    if id_number and (is_masked(id_number) or not valid_id_number(id_number)):
+        id_number = None
+    if name and (is_masked(name) or not plausible_person_name(name)):
+        name = None
+    if not id_number and not name:
+        return {"person_id": None, "matched_by": None}
+    return await find_person_match(household_id, id_number, name)
+
+
+async def _write_relation(household_id: int, person_id: int, relation: str, *,
+                          basis: str, source_result_id, inferred: list) -> None:
+    """走 _relation 通道写关系(仅'待确认'时落地);真写入时追加推导记录。"""
+    write = await apply_extracted_fields_v2(
+        household_id, {"person_id": person_id, "matched_by": "inferred"},
+        [{"key": "relation", "value": relation, "column": _RELATION_FIELD}])
+    action = next((m.get("action") for m in write["mapped"]
+                   if m.get("field") == _RELATION_FIELD), None)
+    if action == "relation_written":
+        inferred.append({"person_id": person_id, "relation": relation,
+                         "basis": basis, "source_result_id": source_result_id})
+
+
+async def _infer_from_birth_cert(household_id: int, main_id: int, ex: dict,
+                                 result_id, inferred: list) -> None:
+    """出生证:父/母一方命中户主本人,另一方命中家庭已有 person → 另一方写'配偶'。"""
+    father = await _match_person_safe(household_id,
+                                      ex.get("father_id_number"), ex.get("father_name"))
+    mother = await _match_person_safe(household_id,
+                                      ex.get("mother_id_number"), ex.get("mother_name"))
+    for hit, other, tag in ((father, mother, "father_is_main"),
+                            (mother, father, "mother_is_main")):
+        if hit.get("person_id") != main_id:
+            continue  # 命中非户主或父母都未命中 → 无法确定与户主关系,不写
+        opid = other.get("person_id")
+        if not opid or opid == main_id:
+            continue  # 另一方未建档 → 不建人,跳过
+        await _write_relation(household_id, opid, "配偶",
+                              basis=f"birth_cert:{tag}", source_result_id=result_id,
+                              inferred=inferred)
+
+
+async def _infer_from_marriage_cert(household_id: int, main_id: int, holder_pid,
+                                    ex: dict, result_id, inferred: list) -> None:
+    """结婚证:持证人与 spouse_name 一方为户主,另一方已建档且待确认 → 写'配偶'。"""
+    spouse = await _match_person_safe(household_id, None, ex.get("spouse_name"))
+    spid = spouse.get("person_id")
+    pairs = []
+    if holder_pid == main_id and spid and spid != main_id:
+        pairs.append((spid, "holder_is_main"))
+    if spid == main_id and holder_pid and holder_pid != main_id:
+        pairs.append((holder_pid, "spouse_is_main"))
+    for pid, tag in pairs:
+        await _write_relation(household_id, pid, "配偶",
+                              basis=f"marriage_cert:{tag}", source_result_id=result_id,
+                              inferred=inferred)
+
+
+async def _infer_children_heuristic(household_id: int, main_id: int,
+                                    inferred: list) -> None:
+    """启发式:同姓 + 户主年长>15岁 + (双方都有户籍地址时一致) → 按性别写 子/女。"""
+    persons = await list_persons(household_id)
+    main = next((p for p in persons if p["id"] == main_id), None)
+    if not main:
+        return
+    fmain = {f["field"]: f.get("value") for f in main.get("fields") or []}
+    main_birth = _parse_date(fmain.get("birth_date"))
+    main_addr = re.sub(r"\s+", "", fmain.get("hukou_address") or "")
+    main_name = (main.get("name") or "").strip()
+    if not main_birth or not main_name:
+        return
+    for p in persons:
+        if p["id"] == main_id or p.get("relation_to_main") != "待确认":
+            continue
+        name = (p.get("name") or "").strip()
+        if not name or name[0] != main_name[0]:
+            continue  # 不同姓
+        fp = {f["field"]: f.get("value") for f in p.get("fields") or []}
+        p_birth = _parse_date(fp.get("birth_date"))
+        if not p_birth or (p_birth - main_birth).days <= _CHILD_MIN_AGE_GAP_DAYS:
+            continue  # 缺生日或户主年长不足 15 岁
+        p_addr = re.sub(r"\s+", "", fp.get("hukou_address") or "")
+        if main_addr and p_addr and p_addr != main_addr:
+            continue  # 双方都有户籍地址但不一致
+        g = (fp.get("gender") or "").strip()
+        gnorm = _GENDER_MAP.get(g) or _GENDER_MAP.get(g.lower())
+        rel = {"M": "子", "F": "女"}.get(gnorm)
+        if not rel:
+            continue  # 性别未知不推
+        await _write_relation(
+            household_id, p["id"], rel,
+            basis=f"heuristic:surname+age_gap+{'addr' if p_addr and main_addr else 'no_addr'}",
+            source_result_id=None, inferred=inferred)
+
+
+async def infer_family_relations(household_id: int) -> dict:
+    """家庭关系交叉推导:出生证父母/结婚证配偶/同姓年长差启发式。
+
+    幂等(_relation 通道只在'待确认'时写);只匹配已有 person,绝不建人。
+    返回 {"checked_results": n, "inferred": [{person_id, relation, basis, source_result_id}]}
+    """
+    inferred: list[dict] = []
+    household = await get_household(household_id)
+    if not household or not household.get("main_person_id"):
+        return {"checked_results": 0, "inferred": []}
+    main_id = household["main_person_id"]
+
+    results = await _list_household_extract_results(
+        household_id, ("birth_cert", "marriage_cert"))
+    for r in results:
+        ex = r.extracted or {}
+        if r.doc_type == "birth_cert":
+            await _infer_from_birth_cert(household_id, main_id, ex, r.id, inferred)
+        elif r.doc_type == "marriage_cert":
+            holder_pid = (r.write_stats or {}).get("person_id")
+            await _infer_from_marriage_cert(household_id, main_id, holder_pid,
+                                            ex, r.id, inferred)
+
+    # C1/C2 先于 C3:配偶落定后,启发式只处理剩余待确认
+    await _infer_children_heuristic(household_id, main_id, inferred)
+    return {"checked_results": len(results), "inferred": inferred}
 
 
 # ==================== 完备度矩阵(人 × 材料类型) ====================
@@ -884,7 +1234,7 @@ def resolve_matrix_type(file_row: dict) -> Optional[str]:
 async def build_completeness_matrix(task: dict) -> dict:
     """完备度矩阵:行=家庭成员,列=材料类型,格=ok(好)/warn(有待复核)/missing(缺)/na(不适用)。
 
-    人档关联:① 提取结果归因(write_stats.person_id) ② 文件名/文件夹含人名 ③ household 列家庭共享。
+    人档关联:① 归因(write_stats + customer_files.person_id 手动归属) ② 文件名/文件夹含人名 ③ household 列家庭共享。
     """
     from db import customer_file_crud, doc_extract_crud
 
@@ -895,12 +1245,14 @@ async def build_completeness_matrix(task: dict) -> dict:
     files, _ = await customer_file_crud.list_task_files(task["id"], limit=1000)
     results, _ = await doc_extract_crud.list_results(import_task_id=task["id"], limit=1000)
 
-    # ① 归因关联:person_id -> file ids
+    # ① 归因关联:person_id -> file ids(提取结果 write_stats + customer_files.person_id 手动归属)
     linked: dict[int, set] = {}
     for r in results:
-        pid = ((r.get("write_stats") or {}).get("person_id"))
-        if pid:
+        for pid in _result_person_ids(r.get("write_stats")):
             linked.setdefault(pid, set()).add(r["customer_file_id"])
+    for f in files:
+        if f.get("person_id"):
+            linked.setdefault(f["person_id"], set()).add(f["id"])
 
     # ② 人名关联 + 类型归并
     cells: dict[int, dict] = {}

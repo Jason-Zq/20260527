@@ -76,8 +76,9 @@ function startResize(e) {
   document.body.style.userSelect = 'none'
 }
 
-watch(() => props.visible, (v) => {
-  if (v && props.personId) loadFiles(props.personId)
+// 同时监听 personId:抽屉开着时切换人员(点另一人「查看文件」)也要重新加载
+watch([() => props.visible, () => props.personId], ([v, pid]) => {
+  if (v && pid) loadFiles(pid)
 })
 
 async function loadFiles(pid) {

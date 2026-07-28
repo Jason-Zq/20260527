@@ -1,0 +1,1307 @@
+https://restful.huanqiuyimin.com/Cloud/getAfterCustomerAllFiles?customer_code=U-2024032514080891555&operation_user=Jason邹启
+这是查询客户文件信息的接口
+{
+	"ret": 200,
+	"code": 0,
+	"data": {
+		"total": 1,
+		"list": [
+			{
+				"customer_code": "U-2024032514080891555",
+				"customer_name": "赵美琳",
+				"crm_oid": "03313d39-498f-44af-9b22-94e01efb8b92",
+				"list_count": 3,
+				"list": [
+					{
+						"affter_entryoid": "ce50d959-56f1-4103-8965-912a67818974",
+						"create_time": "2026-07-27 18:22:56",
+						"projectno": "3382",
+						"projectname": "香港高端人才通行证计划后续服务-续签",
+						"projectno_detailed": "3549",
+						"projectname_detailed": "A类无条件延期1年",
+						"files": [
+							{
+								"cloud_file_id": "3272737",
+								"file_name": "韩嘉宸-香港身份证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/dcab8fba6bafc8d8bc9440f9160e7f8b.pdf",
+								"relative_path": "受养人/韩嘉宸",
+								"create_time": "2026-07-27 18:22:55",
+								"affter_progressname": "韩嘉宸"
+							},
+							{
+								"cloud_file_id": "3272736",
+								"file_name": "韩嘉宸-港澳通行证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/7b9677cbe1a5dee1f4c1dc356fa18ea1.pdf",
+								"relative_path": "受养人/韩嘉宸",
+								"create_time": "2026-07-27 18:22:54",
+								"affter_progressname": "韩嘉宸"
+							},
+							{
+								"cloud_file_id": "3272735",
+								"file_name": "Visa TQEN-1606125-24-韩嘉宸.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/e517aa047bcc676710365c7497fe3c87.pdf",
+								"relative_path": "受养人/韩嘉宸",
+								"create_time": "2026-07-27 18:22:51",
+								"affter_progressname": "韩嘉宸"
+							},
+							{
+								"cloud_file_id": "3272734",
+								"file_name": "TQEN160612524_8577235-新增受养人韩嘉宸获批信.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/55ce7003d289830d600b8810cdc8ee25.pdf",
+								"relative_path": "受养人/韩嘉宸",
+								"create_time": "2026-07-27 18:22:50",
+								"affter_progressname": "韩嘉宸"
+							},
+							{
+								"cloud_file_id": "3272732",
+								"file_name": "韩嘉宸-小白条.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/2c8f6fa297c396b8ae051b45fe716601.pdf",
+								"relative_path": "受养人/韩嘉宸",
+								"create_time": "2026-07-27 18:22:49",
+								"affter_progressname": "韩嘉宸"
+							},
+							{
+								"cloud_file_id": "3272733",
+								"file_name": "委托代理人书面声明.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/e00418e2dda93d407c2836b93d601b98.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:49",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272731",
+								"file_name": "赵美琳-港澳通行证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/3dc6a39b022d8a760784b38e0e8c3764.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:48",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272728",
+								"file_name": "TQEN120846624_6168469-赵美琳获批信.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/31551120a8ba531b28fa2470f7f37c73.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:47",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272729",
+								"file_name": "赵美琳-小白条.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/21a8860dfa92bb1acf2ae73b306e62eb.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:47",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272730",
+								"file_name": "Visa TQEN-1208466-24-赵美琳.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/11e979bcbc4999cca36f8fd63d74e9fe.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:47",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272727",
+								"file_name": "赵美琳-出入境记录.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/9ce8852b3cf431685d32fb659c65f905.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:45",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272725",
+								"file_name": "TTPS Extension Online Application.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/0e5661611039fd7ea538d5ad8a046b4f.pdf",
+								"relative_path": "递交",
+								"create_time": "2026-07-27 18:22:41",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "3272726",
+								"file_name": "赵美琳-香港身份证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/b8f5236edd5e07bedc58aea0cc06e5a9.pdf",
+								"relative_path": "个人文件",
+								"create_time": "2026-07-27 18:22:41",
+								"affter_progressname": "个人文件"
+							},
+							{
+								"cloud_file_id": "3272723",
+								"file_name": "LWB0060NUAK38WDD.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/d3b6061832d8c28ba4777a5c1a2d8c5a.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:22:40",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "3272724",
+								"file_name": "Acknowledgment-5.png",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/3ffc2d4c3d959954b77107e232a37e79.png",
+								"relative_path": "递交",
+								"create_time": "2026-07-27 18:22:40",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "3272721",
+								"file_name": "问题回复.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/56e8ea946998d52a24e2b094ad5bc306.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:22:39",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "3272722",
+								"file_name": "递交截图.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/9dce971fb0d1e1fc1181bc3bcc625bae.pdf",
+								"relative_path": "递交",
+								"create_time": "2026-07-27 18:22:39",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "3272720",
+								"file_name": "【清单】高端人才通行证计划-A类延期一年续签清单0331.docx",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/27f10056b3e39a917b009e3e2372813d.docx",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:22:36",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "3272718",
+								"file_name": "赵美琳-小白条.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/aaf360ea23f10410894d4480b03a12de.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:20:33",
+								"affter_progressname": "客户个人文件"
+							},
+							{
+								"cloud_file_id": "3272717",
+								"file_name": "赵美琳-港澳通行证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/8894f442e9bcb822402bd99693b729a3.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:51",
+								"affter_progressname": "客户个人文件"
+							},
+							{
+								"cloud_file_id": "3272716",
+								"file_name": "TQEN120846624_6168469-赵美琳获批信.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/ab200997f57c7f64b9e64e78394ba0aa.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:49",
+								"affter_progressname": "客户个人文件"
+							},
+							{
+								"cloud_file_id": "3272714",
+								"file_name": "赵美琳-香港身份证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/62e5a4a0481c779decc0e74ec05fc0bc.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:48",
+								"affter_progressname": "客户个人文件"
+							},
+							{
+								"cloud_file_id": "3272715",
+								"file_name": "Visa TQEN-1208466-24-赵美琳.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/15d7f85529d5a419e7c63a2dc6115553.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:48",
+								"affter_progressname": "客户个人文件"
+							},
+							{
+								"cloud_file_id": "3272713",
+								"file_name": "赵美琳-港澳通行证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/6fa41197c0103f80bcafd3f1620e5986.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:30",
+								"affter_progressname": "客户基础文件"
+							},
+							{
+								"cloud_file_id": "3272712",
+								"file_name": "赵美琳-小白条.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/1a381560b3f988661aca9149696548dc.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:01",
+								"affter_progressname": "客户基础文件"
+							},
+							{
+								"cloud_file_id": "3272711",
+								"file_name": "TQEN120846624_6168469-赵美琳获批信.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/f2849aaf77f21c6a35c5fa0c5eb6c7bd.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:19:00",
+								"affter_progressname": "客户基础文件"
+							},
+							{
+								"cloud_file_id": "3272709",
+								"file_name": "赵美琳-香港身份证.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/9dbb8a741c0d585f83e72954ba955307.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:18:59",
+								"affter_progressname": "客户基础文件"
+							},
+							{
+								"cloud_file_id": "3272710",
+								"file_name": "Visa TQEN-1208466-24-赵美琳.pdf",
+								"file_path": "3382/3549/03313d39-498f-44af-9b22-94e01efb8b92/b1c9d34b1b39b9d2f617241956237932.pdf",
+								"relative_path": null,
+								"create_time": "2026-07-27 18:18:59",
+								"affter_progressname": "客户基础文件"
+							}
+						]
+					},
+					{
+						"affter_entryoid": "cd604892-bfa7-4433-9ded-45744defac01",
+						"create_time": "2025-04-21 12:01:08",
+						"projectno": "3181",
+						"projectname": "香港高端人才通行证计划后续服务-转永居前增加受养人",
+						"projectno_detailed": "3182",
+						"projectname_detailed": "香港高端人才通行证计划后续服务-转永居前增加受养人",
+						"files": [
+							{
+								"cloud_file_id": "2446943",
+								"file_name": "韩嘉宸.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/f403771d238d376fdfd9372d0e62c7ed.jpg",
+								"relative_path": "小白条",
+								"create_time": "2025-04-21 12:01:06",
+								"affter_progressname": "小白条"
+							},
+							{
+								"cloud_file_id": "2446940",
+								"file_name": "韩嘉宸.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/1f2ae2ad91492a1edc6e91b960c4e74d.jpg",
+								"relative_path": "小白条",
+								"create_time": "2025-04-21 12:00:23",
+								"affter_progressname": "小白条"
+							},
+							{
+								"cloud_file_id": "2340783",
+								"file_name": "Visa TQEN-1606125-24-韩嘉宸.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/28c68f178f6573e1fb66d4c3de969482.pdf",
+								"relative_path": "电子签证",
+								"create_time": "2025-03-06 13:00:29",
+								"affter_progressname": "电子签证"
+							},
+							{
+								"cloud_file_id": "2324108",
+								"file_name": "TQEN160612524_8577235-新增受养人韩嘉宸获批信.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/af43a51bc2f95424da8e9566916b47d2.pdf",
+								"relative_path": "获批信",
+								"create_time": "2025-02-27 19:55:58",
+								"affter_progressname": "获批信"
+							},
+							{
+								"cloud_file_id": "2324104",
+								"file_name": "不反对移居声明书.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/fc4d404723d990ce5b80bc01512b5839.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:08",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324105",
+								"file_name": "证件照.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/1defbaf5b55fad39efa0476fbdee25dc.jpg",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:08",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324102",
+								"file_name": "户口本-曾用名韩宜辰.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/5800b210676373dd1ce8aa9c02f21afe.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:07",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324103",
+								"file_name": "身份证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/c7fecf0dcae10029651b2eda95b68866.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:07",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324100",
+								"file_name": "港澳通行证-韩嘉宸.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/157fa20414d5ee9cb257226c3fe29a36.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:06",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324101",
+								"file_name": "生父护照签名页.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/8a469048420aae6042db48f12b5747ca.jpg",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:06",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324098",
+								"file_name": "离婚证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/d5a39297be51d15960b80b359e3500f0.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:05",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324099",
+								"file_name": "出生证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/b3e46791d44449cf8e4609cab088dc08.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:55:05",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324096",
+								"file_name": "户口本-曾用名韩宜辰.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/4ea6fa34a05623f8cd4a7ffbc8e335a5.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:49",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324094",
+								"file_name": "生父护照签名页.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/a881fcae6f7f985877adfa7db398705d.jpg",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:48",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324095",
+								"file_name": "身份证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/4a4b7c01790ed6e5ada04f635c854353.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:48",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324092",
+								"file_name": "证件照.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/d74c20a6ee084853d7951288eebdfd34.jpg",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:47",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324093",
+								"file_name": "港澳通行证-韩嘉宸.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/e5b300c1a364c0cb7266748cfaa21325.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:47",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324090",
+								"file_name": "不反对移居声明书.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/0165ef3747521884c6ee599cf730bb55.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:46",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324091",
+								"file_name": "离婚证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/293f281c390c299e7c46e7aa347ca53e.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:46",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2324089",
+								"file_name": "出生证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/7d1aed64f464f9bb226ffb670a1d18e2.pdf",
+								"relative_path": "受养人-韩嘉宸",
+								"create_time": "2025-02-27 19:54:45",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2244486",
+								"file_name": "离婚协议书.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/97ecb86beb15e0c64a790e5396a15425.pdf",
+								"relative_path": "0113补料",
+								"create_time": "2025-01-14 11:19:26",
+								"affter_progressname": "0113补料"
+							},
+							{
+								"cloud_file_id": "2244485",
+								"file_name": "离婚协议书-不上传.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/f9d88d3cd27fdacafcd103c216a55c59.pdf",
+								"relative_path": "0113补料",
+								"create_time": "2025-01-14 11:19:25",
+								"affter_progressname": "0113补料"
+							},
+							{
+								"cloud_file_id": "2244484",
+								"file_name": "TQEN160612524_8115481-韩嘉宸新增受养人补料 ddl 0127.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/3da9f3a93313ee01cd530e730a0f13bb.pdf",
+								"relative_path": "0113补料",
+								"create_time": "2025-01-14 11:19:18",
+								"affter_progressname": "0113补料"
+							},
+							{
+								"cloud_file_id": "2244482",
+								"file_name": "Acknowledgment.png",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/98a644775cd5dc4b9ec66f019d69425c.png",
+								"relative_path": "0113补料",
+								"create_time": "2025-01-14 11:19:17",
+								"affter_progressname": "0113补料"
+							},
+							{
+								"cloud_file_id": "2244483",
+								"file_name": "户口本-曾用名韩宜辰.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/1c05a4dbc1e7df3e44c0a7ef9d612b04.pdf",
+								"relative_path": "0113补料",
+								"create_time": "2025-01-14 11:19:17",
+								"affter_progressname": "0113补料"
+							},
+							{
+								"cloud_file_id": "2178210",
+								"file_name": "TQEN160612524_7745581-赵美琳新增受养人档案号.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/8b098b62717b9e74231a3b35a55cf287.pdf",
+								"relative_path": "档案号",
+								"create_time": "2024-12-04 16:55:30",
+								"affter_progressname": "档案号"
+							},
+							{
+								"cloud_file_id": "2172995",
+								"file_name": "解释信.docx",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/b663b48495bdf0c3ea268568144a6f13.docx",
+								"relative_path": "A类-赵美琳-增加受养人/不上傳",
+								"create_time": "2024-12-02 12:04:52",
+								"affter_progressname": "不上傳"
+							},
+							{
+								"cloud_file_id": "2172996",
+								"file_name": "港澳通行证-赵美琳.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/9d6faf0dfaafd89d707f29aa8686f502.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:52",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172993",
+								"file_name": "高才通赵总临时加入受养人材料清单.docx",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/14fc5782be1b4aecff262964539ffbcf.docx",
+								"relative_path": "A类-赵美琳-增加受养人/不上傳",
+								"create_time": "2024-12-02 12:04:51",
+								"affter_progressname": "不上傳"
+							},
+							{
+								"cloud_file_id": "2172994",
+								"file_name": "香港身份证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/875fd31f6227b3f46672841b17c728c2.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:51",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172990",
+								"file_name": "身份证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/8981ac3bbb5dbabeeda55c7837231e21.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:50",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172991",
+								"file_name": "解释信.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/b94d3fb9585ca200eb9f4a45e62bc0a1.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:50",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172992",
+								"file_name": "小白条-赵美琳.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/58fe35bd206067fa4a62ea486b9614b9.jpg",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:50",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172988",
+								"file_name": "户口本.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/103570438b7080deec1333a9345334da.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:49",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172989",
+								"file_name": "生父护照签名页.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/8b3e9e48410b4e66f7f5cb89e536bf2d.jpg",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:49",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172985",
+								"file_name": "委托代理书面声明.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/fe42a7c63d42c9f30709abd1ef66f594.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:48",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172986",
+								"file_name": "存款证明.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/6d705ef224b0a11e9f5543257477fff1.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:48",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172987",
+								"file_name": "TQEN120846624_6168469-赵美琳获批信.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/d85beae7933eb7fb9db63d4a122d22b5.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:48",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172982",
+								"file_name": "证件照.jpg",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/dbd84ed2bedf3f91b6aca13dac52dacd.jpg",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:47",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172983",
+								"file_name": "Visa TQEN-1208466-24-赵美琳-电子签证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/0a927e862051c356dd774386e9e8b93b.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/保证人-赵美琳",
+								"create_time": "2024-12-02 12:04:47",
+								"affter_progressname": "保证人-赵美琳"
+							},
+							{
+								"cloud_file_id": "2172980",
+								"file_name": "ID997-受养人-已递交.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/c7590216fc2557b5e0964d08b8e81f0a.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:46",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "2172981",
+								"file_name": "港澳通行证-韩嘉宸.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/cef1b080513b8c888ae94c1e543d8592.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:46",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172978",
+								"file_name": "ID997-保证人-留底版.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/5fe84edfc0781d944b810a0592dd8803.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:45",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "2172979",
+								"file_name": "离婚证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/a07fe70143576d5c6bc44c1dddd59223.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:45",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172976",
+								"file_name": "Acknowledgment.png",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/ee90f9beb674e9515e9aa582c2acb35d.png",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:44",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "2172977",
+								"file_name": "户口本-曾用名韩宜辰.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/f3740086f7dec52828826a173c036e9f.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:44",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172973",
+								"file_name": "4.png",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/3d0a9ce27f98bd4ccb8dfd1783620a6d.png",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:43",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "2172974",
+								"file_name": "不反对移居声明书.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/5e3f3085f1019f5bc20c8d07188a1952.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:43",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172975",
+								"file_name": "出生证.pdf",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/68db2d31f314c89378904fcfd475385b.pdf",
+								"relative_path": "A类-赵美琳-增加受养人/受养人-韩嘉宸",
+								"create_time": "2024-12-02 12:04:43",
+								"affter_progressname": "受养人-韩嘉宸"
+							},
+							{
+								"cloud_file_id": "2172971",
+								"file_name": "3.png",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/4fd7640f6bab16e999556a157fc13b9c.png",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:42",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "2172972",
+								"file_name": "2.png",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/a3c43dd43aa62594b129b189e5adfe96.png",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:42",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "2172970",
+								"file_name": "1.png",
+								"file_path": "3181/3182/03313d39-498f-44af-9b22-94e01efb8b92/91f51f3c29bd712be84d76388df2bda1.png",
+								"relative_path": "A类-赵美琳-增加受养人/递交留底",
+								"create_time": "2024-12-02 12:04:40",
+								"affter_progressname": "递交留底"
+							}
+						]
+					},
+					{
+						"affter_entryoid": "14cb3f7a-e710-44e8-9bc9-22455cd1e7dc",
+						"create_time": "2025-03-05 16:41:12",
+						"projectno": "3129",
+						"projectname": "香港高端人才通行证计划-高薪人士",
+						"projectno_detailed": "3130",
+						"projectname_detailed": "香港高端人才通行证计划-高薪人士",
+						"files": [
+							{
+								"cloud_file_id": "2339248",
+								"file_name": "赵美琳.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/144d5242e0bfdb45494e3324a1851eaf.jpg",
+								"relative_path": "香港身份证",
+								"create_time": "2025-03-05 16:41:11",
+								"affter_progressname": "香港身份证"
+							},
+							{
+								"cloud_file_id": "2036950",
+								"file_name": "Visa TQEN-1208466-24-赵美琳-电子签证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/79b3852d6341bffbc4d9b3671a2026d4.pdf",
+								"relative_path": null,
+								"create_time": "2024-09-10 11:04:57",
+								"affter_progressname": "获批"
+							},
+							{
+								"cloud_file_id": "2036948",
+								"file_name": "赵美琳.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/46e6851ee154986bc7ffcbbfb4a87622.jpg",
+								"relative_path": "小白条",
+								"create_time": "2024-09-10 11:03:12",
+								"affter_progressname": "小白条"
+							},
+							{
+								"cloud_file_id": "1874806",
+								"file_name": "TQEN120846624_6168469-赵美琳获批信.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e469479d804c79ff688b6c469202d052.pdf",
+								"relative_path": null,
+								"create_time": "2024-06-20 16:34:49",
+								"affter_progressname": "获批"
+							},
+							{
+								"cloud_file_id": "1817263",
+								"file_name": "TQEN120846624_5867081-赵美琳.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/ab3f04d0bf31bef362f3a6e6b1204afd.pdf",
+								"relative_path": null,
+								"create_time": "2024-05-21 17:45:17",
+								"affter_progressname": "递交"
+							},
+							{
+								"cloud_file_id": "1804021",
+								"file_name": "身份证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/1e9e266d4f321b25831f063fad0f0ad8.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:31:47",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1804022",
+								"file_name": "【高端人才通行证计划】A类.docx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/84f5fc596d43ed14df6059c93127ccf4.docx",
+								"relative_path": "A类-赵美琳/不上传",
+								"create_time": "2024-05-16 16:31:47",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1804019",
+								"file_name": "【高端人才通行证计划】A类赵女士材料清单.docx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/40def75ed8159c96c576c086da336ed1.docx",
+								"relative_path": "A类-赵美琳/不上传",
+								"create_time": "2024-05-16 16:31:46",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1804020",
+								"file_name": "证件照.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/685c9ab36ac1228fe44ce0c5dee4b67e.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:31:46",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1804016",
+								"file_name": "23-10-12.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/126c724273398ddea5302e804b44be5a.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:31:45",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1804017",
+								"file_name": "~$端人才通行证计划】A类.docx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/1dbf72a17748e0bbac8babeda3585f11.docx",
+								"relative_path": "A类-赵美琳/不上传",
+								"create_time": "2024-05-16 16:31:45",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1804018",
+								"file_name": "户口本.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/32cab6c436b90efedc8cd1093c3f7696.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:31:45",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1804013",
+								"file_name": "委托代理声明书.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/c58402f4904aee2987bcf5f7a0af9611.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:31:44",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1804014",
+								"file_name": "赴港同意书.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/b107ba61f7f41d8490bf699180e05f39.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:31:44",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1804015",
+								"file_name": "港澳通行证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/3be00bc89719f02f4a19e18c1b43404c.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:31:44",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1804010",
+								"file_name": "保险代理合同-不上传.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/4d15917d077b514994a2c1596c5f3f1c.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:31:43",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1804011",
+								"file_name": "24-2.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/6e5363757420c6bae726f492f199934e.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:31:43",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1804012",
+								"file_name": "工作证明信.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/47ecb755bf226b73c9b70e8625367c55.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:31:43",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1804007",
+								"file_name": "23-9-10.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/8fcce0a12524da09302d4beeb6ffec9c.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:31:42",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1804008",
+								"file_name": "个人信息页1.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/d06c8478807fe174fb77b76ec44a44b1.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:31:42",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1804009",
+								"file_name": "24-1-2.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/9972ee6e8efa9e50b89e6f566b267118.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:31:42",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1804005",
+								"file_name": "23-7-8.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/6fba589dc6eec95748089f615f6f83b1.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:31:41",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1804006",
+								"file_name": "2.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/9313f29aca2126f699a1a50457bc538c.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/纳税记录",
+								"create_time": "2024-05-16 16:31:41",
+								"affter_progressname": "纳税记录"
+							},
+							{
+								"cloud_file_id": "1804002",
+								"file_name": "个人信息页.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/d68d1889451dc67d8fdc7c8430c59c94.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:31:40",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1804003",
+								"file_name": "3.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/1f47206cf6b71791e98248de7a14105d.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/纳税记录",
+								"create_time": "2024-05-16 16:31:40",
+								"affter_progressname": "纳税记录"
+							},
+							{
+								"cloud_file_id": "1804004",
+								"file_name": "收入计算.xlsx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/224bf092c3b2fef234da5637a35e605a.xlsx",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传",
+								"create_time": "2024-05-16 16:31:40",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803999",
+								"file_name": "23年.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e8351b9cecd379aeb6b138cebffe527d.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:31:39",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1804000",
+								"file_name": "24年.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/4d343c4cc8ab2bc9a516ca2d98bb9730.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:31:39",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1804001",
+								"file_name": "1.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/f497bef2c831a430c692597948aa0b2a.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/纳税记录",
+								"create_time": "2024-05-16 16:31:39",
+								"affter_progressname": "纳税记录"
+							},
+							{
+								"cloud_file_id": "1803997",
+								"file_name": "个人所得税纳税记录.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/b9a77554bfc4adf9940930052cfeee26.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息",
+								"create_time": "2024-05-16 16:31:38",
+								"affter_progressname": "收入信息"
+							},
+							{
+								"cloud_file_id": "1803998",
+								"file_name": "3.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/ef31a8083ade3e6f405c6d455861ffe2.png",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/自然人",
+								"create_time": "2024-05-16 16:31:38",
+								"affter_progressname": "自然人"
+							},
+							{
+								"cloud_file_id": "1803994",
+								"file_name": "2.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/c03a1e2464d3ab8f95f1fc82c3e91c19.png",
+								"relative_path": "A类-赵美琳/递交留底",
+								"create_time": "2024-05-16 16:31:37",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "1803995",
+								"file_name": "纳税记录-087849.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/58098222a89247d120fdd6be871a9c87.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传",
+								"create_time": "2024-05-16 16:31:37",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803996",
+								"file_name": "Acknowledgment.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/bd62bf732a24ad415f940645ccf92ae8.png",
+								"relative_path": "A类-赵美琳/递交留底",
+								"create_time": "2024-05-16 16:31:37",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "1803992",
+								"file_name": "TTPS Online Application.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/4a25d2390389b015c7eb90bababac074.pdf",
+								"relative_path": "A类-赵美琳/递交留底",
+								"create_time": "2024-05-16 16:31:36",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "1803993",
+								"file_name": "自然人电子税务局个人收入纳税明细截图.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/201b77221037780a6b123d085c014c43.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息",
+								"create_time": "2024-05-16 16:31:36",
+								"affter_progressname": "收入信息"
+							},
+							{
+								"cloud_file_id": "1803990",
+								"file_name": "~$收入计算.xlsx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/b547d0f4b6c5d720f270d0d9a49770ec.xlsx",
+								"relative_path": "A类-赵美琳",
+								"create_time": "2024-05-16 16:31:35",
+								"affter_progressname": "A类-赵美琳"
+							},
+							{
+								"cloud_file_id": "1803991",
+								"file_name": "个人收入纳税明细截图.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/baf0ae4bb30f2cef3b8e4739e163cd92.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息",
+								"create_time": "2024-05-16 16:31:35",
+								"affter_progressname": "收入信息"
+							},
+							{
+								"cloud_file_id": "1803989",
+								"file_name": "1.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/fbe7ecbca6d1105609138de4ee405e33.png",
+								"relative_path": "A类-赵美琳",
+								"create_time": "2024-05-16 16:31:34",
+								"affter_progressname": "A类-赵美琳"
+							},
+							{
+								"cloud_file_id": "1803986",
+								"file_name": "证件照.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/cb91b3dacfe04017556253f47e163992.jpg",
+								"relative_path": "个人信息",
+								"create_time": "2024-05-16 16:31:17",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803983",
+								"file_name": "身份证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/7905d4b7f54a2a1c2fad1f103fbe8779.pdf",
+								"relative_path": "个人信息",
+								"create_time": "2024-05-16 16:31:16",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803984",
+								"file_name": "户口本.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/66dbf4d20ad4fc505c23f3c0a16503f9.pdf",
+								"relative_path": "个人信息",
+								"create_time": "2024-05-16 16:31:16",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803985",
+								"file_name": "港澳通行证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/498b4d6f8842bd39e219519361cd9040.pdf",
+								"relative_path": "个人信息",
+								"create_time": "2024-05-16 16:31:16",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803968",
+								"file_name": "【高端人才通行证计划】A类赵女士材料清单.docx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/d53cf07770bb2f95d19ffbc5a2bede5e.docx",
+								"relative_path": "A类-赵美琳/不上传",
+								"create_time": "2024-05-16 16:31:02",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803965",
+								"file_name": "~$端人才通行证计划】A类.docx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e24b4e28011a2a4301ec037200e5af08.docx",
+								"relative_path": "A类-赵美琳/不上传",
+								"create_time": "2024-05-16 16:31:01",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803966",
+								"file_name": "赴港同意书.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/bac7e02de329c5342eadb3099b1e4f40.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:31:01",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1803967",
+								"file_name": "证件照.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/0aa43dcf459a8ae4f41d4af52ddb786c.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:31:01",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803962",
+								"file_name": "身份证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/99857357124b58d1b9a84233bbea71be.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:31:00",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803963",
+								"file_name": "23-9-10.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/8e860e4ccae6cf9f88c03dd23f7bbd36.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:31:00",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1803964",
+								"file_name": "【高端人才通行证计划】A类.docx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/1b5a686a6fb673b9021bfd7a25e0fc3c.docx",
+								"relative_path": "A类-赵美琳/不上传",
+								"create_time": "2024-05-16 16:31:00",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803959",
+								"file_name": "委托代理声明书.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e177e4373ee69650d3792d6a379fe796.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:30:59",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1803960",
+								"file_name": "户口本.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/7a5a357b9d48eb2a00280f277c3438a7.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:30:59",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803961",
+								"file_name": "港澳通行证.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/1f7f9c1864172fe015835c5183bfdb64.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/个人信息",
+								"create_time": "2024-05-16 16:30:59",
+								"affter_progressname": "个人信息"
+							},
+							{
+								"cloud_file_id": "1803956",
+								"file_name": "保险代理合同-不上传.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/16468eb3c90784bf2dd1c1a97cc7def4.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:30:58",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1803957",
+								"file_name": "24-1-2.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/fb5f33353920dd81fea780a5da27eb39.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:30:58",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1803958",
+								"file_name": "工作证明信.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/929ca5690f82351da772233283acac25.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/工作信息",
+								"create_time": "2024-05-16 16:30:58",
+								"affter_progressname": "工作信息"
+							},
+							{
+								"cloud_file_id": "1803952",
+								"file_name": "23-7-8.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/586e3a3000dfa9c2a070b1787471df0b.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:30:57",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1803953",
+								"file_name": "自然人电子税务局个人收入纳税明细截图.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e0cec4973e46481a122b800d4630d439.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息",
+								"create_time": "2024-05-16 16:30:57",
+								"affter_progressname": "收入信息"
+							},
+							{
+								"cloud_file_id": "1803954",
+								"file_name": "24-2.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/d089e5f84ae0bceb5366e21e7d08599f.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:30:57",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1803955",
+								"file_name": "23-10-12.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e9c27d3f83d72a0ea97eae242442fd2f.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/个税",
+								"create_time": "2024-05-16 16:30:57",
+								"affter_progressname": "个税"
+							},
+							{
+								"cloud_file_id": "1803949",
+								"file_name": "3.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/c62cab33656f438367d31e262161e0d4.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/纳税记录",
+								"create_time": "2024-05-16 16:30:56",
+								"affter_progressname": "纳税记录"
+							},
+							{
+								"cloud_file_id": "1803950",
+								"file_name": "个人信息页.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/3a3f5c70ad5f8a3ddfcd19db02563ec7.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:30:56",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1803951",
+								"file_name": "2.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/e377204bd1b12ac4eadf529f48f8d516.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/纳税记录",
+								"create_time": "2024-05-16 16:30:56",
+								"affter_progressname": "纳税记录"
+							},
+							{
+								"cloud_file_id": "1803946",
+								"file_name": "个人信息页1.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/d0d47cc4b4e3d6aae5fb3ef4e62078dc.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:30:55",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1803947",
+								"file_name": "1.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/bcae71665d43195330f75529604d45e3.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/三大金刚-所属期不对/纳税记录",
+								"create_time": "2024-05-16 16:30:55",
+								"affter_progressname": "纳税记录"
+							},
+							{
+								"cloud_file_id": "1803948",
+								"file_name": "23年.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/9559af05d308a6853b66e6f70cf3ee28.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:30:55",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1803944",
+								"file_name": "24年.jpg",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/8b76f4d8438a47c573e7f7f5ee0f046a.jpg",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/个税APP",
+								"create_time": "2024-05-16 16:30:54",
+								"affter_progressname": "个税APP"
+							},
+							{
+								"cloud_file_id": "1803945",
+								"file_name": "纳税记录-087849.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/be63f1e1d6a28e077323a4bee4c79e86.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传",
+								"create_time": "2024-05-16 16:30:54",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803941",
+								"file_name": "收入计算.xlsx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/db9d58e147e19513581f515c7c4eca1f.xlsx",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传",
+								"create_time": "2024-05-16 16:30:53",
+								"affter_progressname": "不上传"
+							},
+							{
+								"cloud_file_id": "1803942",
+								"file_name": "TTPS Online Application.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/0dcd146a8e7547627422036539fbbdf8.pdf",
+								"relative_path": "A类-赵美琳/递交留底",
+								"create_time": "2024-05-16 16:30:53",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "1803943",
+								"file_name": "3.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/9df3855eb69fb680504c003722dd0fe3.png",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息/不上传/自然人",
+								"create_time": "2024-05-16 16:30:53",
+								"affter_progressname": "自然人"
+							},
+							{
+								"cloud_file_id": "1803938",
+								"file_name": "~$收入计算.xlsx",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/f999373516663a8cec7ca5be2144a660.xlsx",
+								"relative_path": "A类-赵美琳",
+								"create_time": "2024-05-16 16:30:52",
+								"affter_progressname": "A类-赵美琳"
+							},
+							{
+								"cloud_file_id": "1803939",
+								"file_name": "个人收入纳税明细截图.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/07f1c32c0832d801d2830084d4250383.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息",
+								"create_time": "2024-05-16 16:30:52",
+								"affter_progressname": "收入信息"
+							},
+							{
+								"cloud_file_id": "1803940",
+								"file_name": "2.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/459f8ae1824afa67a50cfb180faeae93.png",
+								"relative_path": "A类-赵美琳/递交留底",
+								"create_time": "2024-05-16 16:30:52",
+								"affter_progressname": "递交留底"
+							},
+							{
+								"cloud_file_id": "1803935",
+								"file_name": "1.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/30fce0b3203e577de680810363b112ac.png",
+								"relative_path": "A类-赵美琳",
+								"create_time": "2024-05-16 16:30:51",
+								"affter_progressname": "A类-赵美琳"
+							},
+							{
+								"cloud_file_id": "1803936",
+								"file_name": "个人所得税纳税记录.pdf",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/2b938436ea737ea4fa076893b31e0263.pdf",
+								"relative_path": "A类-赵美琳/待上传/主申请人/收入信息",
+								"create_time": "2024-05-16 16:30:51",
+								"affter_progressname": "收入信息"
+							},
+							{
+								"cloud_file_id": "1803937",
+								"file_name": "Acknowledgment.png",
+								"file_path": "3129/3130/03313d39-498f-44af-9b22-94e01efb8b92/9896c082d13bf8aee68023a4c857f707.png",
+								"relative_path": "A类-赵美琳/递交留底",
+								"create_time": "2024-05-16 16:30:51",
+								"affter_progressname": "递交留底"
+							}
+						]
+					}
+				]
+			}
+		]
+	},
+	"msg": ""
+}
+这是接口返回的数据

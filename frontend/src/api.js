@@ -737,17 +737,26 @@ export async function getAiApiCallDetail(rowId) {
   return response.data
 }
 
-// ==================== 客户画像(Excel 导入) ====================
+// ==================== 客户画像(业务方接口导入) ====================
 
 /**
- * 上传客户文件清单 Excel,创建导入任务(后台跑 OCR/分类/提取)
+ * 从业务方接口拉客户文件清单预览(按客户合并,不写库)
+ * payload: {customer_code, operation_user}
  */
-export async function importProfileExcel(file) {
-  const formData = new FormData()
-  formData.append('file', file)
-  const r = await axios.post(`${API_BASE}/profile/import`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 60000,
+export async function previewProfileRemoteImport(payload) {
+  const r = await axios.post(`${API_BASE}/profile/import-remote/preview`, payload, {
+    timeout: 90000,
+  })
+  return r.data
+}
+
+/**
+ * 按选中客户创建导入任务(后台串行跑 OCR/分类/提取)
+ * payload: {customer_code, operation_user, customer_names: []}
+ */
+export async function importProfileRemote(payload) {
+  const r = await axios.post(`${API_BASE}/profile/import-remote`, payload, {
+    timeout: 90000,
   })
   return r.data
 }
@@ -759,6 +768,11 @@ export async function listProfileTasks(params = {}) {
 
 export async function getProfileTask(taskId) {
   const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}`)
+  return r.data
+}
+
+export async function deleteProfileTask(taskId) {
+  const r = await axios.delete(`${API_BASE}/profile/tasks/${taskId}`)
   return r.data
 }
 
@@ -806,6 +820,28 @@ export async function correctReviewFile(fileId, payload) {
 
 export async function dismissReviewFile(fileId, payload = {}) {
   const r = await axios.post(`${API_BASE}/review/files/${fileId}/dismiss`, payload)
+  return r.data
+}
+
+// ==================== 文件归属 ====================
+
+export async function listFilesForAssign(params = {}) {
+  const r = await axios.get(`${API_BASE}/profile/files`, { params })
+  return r.data
+}
+
+export async function listHouseholdPersons(householdId) {
+  const r = await axios.get(`${API_BASE}/profile/households/${householdId}/persons`)
+  return r.data
+}
+
+export async function regenerateHouseholdProfile(householdId) {
+  const r = await axios.post(`${API_BASE}/profile/households/${householdId}/regenerate`)
+  return r.data
+}
+
+export async function assignFilePerson(fileId, payload = {}) {
+  const r = await axios.post(`${API_BASE}/profile/files/${fileId}/assign`, payload)
   return r.data
 }
 

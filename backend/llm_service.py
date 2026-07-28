@@ -1238,14 +1238,19 @@ def recognize_doc_type(text_head: str, **context) -> dict:
         return fallback
 
 
-def _build_extract_prompt(text: str, rule: dict) -> str:
+def _build_field_lines(rule: dict) -> str:
+    """规则 fields → prompt 字段行(单人/多人提取共用)。"""
     lines = []
     for f in rule.get("fields") or []:
         desc = f"({f.get('description')})" if f.get("description") else ""
         req = "必填" if f.get("required") else "可空"
         example = f",例:{f.get('example')}" if f.get("example") else ""
         lines.append(f'  "{f.get("key")}": {f.get("label")} {req}{desc}{example}')
-    fields_block = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _build_extract_prompt(text: str, rule: dict) -> str:
+    fields_block = _build_field_lines(rule)
     extra = (rule.get("prompt_extra") or "").strip()
     extra_block = f"\n额外注意事项:\n{extra}\n" if extra else ""
     return f"""你是证件信息提取助手。下面是一份{DOC_TYPE_NAMES.get(rule.get('doc_type'), rule.get('doc_type'))}的 OCR 文本。
@@ -1264,6 +1269,60 @@ OCR 文本:
 ---"""
 
 
+def _build_extract_multi_prompt(text: str, rule: dict) -> str:
+    fields_block = _build_field_lines(rule)
+    extra = (rule.get("prompt_extra") or "").strip()
+    extra_block = f"\n额外注意事项:\n{extra}\n" if extra else ""
+    return f"""你是证件信息提取助手。下面是一份{DOC_TYPE_NAMES.get(rule.get('doc_type'), rule.get('doc_type'))}的 OCR 文本,其中可能包含多人的信息(如整本户口簿的多张常住人口登记卡)。
+逐人提取:每张登记卡/每个人输出一个 JSON 对象;同一人的信息分散在多页时合并为一条;不要重复输出同一人。
+只抽取文本中明确出现的信息,不确定/没有出现的一律 null,不要编造。
+日期统一 YYYY-MM-DD;其余字段按原文输出。
+JSON 字符串值内部如需引用,一律用中文引号「」,禁止使用未转义的 ASCII 双引号。
+{extra_block}
+严格输出 JSON(不要 markdown,不要解释),结构:
+{{"persons": [{{
+{fields_block}
+}}]}}
+
+OCR 文本:
+---
+{text}
+---"""
+
+
+def parse_persons_payload(data: dict, rule: dict) -> list:
+    """纯函数:多人提取 LLM JSON → persons 列表。
+
+    - 取 data["persons"](list);兼容模型误返回单人 {"fields": {...}} → 包成单元素
+    - 每项只保留规则 keys;非空值 str(v).strip(),空串→None;过滤全空项与非 dict 项
+    """
+    persons = data.get("persons")
+    if not isinstance(persons, list):
+        fields = data.get("fields")
+        persons = [fields] if isinstance(fields, dict) else []
+    out = []
+    for item in persons:
+        if not isinstance(item, dict):
+            continue
+        row = {}
+        for f in rule.get("fields") or []:
+            v = item.get(f.get("key"))
+            row[f["key"]] = (str(v).strip() if v is not None and str(v).strip() else None)
+        if any(v is not None for v in row.values()):
+            out.append(row)
+    return out
+
+
+def _truncate_ocr_text(text: str) -> str:
+    """超长 OCR 文本头尾各取一半截断(与单人提取同一上限)。"""
+    src = text.strip()
+    if len(src) > ARCHIVE_DETECT_INPUT_LIMIT_CHARS:
+        head_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS // 2
+        tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
+        src = src[:head_n] + f"\n\n...[省略 {len(text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n" + src[-tail_n:]
+    return src
+
+
 def extract_doc_fields(text: str, rule: dict, **context) -> dict:
     """按规则提取证件字段。
 
@@ -1273,11 +1332,7 @@ def extract_doc_fields(text: str, rule: dict, **context) -> dict:
     """
     if not text or not text.strip():
         raise ValueError("OCR 文本为空,无法提取字段")
-    src = text.strip()
-    if len(src) > ARCHIVE_DETECT_INPUT_LIMIT_CHARS:
-        head_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS // 2
-        tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
-        src = src[:head_n] + f"\n\n...[省略 {len(text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n" + src[-tail_n:]
+    src = _truncate_ocr_text(text)
 
     prompt = _build_extract_prompt(src, rule)
     last_err: Optional[Exception] = None
@@ -1301,6 +1356,31 @@ def extract_doc_fields(text: str, rule: dict, **context) -> dict:
         v = fields.get(f.get("key"))
         out[f["key"]] = (str(v).strip() if v is not None and str(v).strip() else None)
     return {"fields": out}
+
+
+def extract_doc_fields_multi(text: str, rule: dict, **context) -> dict:
+    """多人模式提取(规则带 multi=True,如整本户口本)。
+
+    返回 {"persons": [{key: 字符串值|None}, ...]},每人一条。
+    异常约定同 extract_doc_fields。
+    """
+    if not text or not text.strip():
+        raise ValueError("OCR 文本为空,无法提取字段")
+    src = _truncate_ocr_text(text)
+
+    prompt = _build_extract_multi_prompt(src, rule)
+    last_err: Optional[Exception] = None
+    for _ in range(2):  # 模型偶发非法 JSON(如未转义内引号),失败重试一次
+        raw = _call_llm(prompt, operation="extract_doc_fields_multi", **context)
+        try:
+            data = _load_llm_json(raw)
+            break
+        except json.JSONDecodeError as e:
+            last_err = e
+    else:
+        raise ValueError(f"LLM 返回非合法提取 JSON(重试仍失败)") from last_err
+
+    return {"persons": parse_persons_payload(data, rule)}
 
 
 def judge_asset_duplicate(new_attrs: dict, candidates: list, **context) -> dict:

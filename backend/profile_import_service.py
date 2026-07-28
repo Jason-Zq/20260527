@@ -1,16 +1,12 @@
 """客户画像-文件清单导入编排。
 
-流程:解析文件来源(现阶段 Excel,后期业务方接口) -> 落 customer_files
+流程:从业务方接口(getAfterCustomerAllFiles)拉客户文件清单 -> 落 customer_files
 -> 逐文件取 OCR(先复用 archive_detect,没有再下载+OCR) -> 分类筛 4 类
 -> 按 extract_rules 提取 -> 归因写入客户档案。详见 docs/09。
 
-本文件当前包含:文件来源协议 + Excel 解析(纯函数,可单测)。
-run_import 编排逻辑在 slice (c) 落地。
+本文件当前包含:文件来源协议 + 接口清单适配(纯函数,可单测) + run_import 编排。
 """
-from collections import Counter
 from typing import Optional, Protocol, TypedDict
-
-from openpyxl import load_workbook
 
 
 class ManifestFile(TypedDict):
@@ -19,131 +15,130 @@ class ManifestFile(TypedDict):
     folder_name: Optional[str]
     rel_path: Optional[str]
     client_name: Optional[str]  # 行级客户姓名(可空)
+    affter_entryoid: Optional[str]  # 售后项目OID(项目案件路由键;扁平形态/旧数据=None)
+    project_name: Optional[str]     # 项目显示名(projectname_detailed || projectname)
 
 
 class FileManifest(TypedDict):
-    client_name: str            # 主客户(客户姓名列众数)
+    client_name: str            # 主客户
     files: list[ManifestFile]
 
 
 class FileSourceProvider(Protocol):
     """文件来源协议:给个来源描述,返回统一客户文件清单。
 
-    Excel 是第一个实现(parse_excel_manifest);后期业务方查询接口实现
-    同一协议(按 client_code/姓名远程拉清单),run_import 及下游零改动。
+    业务方查询接口(getAfterCustomerAllFiles)经 parse_api_manifest 适配成
+    FileManifest,run_import 及下游零改动。
     """
     async def fetch_manifest(self, source: dict) -> FileManifest: ...
 
 
-# 列别名映射:兼容原文件错别列名"文件啊名称"
-_COLUMN_ALIASES = {
-    "folder_name": ["售后文件夹名称", "文件夹名称"],
-    "file_code": ["文件编码"],
-    "client_name": ["客户姓名"],
-    "filename": ["文件名称", "文件啊名称"],
-    "file_path": ["文件路径"],
-    "rel_path": ["相对路径"],
-}
-_REQUIRED_COLUMNS = ("file_code", "client_name", "filename")
+def _flatten_api_files(customer: dict) -> list:
+    """接口单客户条目 -> 原始文件列表(嵌套形态把项目外壳字段注入每个文件行)。
 
-
-def _cell_str(v) -> str:
-    """单元格规整:None→'';整数型 float→整数字符串(防文件编码被读成数值);其余 strip。"""
-    if v is None:
-        return ""
-    if isinstance(v, float) and v.is_integer():
-        return str(int(v))
-    if isinstance(v, int):
-        return str(v)
-    return str(v).strip()
-
-
-def parse_excel_manifest(path: str) -> dict:
-    """解析客户文件清单 Excel -> {client_name, files, skipped_rows, duplicates}。
-
-    表头在第一行;必需列:文件编码/客户姓名/文件名称(错名列"文件啊名称"兼容)。
-    file_code 与 filename 皆空的行跳过;file_code 重复保留首次。
-    主客户取客户姓名列众数(同票取先出现者)。
+    兼容两种返回形态:拉全量是扁平 entry.files[];传 customer_code 是
+    按项目嵌套 entry.list[].files[](拍平)。样例见根目录 客户文件信息的接口.txt。
+    注入键:affter_entryoid/projectno/projectname/projectno_detailed/
+    projectname_detailed/project_create_time(项目 create_time 改名,避让文件级 create_time)。
     """
-    wb = load_workbook(path, read_only=True, data_only=True)
-    try:
-        ws = wb.worksheets[0]
-        rows = ws.iter_rows(values_only=True)
-        header = None
-        for row in rows:
-            header = [_cell_str(c) for c in row]
-            break
-        if not header:
-            raise ValueError("Excel 为空或缺少表头行")
+    files = customer.get("files")
+    if files:
+        return files
+    flat: list = []
+    for proj in customer.get("list") or []:
+        proj_info = {k: proj.get(k) for k in (
+            "affter_entryoid", "projectno", "projectname",
+            "projectno_detailed", "projectname_detailed")}
+        proj_info["project_create_time"] = proj.get("create_time")
+        for f in proj.get("files") or []:
+            flat.append({**f, **proj_info})
+    return flat
 
-        # 列名 -> 列索引
-        col_idx: dict[str, int] = {}
-        for field, aliases in _COLUMN_ALIASES.items():
-            for alias in aliases:
-                if alias in header:
-                    col_idx[field] = header.index(alias)
-                    break
-        missing = [f for f in _REQUIRED_COLUMNS if f not in col_idx]
-        if missing:
-            names = "、".join("/".join(_COLUMN_ALIASES[f]) for f in missing)
-            raise ValueError(f"Excel 缺少必需列: {names}")
 
-        def _get(row, field) -> str:
-            idx = col_idx.get(field)
-            if idx is None or idx >= len(row):
-                return ""
-            return _cell_str(row[idx])
+def parse_api_manifest(customer: dict) -> dict:
+    """接口单客户对象 -> {client_name, files, projects, skipped_junk, duplicates}(与 FileManifest 同构)。
 
-        files: list[ManifestFile] = []
-        seen_codes: set[str] = set()
-        name_counter: Counter = Counter()
-        first_seen_name: dict[str, int] = {}
-        skipped_rows = 0
-        duplicates = 0
+    清洗(接口数据脏):
+      - 过滤 "._" 开头的 macOS AppleDouble 垃圾文件(OCR 只会出乱码);
+      - 无文件编号(cloud_file_id)的行跳过(无法刷新地址下载);
+      - 按文件编号去重(保留首次)。
+    folder_name 取 affter_progressname(进展名,对 doc_type_matcher 是强提示);
+    rel_path 取 relative_path(文件夹线索)。
+    projects: 按 affter_entryoid 分组的项目摘要(从注入后全部原始行构建,含被过滤行,
+    保证项目列表完整;file_count 只计清洗后文件;entryoid 为空的行不进 projects)。
+    """
+    name = (customer.get("customer_name") or "").strip()
+    files: list = []
+    projects: dict = {}
+    seen: set = set()
+    skipped_junk = 0
+    duplicates = 0
+    for f in _flatten_api_files(customer):
+        entryoid = (f.get("affter_entryoid") or "").strip() or None
+        if entryoid and entryoid not in projects:
+            projects[entryoid] = {
+                "affter_entryoid": entryoid,
+                "projectno": (f.get("projectno") or "").strip() or None,
+                "projectname": (f.get("projectname") or "").strip() or None,
+                "projectno_detailed": (f.get("projectno_detailed") or "").strip() or None,
+                "projectname_detailed": (f.get("projectname_detailed") or "").strip() or None,
+                "project_create_time": (f.get("project_create_time") or "").strip() or None,
+                "file_count": 0,
+            }
+        code = str(f.get("cloud_file_id") or "").strip()
+        fname = (f.get("file_name") or "").strip()
+        if fname.startswith("._") or not code:
+            skipped_junk += 1
+            continue
+        if code in seen:
+            duplicates += 1
+            continue
+        seen.add(code)
+        if entryoid:
+            projects[entryoid]["file_count"] += 1
+        files.append({
+            "file_code": code,
+            "filename": fname,
+            "folder_name": (f.get("affter_progressname") or "").strip() or None,
+            "rel_path": (f.get("relative_path") or "").strip() or None,
+            "client_name": name or None,
+            "affter_entryoid": entryoid,
+            "project_name": (f.get("projectname_detailed") or f.get("projectname") or "").strip() or None,
+        })
+    return {"client_name": name, "files": files, "projects": list(projects.values()),
+            "skipped_junk": skipped_junk, "duplicates": duplicates}
 
-        for row in rows:
-            file_code = _get(row, "file_code")
-            filename = _get(row, "filename")
-            client_name = _get(row, "client_name")
-            if not file_code and not filename:
-                skipped_rows += 1
-                continue
-            if client_name:
-                if client_name not in first_seen_name:
-                    first_seen_name[client_name] = len(name_counter)
-                name_counter[client_name] += 1
-            if file_code:
-                if file_code in seen_codes:
-                    duplicates += 1
-                    continue
-                seen_codes.add(file_code)
-            files.append({
-                "file_code": file_code,
-                "filename": filename,
-                "folder_name": _get(row, "folder_name") or None,
-                "rel_path": _get(row, "rel_path") or None,
-                "client_name": client_name or None,
-            })
 
-        if not files:
-            raise ValueError("Excel 无有效数据行")
-        if not name_counter:
-            raise ValueError("客户姓名列无有效值,无法识别主客户")
+def group_api_customers(customers: list) -> list[dict]:
+    """接口客户条目按姓名合并:同名多条目(不同 affter_entryoid)并成一户。
 
-        # 众数;同票取先出现者(Counter.most_common 同票保序依赖插入序,显式排)
-        top_count = max(name_counter.values())
-        client_name = min(
-            (n for n, c in name_counter.items() if c == top_count),
-            key=lambda n: first_seen_name[n],
-        )
-        return {
-            "client_name": client_name,
-            "files": files,
-            "skipped_rows": skipped_rows,
-            "duplicates": duplicates,
-        }
-    finally:
-        wb.close()
+    返回 [{customer_name, customer_code, crm_oid, entry_count, customer}],customer 是
+    拍平合并后的单客户对象(直接喂 parse_api_manifest),保证一户只建一个家庭/任务;
+    文件级重复由 parse_api_manifest 按编号去重。空姓名条目跳过(无法建家庭)。
+    customer_code/crm_oid 取首个非空。
+    """
+    merged: dict = {}
+    order: list = []
+    for c in customers:
+        name = (c.get("customer_name") or "").strip()
+        if not name:
+            continue
+        if name not in merged:
+            merged[name] = {"customer_code": "", "crm_oid": "", "entry_count": 0, "files": []}
+            order.append(name)
+        m = merged[name]
+        m["files"].extend(_flatten_api_files(c))
+        m["entry_count"] += 1
+        if not m["customer_code"]:
+            m["customer_code"] = (c.get("customer_code") or "").strip()
+        if not m["crm_oid"]:
+            m["crm_oid"] = (c.get("crm_oid") or "").strip()
+    return [{"customer_name": name,
+             "customer_code": merged[name]["customer_code"],
+             "crm_oid": merged[name]["crm_oid"],
+             "entry_count": merged[name]["entry_count"],
+             "customer": {"customer_name": name, "files": merged[name]["files"]}}
+            for name in order]
 
 
 # ==================== 导入编排 ====================
@@ -152,6 +147,8 @@ import asyncio
 import os
 import time
 from datetime import datetime, timedelta
+
+import httpx
 
 import doc_type_matcher
 import event_service
@@ -175,6 +172,60 @@ _OUTPUT_DIR = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "output"))
 _CUSTOMER_FILES_SUBDIR = "customer_files"
 _FILE_KEEP_DAYS = 30
+
+
+async def fetch_after_customer_files(*, customer_code: str = "",
+                                     operation_user: str = "") -> list:
+    """调业务方"客户文件信息"接口(getAfterCustomerAllFiles)取客户文件清单。
+
+    传 customer_code 查该客户全部售后项目数据;不传查最近 100 条(接口固定,
+    不支持条数参数)。返回 data.list(客户条目列表);接口/网络异常抛异常。
+    与 file_fetcher.refresh_download_url 同源(config.json file_url_service)。
+    """
+    cfg = (file_fetcher._load_config().get("file_url_service") or {})
+    if not cfg.get("enabled", False):
+        raise ValueError("未启用 file_url_service")
+    url = (cfg.get("customer_files_url") or "").strip()
+    if not url:
+        base_url = (cfg.get("base_url") or "").strip()
+        if not base_url:
+            raise ValueError("file_url_service.base_url 未配置")
+        url = base_url.rsplit("/", 1)[0] + "/getAfterCustomerAllFiles"
+
+    params = {
+        "customer_code": (customer_code or "").strip(),
+        "operation_user": (operation_user or "").strip()
+                          or cfg.get("operation_user") or "Jason邹启",
+    }
+    # 全量 100 户响应体可能数 MB,超时给足
+    timeout = httpx.Timeout(60, connect=15)
+
+    client = await file_fetcher.get_http_client()
+    t0 = time.time()
+    try:
+        resp = await client.get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("ret") != 200 or payload.get("code") != 0:
+            raise ValueError(f"查询客户文件清单失败: {payload.get('msg') or payload}")
+        data = payload.get("data") or {}
+        customers = data.get("list") or []
+    except Exception as e:
+        file_fetcher._log_external_api(
+            service="customer_files", url=url, params=params,
+            response=None, status="error", error_msg=str(e),
+            elapsed_ms=int((time.time() - t0) * 1000), file_id=None,
+        )
+        raise
+    # 响应全文可能数 MB,只记小摘要
+    file_fetcher._log_external_api(
+        service="customer_files", url=url, params=params,
+        response={"ret": payload.get("ret"), "code": payload.get("code"),
+                  "total": data.get("total"), "customer_count": len(customers)},
+        status="ok", error_msg=None,
+        elapsed_ms=int((time.time() - t0) * 1000), file_id=None,
+    )
+    return customers
 
 
 def _persist_local_file(src_path: str, file_code: str, filename: str) -> str:
@@ -209,6 +260,17 @@ async def ensure_local_file(row: dict) -> tuple[str, str]:
     return os.path.join(_OUTPUT_DIR, rel_path), (mime or "application/octet-stream")
 
 
+async def run_infer_relations(household_id: int, *, trigger: str = "import") -> dict:
+    """家庭关系交叉推导 + 事件留痕(run_import 收尾与管理端点共用)。"""
+    result = await profile_crud.infer_family_relations(household_id)
+    for inf in result.get("inferred") or []:
+        event_service.log_event(
+            event_service.INFO, event_service.CATEGORY_PROFILE_RELATION_INFER,
+            f"家庭关系自动推导: person#{inf['person_id']} → {inf['relation']}",
+            context={"household_id": household_id, "trigger": trigger, **inf})
+    return result
+
+
 async def run_import(task_id: int) -> None:
     """导入任务主流程(主进程 asyncio.create_task 串行跑)。
 
@@ -227,6 +289,10 @@ async def run_import(task_id: int) -> None:
     try:
         rows = await customer_file_crud.list_pending_files(task_id)
         for row in rows:
+            # 任务被删除(列表页删除按钮)时在下一个文件边界协作停止
+            if await customer_file_crud.get_import_task(task_id) is None:
+                print(f"[profile_import:{task_id}] 任务已被删除,停止导入")
+                return
             counters["processed_files"] += 1
             await customer_file_crud.update_task_progress(
                 task_id, current_file=row.get("filename") or row.get("file_code"), **counters)
@@ -237,6 +303,19 @@ async def run_import(task_id: int) -> None:
                 await customer_file_crud.mark_file_error(row["id"], f"{type(e).__name__}: {e}")
                 print(f"[profile_import:{task_id}] 文件 {row.get('file_code')} 处理失败: {e}")
             await customer_file_crud.update_task_progress(task_id, **counters)
+
+        # 家庭关系交叉推导(全部文件处理完后;异常不杀任务)
+        household_id = task.get("household_id")
+        if household_id:
+            try:
+                await run_infer_relations(household_id, trigger="import")
+            except Exception as e:
+                print(f"[profile_import:{task_id}] 关系推导失败(忽略): {e}")
+                event_service.log_event(
+                    event_service.WARN, event_service.CATEGORY_PROFILE_RELATION_INFER,
+                    f"家庭关系推导失败: {e}",
+                    context={"task_id": task_id, "household_id": household_id,
+                             "error": str(e)})
 
         await customer_file_crud.finish_import_task(task_id, "done")
         event_service.log_event(
@@ -251,6 +330,15 @@ async def run_import(task_id: int) -> None:
             f"客户画像导入失败: {e}",
             context={"task_id": task_id, "error": str(e)},
         )
+
+
+async def run_imports_sequential(task_ids: list[int]) -> None:
+    """多任务串行跑(接口导入一次建多户任务时避免并发打爆 OCR/LLM)。
+
+    run_import 内部自吞异常标 error,不会中断后续任务。
+    """
+    for tid in task_ids:
+        await run_import(tid)
 
 
 async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
@@ -338,6 +426,129 @@ async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
         counters["needs_review_count"] += 1
 
 
+def _clean_field_items(rule: dict, extracted: dict) -> tuple:
+    """字段清洗(单人/多人分支共用):去空 → field_items + 归因三要素 + id_masked。
+
+    返回 (field_items, id_number, name, name_en, id_masked)。
+    masked 值不候选归因/写库(在 apply 内记 skipped_masked);乱码假名置 None。
+    """
+    field_items = []
+    for f in rule.get("fields") or []:
+        v = extracted.get(f.get("key"))
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        field_items.append({
+            "key": f.get("key"), "label": f.get("label"),
+            "value": str(v).strip(),
+            "column": (f.get("target") or {}).get("column"),
+            "layer": (f.get("target") or {}).get("layer"),
+            "entity": (f.get("target") or {}).get("entity") or "person",
+        })
+    id_number = next(
+        (it["value"] for it in field_items
+         if it["column"] == "id_number"
+         and not doc_extract_crud.is_masked(it["value"])
+         and doc_extract_crud.valid_id_number(it["value"])), None)
+    name = next(
+        (it["value"] for it in field_items
+         if it["column"] == "name" and not doc_extract_crud.is_masked(it["value"])), None)
+    if name and not profile_crud.plausible_person_name(name):
+        name = None  # 乱码假名(如 "钅 lil蝴哪")不参与归因/建人,按无姓名走 no_person
+    # 拼音名归因(批复/永居卡等英文证件没有中文名;词序无关匹配 person_fields.name_en)
+    name_en = next(
+        (it["value"] for it in field_items
+         if it["column"] == "name_en" and not doc_extract_crud.is_masked(it["value"])), None)
+    id_masked = any(
+        it["column"] == "id_number" and doc_extract_crud.is_masked(it["value"])
+        for it in field_items)
+    return field_items, id_number, name, name_en, id_masked
+
+
+async def _extract_one_multi(task: dict, row: dict, doc_type: str, ocr_text: str,
+                             counters: dict, rule: dict, outcome: dict, t0: float) -> dict:
+    """多人模式提取(rule.multi=True,如整本户口本):逐人归因写库,仍写一行 doc_extract_results。
+
+    write_stats 保留顶层 person_id(=首个归属人,兼容 ReviewDrawer 预填)+ persons 明细列表。
+    """
+    task_id = task["id"]
+    household_id = task.get("household_id")
+    file_code = row.get("file_code") or ""
+
+    raw = await asyncio.to_thread(
+        llm_service.extract_doc_fields_multi, ocr_text, rule,
+        task_id=str(task_id), file_id=file_code)
+    persons_raw = raw.get("persons") or []
+
+    all_mapped: list = []
+    persons_stats: list = []
+    agg = {"written": 0, "updated": 0, "person_created": 0}
+    first_pid, first_matched_by = None, None
+    for pext in persons_raw:
+        field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, pext)
+        outcome["id_masked"] = outcome["id_masked"] or id_masked
+        if not id_number and not name and not name_en:
+            all_mapped.append({"key": "*", "field": None, "person_id": None,
+                               "action": "skipped_no_name"})
+            continue
+        match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
+        write = await profile_crud.apply_extracted_fields_v2(
+            household_id, match, field_items, source_file_id=row["id"])
+        pid = write.get("person_id")
+        pname = name or next((p["person_name"] for p in persons_stats
+                              if p["person_id"] == pid), None)
+        value_by_key = {it["key"]: it["value"] for it in field_items}
+        for m in write["mapped"]:
+            m["person_name"] = pname
+            # 带上提取值:交叉验证(attach_field_conflicts)多人模式按条目取值用
+            m["value"] = value_by_key.get(m.get("key"))
+        all_mapped += write["mapped"]
+        ws = write["write_stats"]
+        persons_stats.append({
+            "person_id": pid, "person_name": pname,
+            "matched_by": ws.get("matched_by"),
+            "written": ws.get("written", 0), "updated": ws.get("updated", 0),
+            "person_created": ws.get("person_created", 0)})
+        for k in agg:
+            agg[k] += ws.get(k, 0)
+        if first_pid is None and pid:
+            first_pid, first_matched_by = pid, ws.get("matched_by")
+
+    if not persons_stats:
+        await doc_extract_crud.insert_result(
+            customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
+            client_id=task.get("client_id"), doc_type=doc_type,
+            rule_id=None, rule_version=rule["version"],
+            status="skipped", skip_reason="no_person",
+            extracted={"persons": persons_raw},
+            elapsed_ms=int((time.time() - t0) * 1000))
+        event_service.log_event(
+            event_service.WARN, event_service.CATEGORY_EXTRACT_SKIP,
+            f"多人提取结果全部无法归属: {file_code}",
+            context={"task_id": task_id, "file_code": file_code, "doc_type": doc_type,
+                     "reason": "no_person"})
+        outcome.update(status="skipped", skip_reason="no_person")
+        return outcome
+
+    write_stats = {"matched_by": first_matched_by, "person_id": first_pid,
+                   "person_count": len(persons_stats), "persons": persons_stats, **agg}
+    await doc_extract_crud.insert_result(
+        customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
+        client_id=task.get("client_id"), doc_type=doc_type,
+        rule_id=None, rule_version=rule["version"],
+        status="done", extracted={"persons": persons_raw},
+        mapped=all_mapped, write_stats=write_stats,
+        elapsed_ms=int((time.time() - t0) * 1000))
+    counters["extracted_count"] += 1
+    event_service.log_event(
+        event_service.INFO, event_service.CATEGORY_EXTRACT_DONE,
+        f"证件信息提取完成(多人 {len(persons_stats)} 人): {file_code} ({doc_type})",
+        context={"task_id": task_id, "file_code": file_code, "doc_type": doc_type,
+                 "rule_version": rule["version"], "person_count": len(persons_stats),
+                 "writes": dict(agg)})
+    outcome.update(status="done")
+    return outcome
+
+
 async def _extract_one(task: dict, row: dict, doc_type: str,
                        ocr_text: str, counters: dict) -> dict:
     """4 类证件提取 + 归因 + 写 profile_person_fields。返回 outcome 供质量评级使用。"""
@@ -378,42 +589,18 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
         return outcome
 
     try:
+        if rule.get("multi"):
+            return await _extract_one_multi(
+                task, row, doc_type, ocr_text, counters, rule, outcome, t0)
+
         raw = await asyncio.to_thread(
             llm_service.extract_doc_fields, ocr_text, rule,
             task_id=str(task_id), file_id=file_code)
         extracted = raw.get("fields") or {}
 
         # 字段清洗:去空;masked 不候选归因/写库(在 apply 内记 skipped_masked)
-        field_items = []
-        for f in rule.get("fields") or []:
-            v = extracted.get(f.get("key"))
-            if v is None or (isinstance(v, str) and not v.strip()):
-                continue
-            field_items.append({
-                "key": f.get("key"), "label": f.get("label"),
-                "value": str(v).strip(),
-                "column": (f.get("target") or {}).get("column"),
-                "layer": (f.get("target") or {}).get("layer"),
-                "entity": (f.get("target") or {}).get("entity") or "person",
-            })
-
-        id_number = next(
-            (it["value"] for it in field_items
-             if it["column"] == "id_number"
-             and not doc_extract_crud.is_masked(it["value"])
-             and doc_extract_crud.valid_id_number(it["value"])), None)
-        name = next(
-            (it["value"] for it in field_items
-             if it["column"] == "name" and not doc_extract_crud.is_masked(it["value"])), None)
-        if name and not profile_crud.plausible_person_name(name):
-            name = None  # 乱码假名(如 "钅 lil蝴哪")不参与归因/建人,按无姓名走 no_person
-        # 拼音名归因(批复/永居卡等英文证件没有中文名;词序无关匹配 person_fields.name_en)
-        name_en = next(
-            (it["value"] for it in field_items
-             if it["column"] == "name_en" and not doc_extract_crud.is_masked(it["value"])), None)
-        outcome["id_masked"] = any(
-            it["column"] == "id_number" and doc_extract_crud.is_masked(it["value"])
-            for it in field_items)
+        field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, extracted)
+        outcome["id_masked"] = id_masked
 
         match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
         case_items = [it for it in field_items if it.get("entity") == "case"]
@@ -443,10 +630,12 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
                 source_file_id=row["id"])
             write["mapped"] += aw["mapped"]
             write["write_stats"].update(aw["stats"])
-        # entity=case 的字段写入案件时间线(递交/签收/批复里程碑,家庭单案件)
+        # entity=case 的字段写入案件时间线(递交/签收/批复里程碑,按文件所属项目路由到项目案件)
         if case_items:
             cw = await profile_crud.apply_case_milestones(
-                household_id, case_items, source_file_id=row["id"])
+                household_id, case_items, source_file_id=row["id"],
+                affter_entryoid=row.get("affter_entryoid"),
+                project_name_hint=row.get("project_name"))
             write["mapped"] += cw["mapped"]
             write["write_stats"].update(cw["stats"])
         await doc_extract_crud.insert_result(

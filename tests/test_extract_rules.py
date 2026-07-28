@@ -28,14 +28,22 @@ def test_all_types_present():
 def test_get_rule_structure():
     r = er.get_rule("id_card")
     assert r is not None
-    # 对齐原 get_active_rule 返回结构:doc_type/version/fields/prompt_extra
-    assert set(r.keys()) == {"doc_type", "version", "fields", "prompt_extra"}, r.keys()
+    # 对齐原 get_active_rule 返回结构 + multi(多人模式标记,默认 False)
+    assert set(r.keys()) == {"doc_type", "version", "fields", "prompt_extra", "multi"}, r.keys()
     assert r["doc_type"] == "id_card"
+    assert r["multi"] is False
     assert isinstance(r["fields"], list) and len(r["fields"]) >= 1
     # 每个字段有 key/label/target
     for f in r["fields"]:
         assert f.get("key") and f.get("label"), f
         assert "target" in f and "entity" in f["target"], f
+
+
+def test_hukou_is_multi():
+    r = er.get_rule("hukou")
+    assert r is not None and r["multi"] is True, r
+    assert r["version"] == 2, r
+    assert "所有常住人口登记卡成员" in (r["prompt_extra"] or ""), r["prompt_extra"]
 
 
 def test_approval_is_v2():
@@ -57,10 +65,12 @@ if __name__ == "__main__":
     print("PASS test_all_types_present")
     test_get_rule_structure()
     print("PASS test_get_rule_structure")
+    test_hukou_is_multi()
+    print("PASS test_hukou_is_multi")
     test_approval_is_v2()
     print("PASS test_approval_is_v2")
     test_unknown_type_returns_none()
     print("PASS test_unknown_type_returns_none")
     test_rules_version_constant()
     print("PASS test_rules_version_constant")
-    print("\n全部 5 个测试通过")
+    print("\n全部 6 个测试通过")

@@ -11,7 +11,7 @@
 1. **文件留底检测 / 业务审核**（主线）：接收业务方传入的客户+项目+进展+文件 URL，后台 OCR/文本抽取 + LLM 按公司留底分类体系判定，持久化单文件结果、OCR 脱敏文本、批次总体报告。
 2. **AI 材料解析**：上传 PDF/图片 → OCR + LLM 提取结构化字段 → 人工复核 → 归档到客户档案。
 3. **客户档案结构化生成**：从业务审核完成的 OCR 文件中批量抽取客户/家庭成员/资产事实，自动写入结构化表；**只补空字段，不覆盖已有非空人工数据**。
-4. **客户画像（Excel 导入）**：上传客户文件清单 Excel → 全量 OCR 入客户文件库（fresh 存原文，原件落盘留存 30 天可在线查看）→ 关键词+LLM 分类（12 类：身份证/户口本/学位证/出生证明/护照/KYC表/结婚证/房产证/无犯罪/批复/递交包/签收回执）→ 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 领域表（不写 clients/family_members；entity=asset 写 profile_assets、entity=case 写 profile_cases 案件时间线）；纯规则质量评级驱动复核闭环（待复核队列+人工修正永远覆盖）+ 完备度矩阵（人×材料）。详见 docs/09 + docs/10。
+4. **客户画像（接口导入）**：画像页弹窗从业务方接口 `getAfterCustomerAllFiles` 拉客户文件清单（预览勾选，客户编号可空=最近 100 条）→ 全量 OCR 入客户文件库（fresh 存原文，原件落盘留存 30 天可在线查看）→ 关键词+LLM 分类（12 类：身份证/户口本/学位证/出生证明/护照/KYC表/结婚证/房产证/无犯罪/批复/递交包/签收回执）→ 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 领域表（不写 clients/family_members；**人员去重：简体/繁体/拼音同一人不重复建卡**——find_person_match 证件号归一化→姓名繁简折叠(OpenCC)→name_en 词序无关→拼音互转(pypinyin 连写两序)；entity=asset 写 profile_assets、entity=case 写 profile_cases 案件时间线（migration 022 起按项目多案件：一个售后项目=一个案件，按文件行 `affter_entryoid` 路由，NULL→默认案件，导入时先建全部项目案件壳；接口项目字段 projectno/projectname/明细项目同步落库）；纯规则质量评级驱动复核闭环（待复核队列+人工修正永远覆盖）+ 完备度矩阵（人×材料）+ 文件归属页（`/file-assign`，手动指定文件归属人，写 `customer_files.person_id`，人员「查看文件」/矩阵按 列∪write_stats 并集）；画像弹窗标题栏「重新生成画像」→ `POST /api/profile/households/{id}/regenerate`（家庭名下跨任务重跑：有 OCR 复用、缺 OCR 重识别、缺文件按编码重下载，人工字段不覆盖）；**删除画像=只删画像数据**（household/persons/fields/assets/cases），任务/文件/OCR/提取结果/磁盘原件全保留，重新导入按 file_code re-link 复用 OCR 重建。详见 docs/09 + docs/10。
 5. **AI 填写文件（Word 模板）**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
 6. **处理超长 PDF**：上传多证件合并 PDF → 全页 OCR + LLM 判断证件边界 → 按类型拆为独立子 PDF。
 7. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
@@ -71,7 +71,7 @@
 │   └── src/components/*.vue         # 各业务页面组件
 ├── migrations/                      # Alembic 迁移
 │   ├── env.py
-│   └── versions/001_initial.py … 020_drop_extract_rules.py
+│   └── versions/001_initial.py … 022_project_cases.py
 ├── docs/                            # 重构参考开发文档(01-系统概览 ~ 07-重构规划 + 客户数据库-PRD)
 ├── frontend2/DocReview.ArchiveDetect/ # .NET(net10.0) 业务后端重写 PoC(目录名误导,不是前端);
 │                                      #   对标 /api/archive-detect/* 契约,EF Core 连同一 PG,RapidOcrNet 内置 OCR
@@ -100,11 +100,11 @@
 
 ### 4.2 启动目录至关重要
 
-后端必须从 `backend/` 目录启动，否则相对 import 会失败：
+后端必须从 `backend/` 目录启动，否则相对 import 会失败（**本机开发端口固定 8002**，前端配套 `VITE_API_TARGET=http://localhost:8002 npm run dev`，vite 代理默认 8000）：
 
 ```bash
 cd e:/qoderproject/20260527/backend
-PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ../.venv312/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ../.venv312/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
 ### 4.3 Windows 控制台编码
@@ -155,9 +155,9 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe -m alembic upg
 ### 5.4 启动后端 + Worker
 
 ```bash
-# 手动分别启动
+# 手动分别启动(本机固定 8002)
 cd e:/qoderproject/20260527/backend
-PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ../.venv312/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ../.venv312/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 8002 --reload
 
 # 另一个终端
 cd e:/qoderproject/20260527/backend
@@ -175,7 +175,7 @@ npm install
 npm run dev
 ```
 
-开发环境打开 http://localhost:5173/，Vite 会把 `/api` 和 `/uploads` 代理到 `http://localhost:8000`。
+开发环境打开 http://localhost:5173/，Vite 会把 `/api` 和 `/uploads` 代理到 `VITE_API_TARGET`（默认 `http://localhost:8000`，本机用 8002 需带环境变量启动，见 §4.2）。
 
 ### 5.6 前端生产构建
 
@@ -286,7 +286,7 @@ sudo systemctl reload nginx                    # 前端 dist 变化
 ## 10. 安全与敏感信息
 
 - `config.json` 含 API Key、DB 密码，**绝对不能提交到 git**（已在 `.gitignore`）。
-- 业务接口当前**不加 API Key 鉴权**，假定由网络层隔离。
+- 统一 Bearer 鉴权：`backend/middleware/auth_middleware.py`（纯 ASGI），凭证为 `config.json.auth.biz_api_key`；员工前端走 `POST /api/auth/login`（校验 `admin_user`/`admin_password`）拿 token。白名单：登录接口、`GET /api/healthz`、文档路径、**业务方集成前缀 `/api/archive-detect/business/batch`**（提交+轮询不带 token）；其余 `/api/*` 在配置 biz_api_key 后都要 Bearer，未配置则本地开发放行。
 - OCR 原文不持久化；入库的是脱敏后的 `archive_detect_files.ocr_text`。
 - `ai_api_calls` 中 LLM 的 prompt/response 原文直存未脱敏（业务决策），专门用于 AI 调用审计。
 - 生产环境 `app.env` 应 `chmod 600 + chown docreview:docreview`。

@@ -2938,66 +2938,102 @@ async def admin_get_ai_api_call(row_id: int):
 # 人工复核编辑闭环不受影响,见下方「客户画像」及「复核」相关端点。
 
 
-# ==================== 客户画像:Excel 文件清单导入 ====================
-# 上传客户文件清单 Excel -> 全量 OCR 入客户文件库 -> 筛 4 类证件 -> 规则提取 -> 客户档案。
-# 方案见 docs/09-客户画像-Excel导入方案.md。
+# ==================== 客户画像:业务方接口文件清单导入 ====================
+# 从 getAfterCustomerAllFiles 拉客户文件清单 -> 预览勾选 -> 全量 OCR 入客户文件库
+# -> 筛 4 类证件 -> 规则提取 -> 客户档案。方案见 docs/09-客户画像-Excel导入方案.md。
+
+
+class ProfileRemotePreviewReq(BaseModel):
+    customer_code: str = Field("", description="客户编号;留空查最近 100 条(接口固定)")
+    operation_user: str = Field("Jason邹启", description="业务方接口操作人身份")
+
+
+class ProfileRemoteImportReq(BaseModel):
+    customer_code: str = Field("", description="客户编号;留空查最近 100 条(接口固定)")
+    operation_user: str = Field("Jason邹启", description="业务方接口操作人身份")
+    customer_names: list[str] = Field(..., description="要导入的客户姓名(预览勾选项)")
 
 
 @app.post(
-    "/api/profile/import",
+    "/api/profile/import-remote/preview",
     tags=["客户画像"],
-    summary="上传客户文件清单 Excel,创建导入任务(后台跑 OCR/分类/提取)",
+    summary="从业务方接口拉客户文件清单预览(按客户合并,不写库)",
 )
-async def profile_import_upload(file: UploadFile = File(...)):
+async def profile_import_remote_preview(req: ProfileRemotePreviewReq):
     import profile_import_service
-    from db import customer_file_crud
-
-    fname = file.filename or ""
-    if not fname.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
-
-    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "temp")
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(
-        temp_dir, f"profile_import_{datetime.now().strftime('%Y%m%d%H%M%S')}_{os.getpid()}.xlsx")
     try:
-        await save_upload_stream(file, temp_path)
-        try:
-            manifest = profile_import_service.parse_excel_manifest(temp_path)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
+        customers = await profile_import_service.fetch_after_customer_files(
+            customer_code=req.customer_code, operation_user=req.operation_user)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"客户文件清单查询失败: {e}")
+    out = []
+    for g in profile_import_service.group_api_customers(customers):
+        m = profile_import_service.parse_api_manifest(g["customer"])
+        out.append({
+            "customer_name": g["customer_name"],
+            "customer_code": g["customer_code"],
+            "crm_oid": g["crm_oid"],
+            "entry_count": g["entry_count"],
+            "file_count": len(m["files"]),
+            "projects": m["projects"],
+            "skipped_junk": m["skipped_junk"],
+            "duplicates": m["duplicates"],
+        })
+    return {"customers": out}
 
-    # 主客户:老表软关联(不写字段);画像 v2 写独立 profile_* 表
-    client = await crud.find_or_create_client(manifest["client_name"])
-    from db import profile_crud
-    household = await profile_crud.get_or_create_household(
-        manifest["client_name"], legacy_client_id=client.id)
 
-    task = await customer_file_crud.create_import_task(
-        filename=fname, client_name=manifest["client_name"],
-        client_id=client.id, total_files=len(manifest["files"]),
-        household_id=household["id"])
-    counts = await customer_file_crud.upsert_task_files(
-        task["id"], client.id, manifest["files"])
+@app.post(
+    "/api/profile/import-remote",
+    tags=["客户画像"],
+    summary="按选中客户创建导入任务(后台串行跑 OCR/分类/提取)",
+)
+async def profile_import_remote(req: ProfileRemoteImportReq):
+    import profile_import_service
+    from db import customer_file_crud, profile_crud
 
-    asyncio.create_task(profile_import_service.run_import(task["id"]))
-    return {
-        "task_id": task["id"],
-        "client_name": manifest["client_name"],
-        "client_id": client.id,
-        "household_id": household["id"],
-        "total_files": len(manifest["files"]),
-        "new_files": counts["new"],
-        "relinked_files": counts["relinked"],
-        "skipped_rows": manifest.get("skipped_rows", 0),
-        "duplicates": manifest.get("duplicates", 0),
-        "status": "running",
-    }
+    names = [n.strip() for n in req.customer_names if n and n.strip()]
+    if not names:
+        raise HTTPException(status_code=400, detail="未选择客户")
+    try:
+        customers = await profile_import_service.fetch_after_customer_files(
+            customer_code=req.customer_code, operation_user=req.operation_user)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"客户文件清单查询失败: {e}")
+
+    wanted = set(names)
+    tasks = []
+    for g in profile_import_service.group_api_customers(customers):
+        name = g["customer_name"]
+        if name not in wanted:
+            continue
+        m = profile_import_service.parse_api_manifest(g["customer"])
+        if not m["files"]:
+            continue
+        # 主客户:老表软关联(不写字段);画像 v2 写独立 profile_* 表
+        client = await crud.find_or_create_client(name)
+        household = await profile_crud.get_or_create_household(
+            name, legacy_client_id=client.id,
+            customer_code=g["customer_code"] or None, crm_oid=g["crm_oid"] or None)
+        task = await customer_file_crud.create_import_task(
+            filename=f"接口导入-{name}", client_name=name,
+            client_id=client.id, total_files=len(m["files"]),
+            household_id=household["id"])
+        counts = await customer_file_crud.upsert_task_files(
+            task["id"], client.id, m["files"])
+        # 项目案件壳同步建好(一个售后项目=一个案件),早于后台任务消除里程碑路由竞态
+        await profile_crud.upsert_project_cases(household["id"], m["projects"])
+        tasks.append({
+            "task_id": task["id"], "client_name": name,
+            "household_id": household["id"], "total_files": len(m["files"]),
+            "new_files": counts["new"], "relinked_files": counts["relinked"],
+            "project_count": len(m["projects"]),
+        })
+
+    if not tasks:
+        raise HTTPException(status_code=400, detail="选中客户在接口返回中无有效文件")
+    asyncio.create_task(profile_import_service.run_imports_sequential(
+        [t["task_id"] for t in tasks]))
+    return {"tasks": tasks, "status": "running"}
 
 
 @app.get(
@@ -3008,12 +3044,14 @@ async def profile_import_upload(file: UploadFile = File(...)):
 async def profile_task_list(
     status: Optional[str] = Query(None, description="状态筛选:running/done/error"),
     client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    customer_code: Optional[str] = Query(None, description="客户编码模糊查询(按家庭 customer_code)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     from db import customer_file_crud
     items, total = await customer_file_crud.list_import_tasks(
-        status=status, client_name=client_name, limit=limit, offset=offset)
+        status=status, client_name=client_name, customer_code=customer_code,
+        limit=limit, offset=offset)
     return {"items": items, "total": total}
 
 
@@ -3028,6 +3066,105 @@ async def profile_task_get(task_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return row
+
+
+def _remove_customer_file_disks(local_paths: list[str]) -> int:
+    """连带删除磁盘原件(容错同 customer_file GC:Windows 句柄占用不阻塞响应)。"""
+    removed = 0
+    for p in local_paths:
+        abs_path = os.path.join(OUTPUT_DIR, p)
+        try:
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+@app.delete(
+    "/api/profile/tasks/{task_id}",
+    tags=["客户画像"],
+    summary="删除导入任务(任务有家庭时=删除画像:只删画像数据,文件/OCR/提取结果保留;无家庭时级联删任务级数据)",
+)
+async def profile_task_delete(task_id: int):
+    from db import customer_file_crud
+    deleted, local_paths, stats = await customer_file_crud.delete_import_task(task_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    removed = _remove_customer_file_disks(local_paths)
+    event_service.log_event(
+        severity="info",
+        category="profile.import.deleted",
+        message=f"删除画像数据(保留文件/OCR) 任务 #{task_id}" if stats.get("household_deleted")
+                else f"删除画像导入任务 #{task_id}",
+        context={"task_id": task_id, "local_files_removed": removed, **stats},
+    )
+    return {"deleted": True, "local_files_removed": removed, **stats}
+
+
+@app.delete(
+    "/api/profile/households/{household_id}",
+    tags=["客户画像"],
+    summary="删除画像(只删家庭画像数据:人员/字段/资产/案件;文件/OCR/提取结果/磁盘原件全保留)",
+)
+async def profile_household_delete(household_id: int):
+    from db import customer_file_crud
+    deleted, local_paths, stats = await customer_file_crud.delete_household_profile(household_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="家庭不存在")
+    removed = _remove_customer_file_disks(local_paths)
+    event_service.log_event(
+        severity="info",
+        category="profile.household.deleted",
+        message=f"删除画像数据(保留文件/OCR) 家庭 #{household_id}",
+        context={"household_id": household_id, "local_files_removed": removed, **stats},
+    )
+    return {"deleted": True, "local_files_removed": removed, **stats}
+
+
+@app.post(
+    "/api/profile/households/{household_id}/regenerate",
+    tags=["客户画像"],
+    summary="重新生成画像:已有 OCR 直接复用,缺 OCR 重识别,缺文件按文件编码重下载,按当前规则重分类/提取/归因",
+)
+async def profile_household_regenerate(household_id: int):
+    """家庭名下全部文件重跑一遍导入流水线(新任务),画像域数据不清空。
+
+    语义落点全靠现有 run_import/upsert_task_files 行为:
+    done+有 ocr_text 的行复用 OCR 只重分类/提取;error/pending 行自动重置重试;
+    无本地原件按 file_code 刷新地址重下载。人工已确认/修正字段不会被覆盖。
+    """
+    from db import customer_file_crud, profile_crud
+    import profile_import_service
+
+    household = await profile_crud.get_household(household_id)
+    if household is None:
+        raise HTTPException(status_code=404, detail="家庭不存在")
+    if await customer_file_crud.has_running_task(household_id):
+        raise HTTPException(status_code=409, detail="该家庭有正在运行的任务,请完成后再重新生成")
+
+    files = await customer_file_crud.list_household_files(household_id)
+    if not files:
+        raise HTTPException(status_code=400, detail="家庭名下没有文件,无法重新生成")
+
+    task = await customer_file_crud.create_import_task(
+        filename=f"重新生成-{household['name']}", client_name=household["name"],
+        client_id=household.get("legacy_client_id"), total_files=len(files),
+        household_id=household_id)
+    counts = await customer_file_crud.upsert_task_files(
+        task["id"], household.get("legacy_client_id"), files)
+    asyncio.create_task(profile_import_service.run_import(task["id"]))
+    event_service.log_event(
+        severity="info",
+        category="profile.import.regenerate",
+        message=f"重新生成画像: 家庭 #{household_id} ({household['name']})",
+        context={"household_id": household_id, "task_id": task["id"],
+                 "total_files": len(files), **counts},
+    )
+    return {"task_id": task["id"], "household_id": household_id,
+            "total_files": len(files), "new_files": counts["new"],
+            "relinked_files": counts["relinked"], "status": "running"}
 
 
 @app.get(
@@ -3178,11 +3315,13 @@ async def review_file_correct(file_id: int, payload: ReviewCorrectPayload):
 
     # 定归属人:显式 person_id > 新建人 > 最近提取结果已归因的人
     person_id = payload.person_id
+    person_deduped = False
     if person_id is None and payload.new_person_name:
         if household_id is None:
             raise HTTPException(status_code=400, detail="任务无家庭上下文,无法新建归属人")
         person = await profile_crud.create_person(household_id, payload.new_person_name)
         person_id = person["id"]
+        person_deduped = bool(person.get("deduped"))
     result = await doc_extract_crud.get_latest_result_for_file(file_id)
     if person_id is None and result and result.get("write_stats"):
         person_id = (result["write_stats"] or {}).get("person_id")
@@ -3191,6 +3330,9 @@ async def review_file_correct(file_id: int, payload: ReviewCorrectPayload):
 
     if payload.person_relation and person_id:
         await profile_crud.set_person_relation(person_id, payload.person_relation)
+    if person_id is not None:
+        # 归属人落 customer_files.person_id(权威载体):人员「查看文件」/完备度矩阵据此可见
+        await customer_file_crud.assign_file_person(file_id, person_id)
     for field, value in (payload.fields or {}).items():
         try:
             await profile_crud.correct_person_field(
@@ -3204,7 +3346,7 @@ async def review_file_correct(file_id: int, payload: ReviewCorrectPayload):
             result["id"], status="corrected", corrected=payload.fields,
             reviewed_by=payload.reviewed_by)
     await customer_file_crud.set_file_reviewed(file_id)
-    return {"ok": True, "person_id": person_id}
+    return {"ok": True, "person_id": person_id, "deduped": person_deduped}
 
 
 @app.post(
@@ -3246,11 +3388,77 @@ async def person_field_correct(person_id: int, payload: PersonFieldPayload):
 @app.get(
     "/api/profile/persons/{person_id}/files",
     tags=["客户画像"],
-    summary="人员的关联文件(按提取归因 person_id 查)",
+    summary="人员的关联文件(手动归属 ∪ 提取归因)",
 )
 async def person_files(person_id: int):
     from db import customer_file_crud
     return await customer_file_crud.list_person_files(person_id)
+
+
+class FileAssignPayload(BaseModel):
+    person_id: Optional[int] = Field(None, description="归属人 profile_persons.id;null 且不带 new_person_name = 清除归属")
+    new_person_name: Optional[str] = Field(None, description="新建归属人姓名(家庭内查无此人时)")
+
+
+@app.get(
+    "/api/profile/files",
+    tags=["客户画像"],
+    summary="文件归属页全局文件列表(分页+客户/类型/归属状态筛选)",
+)
+async def profile_file_list(
+    client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    doc_type: Optional[str] = Query(None, description="证件类型:id_card/hukou/degree_cert/birth_cert/other"),
+    assigned: Optional[str] = Query(None, description="归属状态:none=未归属/any=已归属,缺省全部"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from db import customer_file_crud
+    items, total = await customer_file_crud.list_files_for_assignment(
+        client_name=client_name, doc_type=doc_type, assigned=assigned,
+        limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
+@app.get(
+    "/api/profile/households/{household_id}/persons",
+    tags=["客户画像"],
+    summary="家庭成员轻量列表(文件归属下拉用)",
+)
+async def household_person_list(household_id: int):
+    from db import profile_crud
+    ps = await profile_crud.list_persons(household_id)
+    return [{"id": p["id"], "name": p["name"],
+             "relation_to_main": p["relation_to_main"], "is_main": p["is_main"]}
+            for p in ps]
+
+
+@app.post(
+    "/api/profile/files/{file_id}/assign",
+    tags=["客户画像"],
+    summary="指定/清除文件归属人(写 customer_files.person_id;可顺带新建人)",
+)
+async def profile_file_assign(file_id: int, payload: FileAssignPayload):
+    from db import customer_file_crud, profile_crud
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    task = await customer_file_crud.get_import_task(row["import_task_id"])
+    household_id = task.get("household_id") if task else None
+
+    person_id = payload.person_id
+    person_deduped = False
+    if person_id is None and payload.new_person_name:
+        if household_id is None:
+            raise HTTPException(status_code=400, detail="任务无家庭上下文,无法新建归属人")
+        person = await profile_crud.create_person(household_id, payload.new_person_name.strip())
+        person_id = person["id"]
+        person_deduped = bool(person.get("deduped"))
+    elif person_id is not None:
+        persons = await profile_crud.list_persons(household_id) if household_id else []
+        if not any(p["id"] == person_id for p in persons):
+            raise HTTPException(status_code=400, detail="归属人不属于该文件所在家庭")
+    await customer_file_crud.assign_file_person(file_id, person_id)
+    return {"ok": True, "person_id": person_id, "deduped": person_deduped}
 
 
 class AssetMergeGroup(BaseModel):
@@ -3304,6 +3512,20 @@ async def dedupe_assets_commit(household_id: int, payload: AssetMergePayload):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "merged_groups": merged, "deleted_rows": deleted}
+
+
+@app.post(
+    "/api/profile/households/{household_id}/infer-relations",
+    tags=["客户画像"],
+    summary="手动触发家庭关系交叉推导(刷历史已导入家庭;幂等,不建人)",
+)
+async def profile_infer_relations(household_id: int):
+    import profile_import_service
+    from db import profile_crud
+    if await profile_crud.get_household(household_id) is None:
+        raise HTTPException(status_code=404, detail="家庭不存在")
+    return await profile_import_service.run_infer_relations(
+        household_id, trigger="manual")
 
 
 @app.get(
