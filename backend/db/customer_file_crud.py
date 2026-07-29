@@ -272,6 +272,42 @@ async def list_household_files(household_id: int) -> list[dict]:
         } for r in rows]
 
 
+async def get_latest_task_for_household(household_id: int) -> Optional[dict]:
+    """家庭最近一个导入任务(重新生成画像复用的宿主任务)。"""
+    async with async_session_maker() as session:
+        row = (await session.execute(
+            select(ProfileImportTask)
+            .where(ProfileImportTask.household_id == household_id)
+            .order_by(ProfileImportTask.id.desc())
+            .limit(1)
+        )).scalars().first()
+        return _to_task_dict(row) if row else None
+
+
+async def reset_import_task(task_id: int, *, total_files: int) -> None:
+    """把任务重置回 running 初始态,供重新生成画像原地重跑(不新建任务)。"""
+    async with async_session_maker() as session:
+        row = await session.get(ProfileImportTask, task_id)
+        if row:
+            row.status = "running"
+            row.error = None
+            row.current_file = None
+            row.total_files = total_files
+            row.processed_files = 0
+            row.reused_count = 0
+            row.relinked_count = 0
+            row.fresh_ocr_count = 0
+            row.failed_count = 0
+            row.extracted_count = 0
+            row.id_card_count = 0
+            row.hukou_count = 0
+            row.degree_cert_count = 0
+            row.birth_cert_count = 0
+            row.needs_review_count = 0
+            row.updated_at = datetime.now()
+            await session.commit()
+
+
 async def has_running_task(household_id: int) -> bool:
     """家庭是否有 running 状态任务(重新生成的并发保护)。"""
     async with async_session_maker() as session:
@@ -459,6 +495,24 @@ async def list_person_files(person_id: int) -> list[dict]:
         return [_to_file_dict(r) for r in rows]
 
 
+async def list_asset_files(household_id: int) -> list[dict]:
+    """家庭资产相关文件:全部资产 source_file_id 去重对应的 customer_files 行,按 id 升序。"""
+    async with async_session_maker() as session:
+        cfids = (await session.execute(
+            select(ProfileAsset.source_file_id)
+            .where(ProfileAsset.household_id == household_id,
+                   ProfileAsset.source_file_id.is_not(None))
+            .distinct()
+        )).scalars().all()
+        if not cfids:
+            return []
+        rows = (await session.execute(
+            select(CustomerFile).where(CustomerFile.id.in_(cfids))
+            .order_by(CustomerFile.id)
+        )).scalars().all()
+        return [_to_file_dict(r) for r in rows]
+
+
 async def assign_file_person(row_id: int, person_id: Optional[int]) -> None:
     """设置/清除文件手动归属人(person_id=None 为清除)。"""
     async with async_session_maker() as session:
@@ -561,6 +615,33 @@ async def list_pending_files(task_id: int) -> list[dict]:
         return [_to_file_dict(r, with_text=True) for r in rows]
 
 
+async def list_unfinished_files(task_id: int) -> list[dict]:
+    """本 task 未完成文件(pending+error,按 id 升序)。断点续跑用:done 行不重跑。
+
+    error 行不需先重置:_process_one_file 对非 done 行自然走 fetch/OCR 重试路径。
+    """
+    async with async_session_maker() as session:
+        rows = (await session.execute(
+            select(CustomerFile)
+            .where(CustomerFile.import_task_id == task_id,
+                   CustomerFile.status.in_(["pending", "error"]))
+            .order_by(CustomerFile.id)
+        )).scalars().all()
+        return [_to_file_dict(r, with_text=True) for r in rows]
+
+
+async def list_running_import_tasks() -> list[dict]:
+    """全部 running 状态导入任务(按 id 升序)。恢复中断任务端点用:
+    与 profile_import_service 活跃登记对照,不在活跃集合里的即 stale。"""
+    async with async_session_maker() as session:
+        rows = (await session.execute(
+            select(ProfileImportTask)
+            .where(ProfileImportTask.status == "running")
+            .order_by(ProfileImportTask.id)
+        )).scalars().all()
+        return [_to_task_dict(r) for r in rows]
+
+
 async def get_customer_file(row_id: int) -> Optional[dict]:
     async with async_session_maker() as session:
         row = await session.get(CustomerFile, row_id)
@@ -579,7 +660,8 @@ async def set_file_status(row_id: int, status: str) -> None:
 async def update_file_ocr(row_id: int, *, status: str, ocr_source: str,
                           ocr_text: Optional[str], mime_type: Optional[str] = None,
                           page_count: Optional[int] = None,
-                          char_count: Optional[int] = None) -> None:
+                          char_count: Optional[int] = None,
+                          content_sha256: Optional[str] = None) -> None:
     async with async_session_maker() as session:
         row = await session.get(CustomerFile, row_id)
         if row:
@@ -589,8 +671,54 @@ async def update_file_ocr(row_id: int, *, status: str, ocr_source: str,
             row.mime_type = mime_type
             row.page_count = page_count
             row.char_count = char_count if char_count is not None else (len(ocr_text) if ocr_text else 0)
+            if content_sha256 is not None:
+                row.content_sha256 = content_sha256
             row.updated_at = datetime.now()
             await session.commit()
+
+
+async def find_household_dup_ocr(household_id: int, sha256: str, *,
+                                 exclude_id: Optional[int] = None) -> Optional[dict]:
+    """同家庭 + 同内容 sha256 且已有 OCR 文本的最新文件行(内容级去重的复用源)。
+
+    同一文件在不同售后项目下 file_code 不同,按编号去重拦不住;按内容 hash 跨任务找兄弟行。
+    优先 fresh(未脱敏原文),其次 reused(archive_detect 脱敏);同来源取 id 最大(最新)。
+    """
+    if not household_id or not sha256:
+        return None
+    async with async_session_maker() as session:
+        stmt = (
+            select(CustomerFile)
+            .options(undefer(CustomerFile.ocr_text))
+            .join(ProfileImportTask, CustomerFile.import_task_id == ProfileImportTask.id)
+            .where(
+                ProfileImportTask.household_id == household_id,
+                CustomerFile.content_sha256 == sha256,
+                CustomerFile.ocr_text.isnot(None),
+                CustomerFile.ocr_text != "",
+            )
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(CustomerFile.id != exclude_id)
+        row = (await session.execute(
+            stmt.order_by((CustomerFile.ocr_source == "fresh").desc(),
+                          CustomerFile.id.desc())
+                .limit(1)
+        )).scalar_one_or_none()
+        if not row:
+            return None
+        return {
+            "id": row.id,
+            "file_code": row.file_code,
+            "ocr_text": row.ocr_text,
+            "ocr_source": row.ocr_source,
+            "mime_type": row.mime_type,
+            "page_count": row.page_count,
+            "char_count": row.char_count,
+            "doc_type": row.doc_type,
+            "classify_by": row.classify_by,
+            "classify_score": row.classify_score,
+        }
 
 
 async def update_file_classify(row_id: int, *, doc_type: Optional[str],

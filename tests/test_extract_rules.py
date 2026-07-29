@@ -46,6 +46,23 @@ def test_hukou_is_multi():
     assert "所有常住人口登记卡成员" in (r["prompt_extra"] or ""), r["prompt_extra"]
 
 
+def test_marriage_is_multi():
+    """marriage_cert v2 起多人模式:抽全配偶字段+自动建配偶卡。"""
+    r = er.get_rule("marriage_cert")
+    assert r is not None and r["multi"] is True, r
+    assert r["version"] == 2, r
+    assert "恰好 2 个 person 对象" in (r["prompt_extra"] or ""), r["prompt_extra"]
+    cols = {f["key"]: f["target"].get("column") for f in r["fields"]}
+    # 本人字段 + spouse_name 交叉写 + 共享婚姻字段
+    assert cols.get("name") == "name", cols
+    assert cols.get("id_number") == "id_number", cols
+    assert cols.get("birth_date") == "birth_date", cols
+    assert cols.get("spouse_name") == "spouse_name", cols
+    assert cols.get("marital_status") == "marital_status", cols
+    assert cols.get("marriage_date") == "marriage_date", cols
+    assert cols.get("cert_role") is None, cols  # 只抽不写库,供推导定位持证人/配偶
+
+
 def test_approval_is_v2():
     r = er.get_rule("approval")
     assert r is not None and r["version"] == 2, r
@@ -67,10 +84,12 @@ if __name__ == "__main__":
     print("PASS test_get_rule_structure")
     test_hukou_is_multi()
     print("PASS test_hukou_is_multi")
+    test_marriage_is_multi()
+    print("PASS test_marriage_is_multi")
     test_approval_is_v2()
     print("PASS test_approval_is_v2")
     test_unknown_type_returns_none()
     print("PASS test_unknown_type_returns_none")
     test_rules_version_constant()
     print("PASS test_rules_version_constant")
-    print("\n全部 6 个测试通过")
+    print("\n全部 7 个测试通过")

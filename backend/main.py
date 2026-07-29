@@ -3002,6 +3002,7 @@ async def profile_import_remote(req: ProfileRemoteImportReq):
 
     wanted = set(names)
     tasks = []
+    skipped_running = []  # 该家庭已有 running 任务,按户跳过(防重复提交并发双建卡)
     for g in profile_import_service.group_api_customers(customers):
         name = g["customer_name"]
         if name not in wanted:
@@ -3014,6 +3015,9 @@ async def profile_import_remote(req: ProfileRemoteImportReq):
         household = await profile_crud.get_or_create_household(
             name, legacy_client_id=client.id,
             customer_code=g["customer_code"] or None, crm_oid=g["crm_oid"] or None)
+        if await customer_file_crud.has_running_task(household["id"]):
+            skipped_running.append(name)
+            continue
         task = await customer_file_crud.create_import_task(
             filename=f"接口导入-{name}", client_name=name,
             client_id=client.id, total_files=len(m["files"]),
@@ -3029,11 +3033,13 @@ async def profile_import_remote(req: ProfileRemoteImportReq):
             "project_count": len(m["projects"]),
         })
 
-    if not tasks:
+    if not tasks and not skipped_running:
         raise HTTPException(status_code=400, detail="选中客户在接口返回中无有效文件")
+    if not tasks:
+        return {"tasks": [], "skipped_running": skipped_running, "status": "skipped"}
     asyncio.create_task(profile_import_service.run_imports_sequential(
         [t["task_id"] for t in tasks]))
-    return {"tasks": tasks, "status": "running"}
+    return {"tasks": tasks, "skipped_running": skipped_running, "status": "running"}
 
 
 @app.get(
@@ -3066,6 +3072,35 @@ async def profile_task_get(task_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return row
+
+
+@app.post(
+    "/api/profile/tasks/resume-stale",
+    tags=["客户画像"],
+    summary="恢复中断的导入任务:进程重启卡 running 的任务断点续跑(已完成文件不重跑)",
+)
+async def profile_tasks_resume_stale():
+    """DB status='running' 但不在主进程活跃登记里的任务 = stale(进程重启杀了协程)。
+
+    mark_task_active 同步执行:既排除真在跑的任务,又关掉双击/并发请求的竞态;
+    后续 run_import(assume_active=True) 跑完在 finally 里 unmark。
+    """
+    from db import customer_file_crud
+    import profile_import_service
+
+    running = await customer_file_crud.list_running_import_tasks()
+    ids = [t["id"] for t in running if profile_import_service.mark_task_active(t["id"])]
+    if not ids:
+        return {"resumed": [], "skipped_running": len(running)}
+    asyncio.create_task(profile_import_service.run_imports_sequential(
+        ids, resume=True, assume_active=True))
+    event_service.log_event(
+        severity="info",
+        category="profile.import.resumed",
+        message=f"恢复 {len(ids)} 个中断的画像导入任务",
+        context={"task_ids": ids},
+    )
+    return {"resumed": ids, "skipped_running": len(running) - len(ids)}
 
 
 def _remove_customer_file_disks(local_paths: list[str]) -> int:
@@ -3126,11 +3161,13 @@ async def profile_household_delete(household_id: int):
 @app.post(
     "/api/profile/households/{household_id}/regenerate",
     tags=["客户画像"],
-    summary="重新生成画像:已有 OCR 直接复用,缺 OCR 重识别,缺文件按文件编码重下载,按当前规则重分类/提取/归因",
+    summary="重新生成画像:复用当前任务原地重跑,已有 OCR 直接复用,缺 OCR 重识别,缺文件按文件编码重下载,按当前规则重分类/提取/归因",
 )
-async def profile_household_regenerate(household_id: int):
-    """家庭名下全部文件重跑一遍导入流水线(新任务),画像域数据不清空。
+async def profile_household_regenerate(household_id: int, task_id: Optional[int] = Query(None)):
+    """家庭名下全部文件重跑一遍导入流水线(复用已有任务,不新建),画像域数据不清空。
 
+    宿主任务:优先取前端传的 task_id(当前打开画像所在的任务,须属于本家庭),
+    缺省取家庭最近一个任务;家庭一个任务都没有时兜底新建(正常不会发生)。
     语义落点全靠现有 run_import/upsert_task_files 行为:
     done+有 ocr_text 的行复用 OCR 只重分类/提取;error/pending 行自动重置重试;
     无本地原件按 file_code 刷新地址重下载。人工已确认/修正字段不会被覆盖。
@@ -3148,10 +3185,20 @@ async def profile_household_regenerate(household_id: int):
     if not files:
         raise HTTPException(status_code=400, detail="家庭名下没有文件,无法重新生成")
 
-    task = await customer_file_crud.create_import_task(
-        filename=f"重新生成-{household['name']}", client_name=household["name"],
-        client_id=household.get("legacy_client_id"), total_files=len(files),
-        household_id=household_id)
+    task = None
+    if task_id is not None:
+        task = await customer_file_crud.get_import_task(task_id)
+        if task is None or task.get("household_id") != household_id:
+            raise HTTPException(status_code=400, detail="任务不存在或不属于该家庭")
+    else:
+        task = await customer_file_crud.get_latest_task_for_household(household_id)
+    if task is None:
+        task = await customer_file_crud.create_import_task(
+            filename=f"重新生成-{household['name']}", client_name=household["name"],
+            client_id=household.get("legacy_client_id"), total_files=len(files),
+            household_id=household_id)
+    else:
+        await customer_file_crud.reset_import_task(task["id"], total_files=len(files))
     counts = await customer_file_crud.upsert_task_files(
         task["id"], household.get("legacy_client_id"), files)
     asyncio.create_task(profile_import_service.run_import(task["id"]))
@@ -3165,6 +3212,93 @@ async def profile_household_regenerate(household_id: int):
     return {"task_id": task["id"], "household_id": household_id,
             "total_files": len(files), "new_files": counts["new"],
             "relinked_files": counts["relinked"], "status": "running"}
+
+
+@app.post(
+    "/api/profile/households/{household_id}/merge-duplicates",
+    tags=["客户画像"],
+    summary="扫描合并家庭内同名人员卡(name_folded 折叠分组;dry_run 只出计划;id_number 冲突组跳过)",
+)
+async def profile_household_merge_duplicates(
+    household_id: int,
+    dry_run: bool = Query(False, description="只返回分组计划不执行合并"),
+):
+    from db import customer_file_crud, profile_crud
+    import profile_import_service
+
+    household = await profile_crud.get_household(household_id)
+    if household is None:
+        raise HTTPException(status_code=404, detail="家庭不存在")
+    if await customer_file_crud.has_running_task(household_id):
+        raise HTTPException(status_code=409, detail="该家庭有正在运行的任务,请完成后再合并")
+    if dry_run:
+        return {"household_id": household_id,
+                "groups": await profile_crud.find_duplicate_person_groups(household_id)}
+    result = await profile_import_service.run_merge_duplicate_persons(
+        household_id, trigger="manual")
+    return {"household_id": household_id, **result}
+
+
+@app.post(
+    "/api/profile/admin/merge-duplicates-all",
+    tags=["客户画像"],
+    summary="全量扫描合并同名人员卡(存量清理;跳过有 running 任务的家庭;dry_run 只出计划)",
+)
+async def profile_admin_merge_duplicates_all(
+    dry_run: bool = Query(False, description="只返回分组计划不执行合并"),
+):
+    from db import customer_file_crud, profile_crud
+    import profile_import_service
+
+    results, skipped_running = [], []
+    for household_id in await profile_crud.list_household_ids():
+        if await customer_file_crud.has_running_task(household_id):
+            skipped_running.append(household_id)
+            continue
+        if dry_run:
+            groups = await profile_crud.find_duplicate_person_groups(household_id)
+            if groups:
+                results.append({"household_id": household_id, "groups": groups})
+        else:
+            r = await profile_import_service.run_merge_duplicate_persons(
+                household_id, trigger="admin")
+            if r["groups"]:
+                results.append({"household_id": household_id, **r})
+    return {"dry_run": dry_run, "households": results,
+            "skipped_running": skipped_running}
+
+
+class PersonMergePayload(BaseModel):
+    keep_id: int = Field(..., description="保留的人员 profile_persons.id")
+    drop_id: int = Field(..., description="合并掉的人员 profile_persons.id")
+    keep_name: Optional[str] = Field(None, description="合并后保留的姓名;缺省=keep 人原名,可选 drop 人名")
+
+
+@app.post(
+    "/api/profile/persons/merge",
+    tags=["客户画像"],
+    summary="手动合并单对人员(字段仲裁:人工>AI、同 AI 晚者胜;文件/资产/归因一并重挂)",
+)
+async def profile_persons_merge(payload: PersonMergePayload):
+    from db import profile_crud
+
+    keep = await profile_crud.get_person(payload.keep_id)
+    drop = await profile_crud.get_person(payload.drop_id)
+    if not keep or not drop:
+        raise HTTPException(status_code=404, detail="人员不存在")
+    if keep["household_id"] != drop["household_id"]:
+        raise HTTPException(status_code=400, detail="两人不属于同一家庭,禁止合并")
+    try:
+        result = await profile_crud.merge_persons(
+            keep["household_id"], payload.keep_id, payload.drop_id,
+            keep_name=payload.keep_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    event_service.log_event(
+        event_service.INFO, event_service.CATEGORY_PROFILE_PERSON_MERGED,
+        f"同名人员手动合并: person#{payload.drop_id} → person#{payload.keep_id}",
+        context={"household_id": keep["household_id"], "trigger": "manual-single", **result})
+    return result
 
 
 @app.get(
@@ -3217,6 +3351,51 @@ async def profile_file_raw(file_id: int):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"原件获取失败: {e}")
     return FileResponse(abs_path, media_type=mime, filename=row.get("filename") or None)
+
+
+# Office 原件在线预览:soffice 按需转 PDF,按 file_id 缓存
+_OFFICE_PREVIEW_EXTS = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"}
+
+
+@app.get(
+    "/api/profile/files/{file_id}/preview-pdf",
+    tags=["客户画像"],
+    summary="Office 原件转 PDF 预览(soffice 按需转换+缓存;无 LibreOffice 返回 501)",
+)
+async def profile_file_preview_pdf(file_id: int):
+    from db import customer_file_crud
+    import profile_import_service
+    import text_extractor
+    from fastapi.responses import FileResponse
+    row = await customer_file_crud.get_customer_file(file_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    ext = os.path.splitext(row.get("filename") or "")[1].lower()
+    if ext not in _OFFICE_PREVIEW_EXTS:
+        raise HTTPException(status_code=400, detail=f"非 Office 文件,不支持转换预览: {ext or '无扩展名'}")
+    try:
+        abs_path, _mime = await profile_import_service.ensure_local_file(row)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"原件获取失败: {e}")
+
+    preview_dir = os.path.join(OUTPUT_DIR, "customer_files", "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_path = os.path.join(preview_dir, f"{file_id}.pdf")
+    if (os.path.exists(cache_path)
+            and os.path.getmtime(cache_path) >= os.path.getmtime(abs_path)):
+        return FileResponse(cache_path, media_type="application/pdf")
+    try:
+        produced = await asyncio.to_thread(text_extractor.office_to_pdf, abs_path, preview_dir)
+        if os.path.normpath(produced) != os.path.normpath(cache_path):
+            os.replace(produced, cache_path)
+    except RuntimeError as e:
+        msg = str(e)
+        if "未安装 LibreOffice" in msg:
+            raise HTTPException(status_code=501, detail=msg)
+        raise HTTPException(status_code=502, detail=msg)
+    return FileResponse(cache_path, media_type="application/pdf")
 
 
 # ==================== 复核(质量评级驱动的轻重缓急队列) ====================
@@ -3432,6 +3611,18 @@ async def household_person_list(household_id: int):
             for p in ps]
 
 
+@app.get(
+    "/api/profile/households/{household_id}/asset-files",
+    tags=["客户画像"],
+    summary="家庭资产相关文件列表(全部资产 source_file_id 去重)",
+)
+async def household_asset_files(household_id: int):
+    from db import customer_file_crud, profile_crud
+    if await profile_crud.get_household(household_id) is None:
+        raise HTTPException(status_code=404, detail="家庭不存在")
+    return await customer_file_crud.list_asset_files(household_id)
+
+
 @app.post(
     "/api/profile/files/{file_id}/assign",
     tags=["客户画像"],
@@ -3552,7 +3743,10 @@ async def profile_task_profile(task_id: int):
         household = await profile_crud.get_household(task["household_id"])
         persons = await profile_crud.list_persons(task["household_id"])
         profile_crud.attach_passport_expiry(persons)
-        await profile_crud.attach_field_conflicts(persons, task["household_id"])
+        # 冲突与可信度共用一次采样(同一组 DB 查询)
+        provenance = await profile_crud._collect_field_provenance(task["household_id"])
+        await profile_crud.attach_field_conflicts(persons, task["household_id"], provenance=provenance)
+        await profile_crud.attach_field_credibility(persons, task["household_id"], provenance=provenance)
         assets = await profile_crud.list_assets(task["household_id"])
         cases = await profile_crud.list_cases(task["household_id"])
     extractions, extraction_total = await doc_extract_crud.list_results(

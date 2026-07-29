@@ -45,10 +45,39 @@ export function reviewReasonLabel(reason) {
 
 export const REVIEW_REASON_OPTIONS = Object.entries(_REVIEW_REASONS).map(([value, label]) => ({ value, label }))
 
+// AI/LLM 调用记录操作码 → 【业务线】中文名(AiApiCallsPage 操作列/筛选用;查询仍传原编码)
+const _AI_OPERATIONS = {
+  detect_archival: ['文件留底检测', '单文件留底判定'],
+  judge_batch_overall: ['文件留底检测', '批次总体判定'],
+  summarize_batch: ['文件留底检测', '批次摘要(兜底)'],
+  detect_large_table_doc: ['文件留底检测', '大表格检测'],
+  recognize_doc_type: ['客户画像', '证件类型识别'],
+  extract_doc_fields: ['客户画像', '证件字段提取'],
+  extract_doc_fields_multi: ['客户画像', '多人字段提取'],
+  asset_dedup: ['客户画像', '资产去重判定'],
+  asset_merge: ['客户画像', '资产合并建议'],
+  extract_client_profile_facts: ['客户档案', '档案事实抽取'],
+  detect_and_extract: ['材料解析', '类型检测+字段提取'],
+  classify_one_page: ['PDF拆分', '单页证件分类'],
+  detect_page_ranges: ['PDF拆分', '页边界判定'],
+  summarize_text: ['URL摘要', '文件摘要'],
+  enrich_anchors_with_llm: ['Word模板', '锚点智能补充'],
+  match_anchors_to_client: ['Word模板', '锚点匹配客户'],
+}
+
+export function operationLabel(op) {
+  const hit = _AI_OPERATIONS[op]
+  return hit ? `【${hit[0]}】${hit[1]}` : (op || '-')
+}
+
+// 筛选下拉选项:label 中文、value 原编码
+export const AI_OPERATION_OPTIONS = Object.entries(_AI_OPERATIONS)
+  .map(([value, [biz, label]]) => ({ value, label: `【${biz}】${label}` }))
+
 const _FIELD_LABELS = {
   name: '姓名', gender: '性别', ethnicity: '民族', birth_date: '出生日期',
   id_number: '公民身份号码', hukou_address: '住址', issue_authority: '签发机关',
-  issuing_authority: '签发机关', valid_period: '有效期限',
+  issuing_authority: '签发机关', valid_period: '有效期限', spouse_name: '配偶姓名',
 }
 
 export function fieldLabelOf(key) {
@@ -59,6 +88,7 @@ export function fieldLabelOf(key) {
 const _FIELD_GROUP_OF = {
   name: 'basic', name_en: 'basic', gender: 'basic', birth_date: 'basic', birth_place: 'basic',
   nationality: 'basic', ethnicity: 'basic', id_number: 'basic', hukou_address: 'basic', marital_status: 'basic',
+  spouse_name: 'basic',
   passport_no: 'passport', passport_issue_date: 'passport', passport_expiry_date: 'passport',
   phone: 'income', email: 'income', current_address: 'income', postal_code: 'income',
   occupation: 'income', employer: 'income', business_nature: 'income', annual_income: 'income',

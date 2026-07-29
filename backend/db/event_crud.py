@@ -10,9 +10,14 @@ from typing import Optional
 
 from sqlalchemy import select, delete as sa_delete, func, and_, or_, cast, String
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import sessionmaker
 
-from db.engine import async_session_maker
+from db.engine import async_session_maker, sync_engine
 from db.models import SystemEvent
+
+
+# 同步 session 工厂，供无 event loop 的线程上下文写入使用（与 ai_api_call_crud 同模式）
+SyncSession = sessionmaker(bind=sync_engine)
 
 
 def _event_to_dict(e: SystemEvent) -> dict:
@@ -42,6 +47,26 @@ async def insert_event(
         )
         session.add(row)
         await session.commit()
+
+
+def insert_event_sync(
+    severity: str,
+    category: str,
+    message: str,
+    context: Optional[dict] = None,
+) -> None:
+    """同步写入一条事件。供无 event loop 的线程上下文(如 asyncio.to_thread 里的
+    _call_llm/text_extractor)使用——async 引擎连接池绑在主 loop,跨 loop 用
+    asyncpg 会段错误杀整个进程(2026-07-28 生产实锤,protocol.so 同一指令两次)。"""
+    with SyncSession() as session:
+        row = SystemEvent(
+            severity=severity,
+            category=category,
+            message=message,
+            context=context,
+        )
+        session.add(row)
+        session.commit()
 
 
 async def list_events(

@@ -42,6 +42,7 @@ CATEGORY_MEMORY_LOW = "memory.low"
 CATEGORY_PROFILE_IMPORT_DONE = "profile.import.done"
 CATEGORY_PROFILE_IMPORT_ERROR = "profile.import.error"
 CATEGORY_PROFILE_RELATION_INFER = "profile.relation.inferred"
+CATEGORY_PROFILE_PERSON_MERGED = "profile.person.merged"
 CATEGORY_EXTRACT_DONE = "extract.done"
 CATEGORY_EXTRACT_ERROR = "extract.error"
 CATEGORY_EXTRACT_SKIP = "extract.skip"
@@ -96,9 +97,11 @@ def log_event(
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # 不在 event loop 中(测试或脚本),直接同步跑
+        # 不在 event loop 中(worker 线程/脚本):走同步引擎直写。
+        # 不能 asyncio.run(async 写):async 连接池绑主 loop,跨 loop 用 asyncpg
+        # 会段错误杀整个进程(2026-07-28 生产实锤)。
         try:
-            asyncio.run(event_crud.insert_event(severity, category, message, context_truncated))
+            event_crud.insert_event_sync(severity, category, message, context_truncated)
         except Exception as e:
             print(f"[event_service] 同步写事件失败(忽略): {e}", file=sys.stderr)
         return

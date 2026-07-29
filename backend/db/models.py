@@ -698,7 +698,7 @@ class ProfileImportTask(Base):
     status = Column(String(20), nullable=False, default="running", comment="running/done/error")
     total_files = Column(Integer, nullable=False, default=0, comment="文件总数")
     processed_files = Column(Integer, nullable=False, default=0, comment="已处理数(含成败)")
-    reused_count = Column(Integer, nullable=False, default=0, comment="复用 archive_detect 脱敏 OCR 的文件数")
+    reused_count = Column(Integer, nullable=False, default=0, comment="复用 OCR 的文件数(archive_detect 脱敏文本 + 同家庭同内容兄弟行)")
     relinked_count = Column(Integer, nullable=False, default=0, comment="命中本库已有 done 行直接复用的文件数")
     fresh_ocr_count = Column(Integer, nullable=False, default=0, comment="新下载+OCR 的文件数")
     failed_count = Column(Integer, nullable=False, default=0, comment="失败文件数")
@@ -751,6 +751,7 @@ class CustomerFile(Base):
     person_id = Column(Integer, nullable=True, comment="归属人(手动指定;权威归属载体,与 write_stats 归因并集使用)")
     affter_entryoid = Column(String(64), nullable=True, comment="售后项目OID(项目案件路由键);NULL=扁平形态/旧数据")
     project_name = Column(String(300), nullable=True, comment="项目显示名(反范式: projectname_detailed || projectname)")
+    content_sha256 = Column(String(64), nullable=True, comment="原件内容 sha256(同家庭跨项目重复文件的内容级去重)")
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
 
@@ -762,6 +763,7 @@ class CustomerFile(Base):
         Index("ix_customer_files_review", "review_status", "quality_score"),
         Index("ix_customer_files_person", "person_id"),
         Index("ix_customer_files_entryoid", "affter_entryoid"),
+        Index("ix_customer_files_sha256", "content_sha256"),
     )
 
 
@@ -823,6 +825,7 @@ class ProfilePerson(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     household_id = Column(Integer, ForeignKey("profile_households.id", ondelete="CASCADE"), nullable=False, comment="所属家庭")
     name = Column(String(100), nullable=False, comment="姓名")
+    name_folded = Column(String(100), nullable=True, comment="姓名归一化折叠键(person_name_fold):CJK=繁→简+去空白/间隔号,拉丁=大写词序无关;建卡去重 upsert 用")
     relation_to_main = Column(String(20), nullable=False, default="待确认", comment="与主申请人关系:户主/配偶/子/女/父/母/待确认")
     is_main = Column(Boolean, nullable=False, default=False, comment="是否主申请人")
     avatar_file_id = Column(BigInteger, nullable=True, comment="头像证件照 customer_files.id")

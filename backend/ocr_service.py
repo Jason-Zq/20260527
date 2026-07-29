@@ -214,11 +214,19 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
 
     results = []
     with pdfplumber.open(pdf_path) as plumber:
+        # pypdfium2 与 pdfplumber 对畸形 PDF 的页数判断可能不一致,取小值防 pages 越界
+        page_limit = min(page_limit, len(plumber.pages))
         for i in range(page_limit):
             ppage = plumber.pages[i]
+            # 数字页:直接读文本层(无大图,文本层是可信内容);
+            # 文本层解析失败(畸形 PDF 触发 pdfminer 内部错误)时降级按扫描页 OCR
+            page_text = None
             if not _page_has_big_image(ppage):
-                # 数字页:直接读文本层(无大图,文本层是可信内容)
-                page_text = (ppage.extract_text() or "").strip()
+                try:
+                    page_text = (ppage.extract_text() or "").strip()
+                except Exception as e:
+                    print(f"  第 {i + 1} 页文本层解析失败,降级 OCR: {type(e).__name__}: {e}")
+            if page_text is not None:
                 results.append({
                     "page": i + 1,
                     "text": page_text,

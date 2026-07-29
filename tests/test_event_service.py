@@ -114,6 +114,48 @@ def test_log_event_message_truncated_to_500():
     assert len(msg) == 500
 
 
+def test_log_event_sync_branch_writes_via_sync_insert():
+    """无 running loop 的上下文(模拟 worker 线程/脚本):走 insert_event_sync 直写,
+    不碰 async 引擎(跨 loop 用 asyncpg 会段错误,2026-07-28 生产实锤)。"""
+    calls = []
+
+    def _stub_sync(severity, category, message, context=None):
+        calls.append((severity, category, message, context))
+
+    orig = event_crud.insert_event_sync
+    event_crud.insert_event_sync = _stub_sync
+    try:
+        # 测试函数本身不在任何 event loop 里,直接调即命中同步分支
+        event_service.log_event(
+            event_service.INFO,
+            event_service.CATEGORY_BATCH_SUBMIT,
+            "同步分支消息",
+            context={"k": "v"},
+        )
+    finally:
+        event_crud.insert_event_sync = orig
+    assert len(calls) == 1, f"expected 1 sync insert, got {len(calls)}"
+    sev, cat, msg, ctx = calls[0]
+    assert sev == "info"
+    assert cat == "batch.submit"
+    assert msg == "同步分支消息"
+    assert ctx == {"k": "v"}
+
+
+def test_log_event_sync_branch_failure_does_not_raise():
+    """同步分支 DB 写抛错时,log_event 吞掉不往外抛(业务流不能被打断)。"""
+    def _bomb(*args, **kwargs):
+        raise RuntimeError("DB 模拟挂了")
+
+    orig = event_crud.insert_event_sync
+    event_crud.insert_event_sync = _bomb
+    try:
+        event_service.log_event(event_service.ERROR, event_service.CATEGORY_DB_ERROR, "同步吞错")
+        # 不抛即通过
+    finally:
+        event_crud.insert_event_sync = orig
+
+
 def test_constants_are_strings():
     """所有 CATEGORY_* 常量都是非空字符串。"""
     consts = [k for k in dir(event_service) if k.startswith("CATEGORY_")]

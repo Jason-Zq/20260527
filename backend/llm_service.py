@@ -140,6 +140,8 @@ def _call_llm(
                 extra_body={"reasoning_split": True},
             )
 
+            if not response.choices:
+                raise ValueError("LLM 返回为空(choices 空,可能被内容过滤或网关异常)")
             raw = response.choices[0].message.content
             result_text = raw.strip()
 

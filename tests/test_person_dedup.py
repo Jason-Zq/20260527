@@ -40,6 +40,16 @@ def test_pure_helpers():
     assert profile_crud._fold_cjk("倪朝暉") == "倪朝晖"
     assert profile_crud._fold_cjk("简体不变") == "简体不变"
     assert profile_crud._fold_cjk("") == "" and profile_crud._fold_cjk(None) == ""
+    # 间隔号折叠:阿不都·外力 == 阿不都外力(OCR 常丢间隔号)
+    assert profile_crud._fold_cjk("阿不都·外力") == "阿不都外力"
+    assert profile_crud._fold_cjk("阿不都•外力") == "阿不都外力"
+    assert profile_crud._fold_cjk("阿不都‧外力") == "阿不都外力"
+    # 建卡去重键:CJK=繁→简+去空白/间隔号;拉丁=大写词序无关;两字母表不相交
+    assert profile_crud.person_name_fold("倪朝暉") == "倪朝晖"
+    assert profile_crud.person_name_fold("阿不都·外力") == "阿不都外力"
+    assert profile_crud.person_name_fold("Wang Jianguo") == "JIANGUO WANG"
+    assert profile_crud.person_name_fold("ni zhaohui") == "NI ZHAOHUI"
+    assert profile_crud.person_name_fold("") == "" and profile_crud.person_name_fold(None) == ""
     # 证件号归一化:去非字母数字 + 大写
     assert profile_crud._normalize_id_number(" 310110x ") == "310110X"
     assert profile_crud._normalize_id_number("1101-10 19") == "11011019"
@@ -119,6 +129,30 @@ def test_person_dedup_db():
             m = await profile_crud.find_person_match(hh_id, None, "王建國")
             assert m == {"person_id": wang_id, "matched_by": "name"}, m
             assert await profile_crud.count_persons(hh_id) == 3  # 无新增
+
+            # ---- 间隔号折叠:阿不都·外力 与 阿不都外力 同一人不重复建卡 ----
+            p = await profile_crud.create_person(hh_id, "阿不都·外力")
+            abudu_id = p["id"]
+            assert not p.get("deduped"), p
+            assert await profile_crud.count_persons(hh_id) == 4
+            # name_folded 列已按 person_name_fold 口径写入
+            async with async_session_maker() as s:
+                row = await s.get(ProfilePerson, abudu_id)
+                assert row.name_folded == "阿不都外力", row.name_folded
+            # 无间隔号变体命中已有卡(name 路),不新建
+            p = await profile_crud.create_person(hh_id, "阿不都外力")
+            assert p["id"] == abudu_id and p.get("deduped") is True, p
+            assert await profile_crud.count_persons(hh_id) == 4
+            # ---- apply 建人分支 name_folded upsert:绕过 find_person_match 也不新建 ----
+            res = await profile_crud.apply_extracted_fields_v2(hh_id,
+                {"person_id": None, "matched_by": None}, [
+                    {"key": "name", "value": "阿不都·外力", "column": "name"},
+                    {"key": "gender", "value": "男", "column": "gender"},
+                ])
+            assert res["write_stats"]["person_id"] == abudu_id, res["write_stats"]
+            assert res["write_stats"].get("person_created") != 1, res["write_stats"]
+            assert res["write_stats"]["matched_by"] == "name_folded", res["write_stats"]
+            assert await profile_crud.count_persons(hh_id) == 4  # 无新增
         finally:
             if hh_id:
                 await _cleanup(hh_id)

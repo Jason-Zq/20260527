@@ -539,6 +539,123 @@ def test_relation_infer():
     asyncio.run(run())
 
 
+_HH3 = "测试婚姻多人家庭"
+_M_IDN = "110101197001010033"
+_M_MOM = "110101197501010044"
+_M_BIG = "110101196801010055"
+_M_SELF = "110101199901010066"
+
+
+def test_relation_infer_marriage_multi():
+    """marriage_cert 多人模式(rule v2):cert_role 定位 + 证件号强归因 + 配偶自动建卡幂等。"""
+    async def run():
+        hh_id, task_id = None, None
+        try:
+            async with async_session_maker() as s:  # 防历史残留
+                await s.execute(delete(ProfileImportTask).where(
+                    ProfileImportTask.client_name == _HH3))
+                await s.commit()
+            hh = await profile_crud.get_or_create_household(_HH3)
+            hh_id = hh["id"]
+            main_id = hh["main_person_id"]
+            await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": main_id, "matched_by": "test"}, [
+                    {"key": "name", "value": "测婚户主", "column": "name"},
+                    {"key": "id_number", "value": _M_IDN, "column": "id_number"},
+                    {"key": "gender", "value": "男", "column": "gender"},
+                ])
+            spouse_id = await _mk_person(hh_id, "测婚妈妈", {"id_number": _M_MOM, "gender": "女"})
+            big_id = await _mk_person(hh_id, "测婚大哥", {"id_number": _M_BIG, "gender": "男"})
+
+            async with async_session_maker() as s:
+                t = ProfileImportTask(filename="t.xlsx", client_name=_HH3,
+                                      household_id=hh_id, status="done")
+                s.add(t)
+                await s.flush()
+                task_id = t.id
+                await s.commit()
+
+            # ---- 多人格式:户主持证( persons[0]=持证人),配偶证件号强归因 → 配偶写'配偶' ----
+            await _mk_result(task_id, "f-marr-multi", "marriage_cert", {"persons": [
+                {"cert_role": "持证人", "name": "测婚户主", "id_number": _M_IDN,
+                 "spouse_name": "测婚妈妈", "marital_status": "已婚",
+                 "marriage_date": "2020-05-20"},
+                {"cert_role": "配偶", "name": "测婚妈妈", "id_number": _M_MOM,
+                 "spouse_name": "测婚户主", "marital_status": "已婚",
+                 "marriage_date": "2020-05-20"}]},
+                {"person_id": main_id,
+                 "persons": [{"person_id": main_id}, {"person_id": spouse_id}]},
+                "test-code-marr-multi")
+
+            # ---- 多人格式乱序兜底:persons[0]=配偶(=户主),cert_role 找到真持证人 → 持证人写'配偶' ----
+            await _mk_result(task_id, "f-marr-flip", "marriage_cert", {"persons": [
+                {"cert_role": "配偶", "name": "测婚户主", "id_number": _M_IDN,
+                 "spouse_name": "测婚大哥", "marital_status": "已婚"},
+                {"cert_role": "持证人", "name": "测婚大哥", "id_number": _M_BIG,
+                 "spouse_name": "测婚户主", "marital_status": "已婚"}]},
+                {"person_id": main_id,
+                 "persons": [{"person_id": main_id}, {"person_id": big_id}]},
+                "test-code-marr-flip")
+
+            r = await profile_crud.infer_family_relations(hh_id)
+            bases = {(i["person_id"], i["relation"], i["basis"]) for i in r["inferred"]}
+            assert (spouse_id, "配偶", "marriage_cert:holder_is_main") in bases, bases
+            assert (big_id, "配偶", "marriage_cert:spouse_is_main") in bases, bases
+            rel = {p["id"]: p["relation_to_main"] for p in await profile_crud.list_persons(hh_id)}
+            assert rel[spouse_id] == "配偶" and rel[big_id] == "配偶", rel
+
+            # ---- 幂等:二次推导零写入 ----
+            r2 = await profile_crud.infer_family_relations(hh_id)
+            assert r2["inferred"] == [], r2
+
+            # ---- 配偶自动建卡(模拟 _extract_one_multi 对配偶对象的 apply)+ 重跑幂等 ----
+            spouse_items = [
+                {"key": "name", "value": "测婚自建", "column": "name"},
+                {"key": "id_number", "value": _M_SELF, "column": "id_number"},
+                {"key": "spouse_name", "value": "测婚户主", "column": "spouse_name"},
+                {"key": "marital_status", "value": "已婚", "column": "marital_status"},
+                {"key": "marriage_date", "value": "2020-05-20", "column": "marriage_date"},
+            ]
+            res1 = await profile_crud.apply_extracted_fields_v2(
+                hh_id, {"person_id": None, "matched_by": None}, spouse_items)
+            new_pid = res1["person_id"]
+            assert new_pid, res1
+            assert res1["write_stats"].get("person_created"), res1["write_stats"]
+            n1 = await profile_crud.count_persons(hh_id)
+            persons = await profile_crud.list_persons(hh_id)
+            fmap = {f["field"]: f for f in next(p for p in persons if p["id"] == new_pid)["fields"]}
+            assert fmap["spouse_name"]["value"] == "测婚户主", fmap
+            assert fmap["spouse_name"]["label"] == "配偶姓名", fmap["spouse_name"]
+            assert fmap["spouse_name"]["layer"] == "verified", fmap["spouse_name"]
+
+            # 同一提取再跑一遍(重复导入/重新生成):不新建人,字段 skipped_same
+            m = await profile_crud.find_person_match(hh_id, _M_SELF, "测婚自建")
+            assert m["person_id"] == new_pid, m
+            res2 = await profile_crud.apply_extracted_fields_v2(hh_id, m, spouse_items)
+            assert res2["person_id"] == new_pid, res2
+            assert await profile_crud.count_persons(hh_id) == n1
+            actions = {mt["field"]: mt["action"] for mt in res2["mapped"]}
+            assert actions["spouse_name"] == "skipped_same", actions
+            assert actions["marital_status"] == "skipped_same", actions
+        finally:
+            async with async_session_maker() as s:
+                if task_id:
+                    await s.execute(delete(DocExtractResult).where(
+                        DocExtractResult.import_task_id == task_id))
+                    await s.execute(delete(CustomerFile).where(
+                        CustomerFile.import_task_id == task_id))
+                    t = await s.get(ProfileImportTask, task_id)
+                    if t:
+                        await s.delete(t)
+                    await s.commit()
+            if hh_id:
+                await _cleanup(hh_id)
+            from db.engine import async_engine
+            await async_engine.dispose()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_name_guard()
     print("PASS test_name_guard")
@@ -552,4 +669,6 @@ if __name__ == "__main__":
     print("PASS test_profile_domain")
     test_relation_infer()
     print("PASS test_relation_infer")
-    print("\n全部 6 个测试通过")
+    test_relation_infer_marriage_multi()
+    print("PASS test_relation_infer_marriage_multi")
+    print("\n全部 7 个测试通过")

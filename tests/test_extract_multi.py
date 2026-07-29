@@ -126,6 +126,41 @@ def test_result_person_ids():
     assert f(None) == [] and f({}) == []
 
 
+def test_marriage_persons_payload():
+    """marriage_cert 多人规则:两 person 各自字段子集,cert_role 保留不写库,spouse_name 参与写库。"""
+    import profile_import_service as pis
+    rule = extract_rules.get_rule("marriage_cert")
+    p = llm_service.parse_persons_payload
+    data = {"persons": [
+        {"cert_role": "持证人", "name": "张三", "gender": "男",
+         "birth_date": "1990-01-01", "id_number": "110101199001011234",
+         "spouse_name": "刘小娟", "marital_status": "已婚",
+         "marriage_date": "2020-05-20", "marriage_authority": "北京市朝阳区民政局",
+         "marriage_cert_no": "京朝结字2020-123456"},
+        {"cert_role": "配偶", "name": "刘小娟", "gender": "女",
+         "id_number": "110101199202022345", "spouse_name": "张三",
+         "marital_status": "已婚", "marriage_date": "2020-05-20",
+         "marriage_authority": "北京市朝阳区民政局",
+         "marriage_cert_no": "京朝结字2020-123456"},
+    ]}
+    rows = p(data, rule)
+    assert len(rows) == 2, rows
+    keys = {f["key"] for f in rule["fields"]}
+    assert set(rows[0].keys()) == keys and set(rows[1].keys()) == keys, rows
+    assert rows[0]["cert_role"] == "持证人" and rows[1]["cert_role"] == "配偶", rows
+    assert rows[0]["spouse_name"] == "刘小娟" and rows[1]["spouse_name"] == "张三", rows
+    assert rows[1]["birth_date"] is None, rows[1]  # 缺的 key 补 None
+    # 清洗:两人各自可归因(姓名+证件号);cert_role 无 column 不写库
+    _, idn0, name0, _, _ = pis._clean_field_items(rule, rows[0])
+    _, idn1, name1, _, _ = pis._clean_field_items(rule, rows[1])
+    assert (name0, idn0) == ("张三", "110101199001011234")
+    assert (name1, idn1) == ("刘小娟", "110101199202022345")
+    items0, *_ = pis._clean_field_items(rule, rows[0])
+    cols0 = {it["key"]: it["column"] for it in items0}
+    assert cols0.get("spouse_name") == "spouse_name", cols0
+    assert cols0.get("cert_role") is None, cols0
+
+
 if __name__ == "__main__":
     test_parse_persons_payload()
     print("PASS test_parse_persons_payload")
@@ -137,4 +172,6 @@ if __name__ == "__main__":
     print("PASS test_clean_field_items_shared")
     test_result_person_ids()
     print("PASS test_result_person_ids")
-    print("\n全部 5 个测试通过")
+    test_marriage_persons_payload()
+    print("PASS test_marriage_persons_payload")
+    print("\n全部 6 个测试通过")

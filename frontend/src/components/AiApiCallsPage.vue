@@ -30,12 +30,12 @@
             size="small"
             value-format="YYYY-MM-DD HH:mm:ss"
           />
-          <el-select v-model="filters.operation" clearable placeholder="操作" size="small">
+          <el-select v-model="filters.operation" clearable placeholder="操作" size="small" style="width: 220px">
             <el-option
               v-for="op in operationOptions"
-              :key="op"
-              :label="op"
-              :value="op"
+              :key="op.value"
+              :label="op.label"
+              :value="op.value"
             />
           </el-select>
           <el-select v-model="filters.status" clearable placeholder="状态" size="small">
@@ -57,7 +57,9 @@
           <el-table-column label="时间" min-width="150">
             <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" min-width="180" show-overflow-tooltip prop="operation" />
+          <el-table-column label="操作" min-width="200" show-overflow-tooltip>
+            <template #default="{ row }">{{ operationLabel(row.operation) }}</template>
+          </el-table-column>
           <!-- <el-table-column label="模型" min-width="150" show-overflow-tooltip prop="model" /> -->
           <el-table-column label="状态" width="80" align="center">
             <template #default="{ row }">
@@ -96,7 +98,7 @@
       <div v-if="selected" class="detail-body">
         <div class="detail-meta">
           <div><b>时间：</b><span class="mono">{{ selected.created_at }}</span></div>
-          <div><b>操作：</b><span class="mono">{{ selected.operation || '-' }}</span></div>
+          <div><b>操作：</b><span>{{ operationLabel(selected.operation) }}</span> <span class="mono dim">{{ selected.operation || '-' }}</span></div>
           <!-- <div><b>模型：</b><span class="mono">{{ selected.model || '-' }}</span></div> -->
           <div><b>状态：</b><el-tag :type="selected.status === 'ok' ? 'success' : 'danger'" size="small">{{ selected.status === 'ok' ? '成功' : '失败' }}</el-tag></div>
           <div><b>耗时：</b>{{ selected.elapsed_ms != null ? (selected.elapsed_ms / 1000).toFixed(3) + 's' : '-' }}</div>
@@ -122,6 +124,7 @@ import { ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { listAiApiCalls, getAiApiCallDetail } from '../api.js'
+import { operationLabel, AI_OPERATION_OPTIONS } from '../utils/labels.js'
 
 const loading = ref(false)
 const items = ref([])
@@ -131,19 +134,7 @@ const pageSize = ref(10)
 const detailVisible = ref(false)
 const selected = ref(null)
 
-const operationOptions = [
-  'detect_and_extract',
-  'classify_one_page',
-  'detect_page_ranges',
-  'summarize_text',
-  'detect_large_table_doc',
-  'detect_archival',
-  'summarize_batch',
-  'judge_batch_overall',
-  'extract_client_profile_facts',
-  'enrich_anchors_with_llm',
-  'match_anchors_to_client',
-]
+const operationOptions = AI_OPERATION_OPTIONS
 
 function _defaultFilters() {
   const now = new Date()

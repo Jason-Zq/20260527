@@ -6,12 +6,14 @@ draft->activate->disable 生命周期已移除;提取结果(doc_extract_results)
 每条规则: {version, fields:[{key,label,description,required,target:{entity,column},example}], prompt_extra}
 - target.entity: person(归因到人) / asset(家庭资产) / case(案件里程碑)
 - target.column: person 字段名;entity=asset/case 时一律 None
+- multi=True: 多人模式(整本户口本/结婚证双方),LLM 输出 {"persons":[...]},逐人归因写库
 提取读取点: profile_import_service._extract_one 调 get_rule(doc_type)。
 """
 from typing import Optional
 
 # 规则整体版本号:写入 doc_extract_results.rule_version 供溯源(改规则时手动 +1)
-RULES_VERSION = 2
+# v3: marriage_cert 改多人模式(抽全配偶字段+自动建配偶卡)
+RULES_VERSION = 3
 
 
 EXTRACT_RULES: dict[str, dict] = {
@@ -517,21 +519,33 @@ EXTRACT_RULES: dict[str, dict] = {
         "prompt_extra": "1. 中英双语表格,取中文列的值;英文拼音名不必提取。2. 金额/数量含币种单位按原文输出。3. 只提取表格中明确填写的值,空项输出 None。"
     },
     "marriage_cert": {
-        "version": 1,
+        "version": 2,
+        "multi": True,
         "fields": [
             {
-                "key": "holder_name",
-                "label": "持证人姓名",
+                "key": "cert_role",
+                "label": "角色",
+                "target": {
+                    "column": None,
+                    "entity": "person"
+                },
+                "example": "持证人",
+                "required": True,
+                "description": "该对象在结婚证上的角色:持证人/配偶;只用于区分两方,不写库"
+            },
+            {
+                "key": "name",
+                "label": "姓名",
                 "target": {
                     "column": "name",
                     "entity": "person"
                 },
                 "example": "张三",
                 "required": True,
-                "description": "提取持证人姓名，不含空格和标点"
+                "description": "该方本人姓名,从各自信息栏提取,不含空格和标点"
             },
             {
-                "key": "holder_gender",
+                "key": "gender",
                 "label": "性别",
                 "target": {
                     "column": "gender",
@@ -539,10 +553,10 @@ EXTRACT_RULES: dict[str, dict] = {
                 },
                 "example": "男",
                 "required": False,
-                "description": "提取持证人性别（男/女）"
+                "description": "该方性别（男/女）"
             },
             {
-                "key": "holder_birth_date",
+                "key": "birth_date",
                 "label": "出生日期",
                 "target": {
                     "column": "birth_date",
@@ -553,7 +567,7 @@ EXTRACT_RULES: dict[str, dict] = {
                 "description": "格式 YYYY-MM-DD"
             },
             {
-                "key": "holder_id_number",
+                "key": "id_number",
                 "label": "身份证号码",
                 "target": {
                     "column": "id_number",
@@ -561,40 +575,18 @@ EXTRACT_RULES: dict[str, dict] = {
                 },
                 "example": "110101199001011234",
                 "required": True,
-                "description": "18位或15位身份证号"
+                "description": "该方身份证号(中国结婚证含双方身份证号),18位或15位保留原样"
             },
             {
-                "key": "marriage_date",
-                "label": "结婚登记日期",
+                "key": "spouse_name",
+                "label": "配偶姓名",
                 "target": {
-                    "column": "marriage_date",
+                    "column": "spouse_name",
                     "entity": "person"
                 },
-                "example": "2020-05-20",
-                "required": True,
-                "description": "格式 YYYY-MM-DD"
-            },
-            {
-                "key": "marriage_authority",
-                "label": "结婚登记机关",
-                "target": {
-                    "column": "marriage_authority",
-                    "entity": "person"
-                },
-                "example": "北京市朝阳区民政局",
-                "required": True,
-                "description": "提取登记机关全称"
-            },
-            {
-                "key": "marriage_cert_no",
-                "label": "结婚证编号",
-                "target": {
-                    "column": "marriage_cert_no",
-                    "entity": "person"
-                },
-                "example": "京朝结字2020-123456",
-                "required": True,
-                "description": "保留原始字符串，含汉字或数字"
+                "example": "刘小娟",
+                "required": False,
+                "description": "另一方(配偶)的姓名;两个对象互填对方"
             },
             {
                 "key": "marital_status",
@@ -605,21 +597,43 @@ EXTRACT_RULES: dict[str, dict] = {
                 },
                 "example": "已婚",
                 "required": True,
-                "description": "从证件类型推断，固定值「已婚」"
+                "description": "从证件类型推断，固定值「已婚」,两个对象都输出"
             },
             {
-                "key": "spouse_name",
-                "label": "配偶姓名",
+                "key": "marriage_date",
+                "label": "结婚登记日期",
                 "target": {
-                    "column": None,
+                    "column": "marriage_date",
                     "entity": "person"
                 },
-                "example": "刘小娟",
-                "required": False,
-                "description": "结婚证上另一方(非持证人)的姓名;用于交叉核对,不写库"
+                "example": "2020-05-20",
+                "required": True,
+                "description": "格式 YYYY-MM-DD,两个对象都输出(值相同)"
+            },
+            {
+                "key": "marriage_authority",
+                "label": "结婚登记机关",
+                "target": {
+                    "column": "marriage_authority",
+                    "entity": "person"
+                },
+                "example": "北京市朝阳区民政局",
+                "required": True,
+                "description": "登记机关全称,两个对象都输出(值相同)"
+            },
+            {
+                "key": "marriage_cert_no",
+                "label": "结婚证编号",
+                "target": {
+                    "column": "marriage_cert_no",
+                    "entity": "person"
+                },
+                "example": "京朝结字2020-123456",
+                "required": True,
+                "description": "保留原始字符串(含汉字/数字/括号),两个对象都输出(值相同)"
             }
         ],
-        "prompt_extra": "1. 注意区分持证人与配偶，仅提取持证人信息，不要混淆；2. 日期字段务必统一转换为 YYYY-MM-DD 格式；3. 身份证号可能为15位，保留原样不做转换；4. 结婚证编号可能包含汉字、数字或括号，完整保留原始字符串。 5. 配偶信息仅提取配偶姓名,配偶其他字段一律不抽。"
+        "prompt_extra": "1. 结婚证含持证人(男方/女方)两方信息栏,输出恰好 2 个 person 对象:第一个=持证人,第二个=配偶。2. 每人 cert_role 填「持证人」或「配偶」;spouse_name 填另一方姓名。3. 姓名/性别/出生日期/身份证号务必从各自信息栏提取,不要张冠李戴。4. marriage_date/marriage_authority/marriage_cert_no/marital_status 两个对象都要输出且值相同。5. 日期统一转换为 YYYY-MM-DD;身份证号可能为15位,保留原样不做转换;结婚证编号可能包含汉字、数字或括号,完整保留原始字符串。"
     },
     "birth_cert": {
         "version": 1,

@@ -32,6 +32,17 @@ def _clean_text(s: Optional[str], limit: Optional[int] = None) -> Optional[str]:
     return cleaned
 
 
+def _clean_short(s: Optional[str], limit: int) -> Optional[str]:
+    """短标识字段清洗:去控制字符 + 硬截断到列宽。
+
+    不加截断标记(_clean_text 的标记会让结果超出 limit,对 varchar 列仍会
+    StringDataRightTruncation);防 task_id 被临时路径/长文件名撑爆 varchar(64)。
+    """
+    if s is None:
+        return None
+    return s.translate(_CTRL_DELETE)[:limit]
+
+
 _LIST_PREVIEW_LIMIT = 500  # 列表页 prompt/response 预览截断长度
 
 
@@ -65,15 +76,16 @@ def _build_row(
     *, operation, model, prompt, response_raw, status,
     error_msg, elapsed_ms, batch_id, file_id, client_code, task_id,
 ) -> AiApiCall:
-    """构造 AiApiCall 行,统一清洗大字段(NUL/控制字符 + 长度上限),两个写入路径共用。"""
+    """构造 AiApiCall 行,统一清洗(大字段 50KB/2KB 软截断,短字段按列宽硬截断),两个写入路径共用。"""
     return AiApiCall(
-        operation=operation, model=model,
+        operation=_clean_short(operation, 64), model=_clean_short(model, 64),
         prompt=_clean_text(prompt, _TEXT_STORE_LIMIT),
         response_raw=_clean_text(response_raw, _TEXT_STORE_LIMIT),
-        status=status,
+        status=_clean_short(status, 10),
         error_msg=_clean_text(error_msg, _ERROR_MSG_LIMIT),
         elapsed_ms=elapsed_ms,
-        batch_id=batch_id, file_id=file_id, client_code=client_code, task_id=task_id,
+        batch_id=_clean_short(batch_id, 40), file_id=_clean_short(file_id, 64),
+        client_code=_clean_short(client_code, 40), task_id=_clean_short(task_id, 64),
     )
 
 

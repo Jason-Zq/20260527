@@ -10,6 +10,9 @@
           <el-icon style="margin-right: 4px"><MagicStick /></el-icon>
           选择客户生成画像
         </el-button>
+        <el-button style="margin-right: 12px" :loading="resuming" @click="onResumeStale">
+          恢复中断任务
+        </el-button>
         <el-button @click="loadTasks" :loading="loading">
           <el-icon style="margin-right: 4px"><Refresh /></el-icon>
           刷新
@@ -38,7 +41,8 @@
           <el-table-column label="客户编码" min-width="150" show-overflow-tooltip>
             <template #default="{ row }"><span class="mono dim">{{ row.customer_code || '-' }}</span></template>
           </el-table-column>
-                    <el-table-column label="家庭资产" width="90" align="center">
+          <!-- 2026-07-28 需求:暂时隐藏「家庭资产/护照签发/护照到期」3 列,保留以便恢复(后端字段仍在返回) -->
+          <!-- <el-table-column label="家庭资产" width="90" align="center">
             <template #default="{ row }">
               <span :class="{ dim: !row.asset_count }">{{ row.asset_count || 0 }}</span>
             </template>
@@ -58,28 +62,35 @@
               </span>
               <span v-else class="dim">-</span>
             </template>
-          </el-table-column>
+          </el-table-column> -->
           <el-table-column label="进度" width="110" align="center">
             <template #default="{ row }">{{ row.processed_files }}/{{ row.total_files }}</template>
           </el-table-column>
-          <el-table-column label="四类证件" min-width="210">
+          <!-- 2026-07-28 需求:暂时隐藏「四类证件」列,保留以便恢复(画像弹窗摘要行仍展示同类计数) -->
+          <!-- <el-table-column label="四类证件" min-width="210">
             <template #default="{ row }">
               <span class="type-counts">
                 身份证 {{ row.id_card_count }} · 户口 {{ row.hukou_count }} · 学位 {{ row.degree_cert_count }} · 出生 {{ row.birth_cert_count }}
               </span>
             </template>
-          </el-table-column>
+          </el-table-column> -->
           <el-table-column label="状态" width="90" align="center">
             <template #default="{ row }">
               <el-tag :type="taskTag(row.status)" size="small">{{ taskLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="清单文件" min-width="180" show-overflow-tooltip prop="filename" />
+          <!-- <el-table-column label="清单文件" min-width="180" show-overflow-tooltip prop="filename" /> -->
           <el-table-column label="当前文件" min-width="100" show-overflow-tooltip>
             <template #default="{ row }"><span class="dim">{{ row.current_file || '-' }}</span></template>
           </el-table-column>
           <el-table-column label="创建时间" min-width="150">
             <template #default="{ row }"><span class="mono dim">{{ row.created_at }}</span></template>
+          </el-table-column>
+          <!-- 终态(done/error)任务的 updated_at 即识别完成时间,与审核管理后台同口径 -->
+          <el-table-column label="识别完成时间" min-width="150">
+            <template #default="{ row }">
+              <span class="mono dim">{{ ['done', 'error'].includes(row.status) ? row.updated_at : '-' }}</span>
+            </template>
           </el-table-column>
           <el-table-column label="操作" width="170" align="center" fixed="right">
             <template #default="{ row }">
@@ -124,7 +135,7 @@
         <el-table-column label="客户编号" min-width="170" show-overflow-tooltip prop="customer_code">
           <template #default="{ row }">
             <div><span class="mono dim">{{ row.customer_code || '-' }}</span></div>
-            <div v-if="row.crm_oid" class="mono dim" style="font-size: 11px">CRM {{ row.crm_oid }}</div>
+            <!-- <div v-if="row.crm_oid" class="mono dim" style="font-size: 11px">CRM {{ row.crm_oid }}</div> -->
           </template>
         </el-table-column>
         <el-table-column label="文件" width="80" align="center" prop="file_count" />
@@ -163,10 +174,11 @@
           <div style="display: flex; align-items: baseline; gap: 12px">
             <span class="profile-dialog-title">客户画像 · {{ profile?.task?.client_name || '' }}</span>
             <span v-if="profile?.household?.customer_code" class="profile-dialog-title mono">{{ profile.household.customer_code }}</span>
-            <span v-if="profile?.household?.crm_oid" class="dim mono" style="font-size: 12px">CRM {{ profile.household.crm_oid }}</span>
+            <!-- <span v-if="profile?.household?.crm_oid" class="dim mono" style="font-size: 12px">CRM {{ profile.household.crm_oid }}</span> -->
           </div>
           <el-button size="small" type="warning" :loading="regenerating"
-                     :disabled="!profile?.household?.id" @click="onRegenerate">重新生成画像</el-button>
+                     :disabled="!profile?.household?.id || profile?.task?.status === 'running'"
+                     @click="onRegenerate">重新生成画像</el-button>
         </div>
       </template>
       <div v-if="profileLoading" style="padding: 40px; text-align: center"><el-icon class="is-loading"><Loading /></el-icon> 加载中...</div>
@@ -176,7 +188,7 @@
           <span class="dim">进度 {{ profile.task.processed_files }}/{{ profile.task.total_files }}</span>
           <span class="dim">新 OCR {{ profile.task.fresh_ocr_count }}</span>
           <span class="dim">复用 {{ profile.task.reused_count + profile.task.relinked_count }}</span>
-          <span class="dim" :class="{ 'err-text': profile.task.failed_count > 0 }">失败 {{ profile.task.failed_count }}</span>
+          <!-- <span class="dim" :class="{ 'err-text': profile.task.failed_count > 0 }">失败 {{ profile.task.failed_count }}</span> -->
           <span class="type-counts">
             身份证 {{ profile.type_counts.id_card }} · 户口 {{ profile.type_counts.hukou }} · 学位 {{ profile.type_counts.degree_cert }} · 出生 {{ profile.type_counts.birth_cert }}
           </span>
@@ -190,7 +202,7 @@
             </div>
             <div v-if="conflictAlerts.length" class="conflict-banner">
               <el-icon><WarningFilled /></el-icon>
-              <span>多源字段提醒(多来源不一致,点「多源」核对):{{ conflictAlerts.join(';') }},详见成员卡字段「多源」标</span>
+              <span>多源字段提醒(多来源不一致,点字段「可信度」徽标核对):{{ conflictAlerts.join(';') }}</span>
             </div>
             <div class="person-grid">
               <section v-for="p in profile.persons" :key="p.id" class="card inner-card person-card">
@@ -216,6 +228,8 @@
                       <el-button size="small" type="primary" @click="startEdit(p)">编辑</el-button>
                     </template>
                     <el-button size="small" @click="openPersonFiles(p)">查看文件</el-button>
+                    <el-button v-if="profile.persons.length > 1 && editingPersonId !== p.id"
+                               size="small" type="danger" plain @click="openMerge(p)">合并</el-button>
                   </div>
                 </div>
                 <div class="person-fields">
@@ -229,15 +243,16 @@
                           <template v-else>
                             {{ f.value || '-' }}
                             <span v-if="f.status === 'confirmed'" class="status-mark confirmed">已确认</span>
+                            <span v-else-if="f.status === 'corrected'" class="status-mark corrected">已修正</span>
                             <span v-if="f.field === 'passport_expiry_date' && p.passport_expiry && p.passport_expiry.level !== 'ok'"
                                   class="expiry-tag" :class="p.passport_expiry.level">{{ expiryTagText(p.passport_expiry) }}</span>
-                            <el-tooltip v-if="p.field_conflicts && p.field_conflicts[f.field]" placement="top">
+                            <el-tooltip v-if="f.credibility" placement="top">
                               <template #content>
-                                <div v-for="(v, i) in p.field_conflicts[f.field].values" :key="i" style="max-width: 360px">
-                                  {{ v.value }} ← {{ v.sources.map(s => s.source).join('、') }}
-                                </div>
+                                <div>可信度 {{ f.credibility.score }} 分</div>
+                                <div v-for="(r, i) in f.credibility.reasons" :key="i">{{ r }}</div>
+                                <div style="margin-top: 2px">点击查看数据来源({{ (f.credibility.sources || []).length }} 条)</div>
                               </template>
-                              <span class="conflict-tag clickable" @click.stop="openConflict(p, f)">多源</span>
+                              <span class="cred-badge" :class="f.credibility.level" @click.stop="openCredibility(p, f)">{{ f.credibility.level }}</span>
                             </el-tooltip>
                           </template>
                         </span>
@@ -253,9 +268,12 @@
             <section v-if="profile.assets?.length" class="card inner-card">
               <div class="card-title asset-card-title">
                 <span>家庭资产({{ profile.assets.length }})</span>
-                <el-button size="small" type="primary" :loading="dedupePreviewLoading" @click="openDedupePreview">
-                  <el-icon style="margin-right: 4px"><MagicStick /></el-icon>AI 处理
-                </el-button>
+                <div>
+                  <el-button size="small" @click="openAssetFiles">查看文件</el-button>
+                  <el-button size="small" type="primary" :loading="dedupePreviewLoading" @click="openDedupePreview">
+                    <el-icon style="margin-right: 4px"><MagicStick /></el-icon>AI 处理
+                  </el-button>
+                </div>
               </div>
               <section v-for="a in profile.assets" :key="a.id" class="card inner-card person-card asset-card">
                 <div class="person-head">
@@ -362,7 +380,7 @@
               <el-table-column label="OCR 来源" width="100" align="center">
                 <template #default="{ row }">{{ ocrSourceLabel(row.ocr_source) }}</template>
               </el-table-column>
-              <el-table-column label="识别类型" width="110" align="center">
+              <!-- <el-table-column label="识别类型" width="110" align="center">
                 <template #default="{ row }">
                   <span v-if="row.doc_type">{{ docTypeLabel(row.doc_type) }}</span>
                   <span v-else class="dim">-</span>
@@ -376,7 +394,7 @@
               </el-table-column>
               <el-table-column label="错误" min-width="150" show-overflow-tooltip>
                 <template #default="{ row }"><span class="err-text">{{ row.error_msg || '' }}</span></template>
-              </el-table-column>
+              </el-table-column> -->
               <el-table-column label="操作" width="110" align="center" fixed="right">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" link @click.stop="selectFile(row)">查看详情</el-button>
@@ -401,7 +419,8 @@
 
     <!-- 复核中心抽屉(共享组件;复核中心页用同一组件,不传 importTaskId 即全局队列) -->
     <ReviewDrawer ref="reviewDrawerRef" :import-task-id="profile?.task?.id || null" @done="onReviewDone" />
-    <PersonEditDrawer v-model:visible="personFilesVisible" v-model:drawerWidth="personFilesDrawerWidth" :person-id="personFilesPid" />
+    <FileListDrawer v-model:visible="fileListVisible" v-model:drawerWidth="personFilesDrawerWidth"
+                    :title="fileListTitle" :files="fileListFiles" :loading="fileListLoading" />
 
     <!-- 文件详情弹窗:原件 | OCR 文本 | 提取结果详情 -->
     <el-dialog v-model="fileDetailVisible" title="文件详情" width="90%" top="4vh" append-to-body>
@@ -454,31 +473,34 @@
             </div>
     </el-dialog>
 
-    <!-- 多源字段核对弹窗:上编辑+确定,下来源文件原件并列 -->
-    <el-drawer v-model="conflictVisible" title="多源字段核对" :size="conflictDrawerWidth + 'px'" :modal="false" modal-class="side-drawer-overlay" append-to-body>
-      <div class="drawer-resize-handle" @mousedown="startResizeConflict"></div>
-      <div v-if="conflictData" class="conflict-dialog-body">
+    <!-- 字段来源与可信度抽屉:上编辑+确定,中可信度构成,下来源文件列表(点「查看」弹 FilePreviewDialog 大预览) -->
+    <el-drawer v-model="credVisible" :title="`字段来源与可信度 · ${credData?.label || ''}`" :size="credDrawerWidth + 'px'" :modal="false" modal-class="side-drawer-overlay" append-to-body>
+      <div class="drawer-resize-handle" @mousedown="startResizeCred"></div>
+      <div v-if="credData" class="conflict-dialog-body">
         <div class="conflict-edit">
-          <span class="conflict-field-label">{{ conflictData.label }}</span>
-          <el-input v-model="conflictEditValue" size="small" style="flex: 1" />
-          <el-button type="primary" size="small" :loading="conflictSaving" @click="saveConflict">确定</el-button>
+          <span class="conflict-field-label">{{ credData.label }}</span>
+          <el-input v-model="credEditValue" size="small" style="flex: 1" />
+          <el-button type="primary" size="small" :loading="credSaving" @click="saveCredibility">确定</el-button>
+        </div>
+        <div v-if="credData.credibility" class="cred-summary">
+          <el-tag :type="credTagType(credData.credibility.level)" size="small" effect="dark">可信度 {{ credData.credibility.level }}</el-tag>
+          <span class="cred-score">{{ credData.credibility.score }} 分</span>
+          <span v-for="(r, i) in credData.credibility.reasons" :key="i" class="cred-reason">{{ r }}</span>
         </div>
         <el-divider />
-        <div class="conflict-sources">
-          <div class="conflict-source-list">
-            <div v-for="src in conflictSources" :key="src.customer_file_id" class="conflict-source-item" :class="{ active: selectedSource?.customer_file_id === src.customer_file_id }" @click="selectedSource = src">
-              {{ src.source }}
-            </div>
-            <div v-if="!conflictSources.length" class="dim">无来源文件</div>
+        <div class="conflict-source-list">
+          <div v-for="(src, i) in credSources" :key="i" class="conflict-source-item">
+            <el-tag :type="src.agrees ? 'success' : 'danger'" size="small" effect="plain" class="cred-agree-tag">{{ src.agrees ? '一致' : '不一致' }}</el-tag>
+            <span class="cred-src-value" :title="src.value">{{ src.value || '-' }}</span>
+            <span class="conflict-source-name" :title="src.source">{{ src.source }}</span>
+            <el-tag size="small" effect="plain">{{ docTypeLabel(src.doc_type) }}</el-tag>
+            <el-button size="small" type="primary" link @click="previewCredSource(src)">查看</el-button>
           </div>
-          <div class="conflict-source-view raw-view">
-            <img v-if="selectedSource?.url && selectedSource.isImage" :src="selectedSource.url" class="raw-img" alt="原件" />
-            <iframe v-else-if="selectedSource?.url && selectedSource.isPdf" :src="selectedSource.url" class="raw-iframe" title="原件"></iframe>
-            <span v-else-if="selectedSource?.url" class="dim">该文件类型({{ selectedSource.mime || '未知' }})不支持在线预览</span>
-            <span v-else class="dim">{{ selectedSource?.hint || '选择左侧文件查看' }}</span>
-          </div>
+          <div v-if="!credSources.length" class="dim" style="padding: 12px">无来源文件</div>
         </div>
+        <div class="dim cred-footnote">可信度由来源层级(官方证件/客户自报)、确认状态(人工/AI)、多文件互证与冲突扣分综合计算;上方修改并「确定」后为人工值,可信度最高。</div>
       </div>
+      <FilePreviewDialog v-model:visible="credPreviewVisible" :file="credPreviewFile" />
     </el-drawer>
 
     <!-- AI 家庭资产合并预览 -->
@@ -531,6 +553,33 @@
       </template>
     </el-dialog>
 
+    <!-- 人员手动合并(同名双卡) -->
+    <el-dialog v-model="mergeVisible" title="合并人员" width="480px" append-to-body>
+      <div v-if="mergeSource" style="margin-bottom: 12px">
+        将 <b>{{ mergeSource.name }}</b>(id={{ mergeSource.id }},{{ mergeSource.fields.length }} 个字段)
+        合并到下面选中的人,<span class="warn-text">「{{ mergeSource.name }}」这张卡将被删除,不可撤销</span>;
+        字段冲突时人工值优先,同为 AI 值以较新者为准。
+      </div>
+      <el-radio-group v-model="mergeTargetId" style="display: flex; flex-direction: column; gap: 8px">
+        <el-radio v-for="p in mergeCandidates" :key="p.id" :value="p.id" style="height: auto">
+          {{ p.name }}(id={{ p.id }},{{ relationLabel(p.relation_to_main) }},{{ p.fields.length }} 个字段)
+        </el-radio>
+      </el-radio-group>
+      <div v-if="mergeTargetPerson && mergeSource && mergeTargetPerson.name !== mergeSource.name" style="margin-top: 14px">
+        <div style="margin-bottom: 6px">合并后保留的姓名:</div>
+        <el-radio-group v-model="mergeKeepName" style="display: flex; flex-direction: column; gap: 6px">
+          <el-radio :value="mergeTargetPerson.name" style="height: auto">{{ mergeTargetPerson.name }}(目标人的名字)</el-radio>
+          <el-radio :value="mergeSource.name" style="height: auto">{{ mergeSource.name }}(被合并人的名字)</el-radio>
+        </el-radio-group>
+      </div>
+      <template #footer>
+        <el-button @click="mergeVisible = false">取消</el-button>
+        <el-button type="danger" :loading="merging" :disabled="!mergeTargetId" @click="confirmMerge">
+          确认合并
+        </el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -538,7 +587,8 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, MagicStick, Refresh, WarningFilled } from '@element-plus/icons-vue'
-import PersonEditDrawer from './PersonEditDrawer.vue'
+import FileListDrawer from './FileListDrawer.vue'
+import FilePreviewDialog from './FilePreviewDialog.vue'
 import ReviewDrawer from './ReviewDrawer.vue'
 import { docTypeLabel, fieldLabelOf, groupPersonFields, caseTitle, relationLabel } from '../utils/labels'
 import {
@@ -547,8 +597,11 @@ import {
   dedupeAssetsPreview,
   deleteProfileTask,
   fetchCustomerFileRawUrl,
+  fetchCustomerFilePreviewPdfUrl,
   getCustomerFile,
+  listHouseholdAssetFiles,
   listPersonFiles,
+  mergeProfilePersons,
   getProfileTaskMatrix,
   getProfileTaskProfile,
   importProfileRemote,
@@ -556,6 +609,7 @@ import {
   listProfileTasks,
   previewProfileRemoteImport,
   regenerateHouseholdProfile,
+  resumeStaleProfileTasks,
 } from '../api'
 
 const tasks = ref([])
@@ -591,25 +645,37 @@ const selectedFile = ref(null)
 const ocrFileData = ref(null)
 const selectedExtraction = ref(null)
 const fileDetailVisible = ref(false)
-const conflictVisible = ref(false)
-const conflictDrawerWidth = ref(Math.round(window.innerWidth / 3))
-const personFilesVisible = ref(false)
+const credVisible = ref(false)
+const credDrawerWidth = ref(Math.round(window.innerWidth / 3))
+const fileListVisible = ref(false)
 const personFilesDrawerWidth = ref(Math.round(window.innerWidth / 3))
-const personFilesPid = ref(null)
+const fileListTitle = ref('查看文件')
+const fileListFiles = ref([])
+const fileListLoading = ref(false)
 const profileShift = computed(() => {
-  if (conflictVisible.value) return conflictDrawerWidth.value
-  if (personFilesVisible.value) return personFilesDrawerWidth.value
+  if (credVisible.value) return credDrawerWidth.value
+  if (fileListVisible.value) return personFilesDrawerWidth.value
   return 0
 })
 const profileDialogWidth = computed(() => {
   if (profileShift.value > 0) return (window.innerWidth - profileShift.value - 40) + 'px'
   return '88%'
 })
-const conflictData = ref(null)
-const conflictEditValue = ref('')
-const conflictSources = ref([])
-const selectedSource = ref(null)
-const conflictSaving = ref(false)
+const credData = ref(null)
+const credEditValue = ref('')
+const credSources = ref([])
+const credSaving = ref(false)
+const credPreviewVisible = ref(false)
+const credPreviewFile = ref(null)
+
+function credTagType(level) {
+  return { 高: 'success', 中: 'warning', 低: 'danger' }[level] || 'info'
+}
+
+function previewCredSource(src) {
+  credPreviewFile.value = { id: src.customer_file_id, filename: src.source }
+  credPreviewVisible.value = true
+}
 
 // AI 家庭资产合并预览
 const dedupeVisible = ref(false)
@@ -669,6 +735,52 @@ async function commitDedupe() {
     dedupeCommitLoading.value = false
   }
 }
+
+// 人员手动合并(同名双卡;字段仲裁:人工>AI,同 AI 晚者胜)
+const mergeVisible = ref(false)
+const mergeSource = ref(null)
+const mergeTargetId = ref(null)
+const mergeKeepName = ref('')
+const merging = ref(false)
+const mergeCandidates = computed(() =>
+  (profile.value?.persons || []).filter(p => p.id !== mergeSource.value?.id))
+const mergeTargetPerson = computed(() =>
+  mergeCandidates.value.find(p => p.id === mergeTargetId.value) || null)
+
+watch(mergeTargetId, (id) => {
+  mergeKeepName.value = mergeCandidates.value.find(p => p.id === id)?.name || ''
+})
+
+function openMerge(p) {
+  mergeSource.value = p
+  mergeTargetId.value = null
+  mergeKeepName.value = ''
+  mergeVisible.value = true
+}
+
+async function confirmMerge() {
+  if (!mergeSource.value || !mergeTargetId.value) return
+  const target = mergeCandidates.value.find(p => p.id === mergeTargetId.value)
+  const keepName = mergeKeepName.value || target?.name
+  try {
+    await ElMessageBox.confirm(
+      `确定把「${mergeSource.value.name}」并入「${target?.name}」?合并后姓名保留为「${keepName}」,被合并的卡将删除,不可撤销。`,
+      '确认合并',
+      { confirmButtonText: '确认合并', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch { return }
+  merging.value = true
+  try {
+    const r = await mergeProfilePersons(mergeTargetId.value, mergeSource.value.id, keepName)
+    ElMessage.success(`已合并:迁移 ${r.fields_moved} 个字段,重挂 ${r.files_repointed} 个文件`)
+    mergeVisible.value = false
+    if (profile.value?.task?.id) await reloadProfile(profile.value.task.id)
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message)
+  } finally {
+    merging.value = false
+  }
+}
 const fileExtractions = computed(() => {
   const sid = selectedFile.value?.id
   if (!sid) return []
@@ -703,6 +815,34 @@ async function loadTasks() {
     ElMessage.error(err.response?.data?.detail || err.message)
   } finally {
     loading.value = false
+  }
+}
+
+const resuming = ref(false)
+
+async function onResumeStale() {
+  try {
+    await ElMessageBox.confirm(
+      '将恢复所有因服务重启而中断的导入任务(已完成的文件不会重跑),任务较多时会跑较久。继续?',
+      '恢复中断任务',
+      { type: 'warning', confirmButtonText: '恢复', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  resuming.value = true
+  try {
+    const r = await resumeStaleProfileTasks()
+    if (r.resumed?.length) {
+      ElMessage.success(`已恢复 ${r.resumed.length} 个中断任务,后台继续运行,可点刷新查看进度`)
+    } else {
+      ElMessage.info(r.skipped_running ? '所有进行中的任务都在正常运行,无需恢复' : '没有中断的任务')
+    }
+    loadTasks()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message)
+  } finally {
+    resuming.value = false
   }
 }
 
@@ -760,21 +900,45 @@ async function onRegenerate() {
   }
   try {
     await ElMessageBox.confirm(
-      `确定重新生成「${household.name}」的画像？将新建任务按流程重跑家庭名下全部文件：已有 OCR 直接复用，缺 OCR 重新识别，缺文件重新下载，按当前规则重新分类/提取。人工已确认/修正的字段不会被覆盖。`,
+      `确定重新生成「${household.name}」的画像？将直接刷新当前这条画像的内容：家庭名下全部文件按当前规则重跑分类/提取/归因（已有 OCR 直接复用，缺 OCR 重新识别，缺文件重新下载），不新建任务。人工已确认/修正的字段不会被覆盖。`,
       '确认重新生成',
       { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' })
   } catch { return }
   regenerating.value = true
   try {
-    const r = await regenerateHouseholdProfile(household.id)
-    ElMessage.success(`已创建重新生成任务 #${r.task_id},共 ${r.total_files} 个文件,后台运行中`)
-    profileVisible.value = false
-    loadTasks()
+    const r = await regenerateHouseholdProfile(household.id, profile.value?.task?.id)
+    ElMessage.success(`已开始重新生成,共 ${r.total_files} 个文件,后台运行中`)
+    if (r.task_id && r.task_id === profile.value?.task?.id) {
+      pollRegenerate(r.task_id)
+    } else {
+      // 兜底:宿主任务不是当前弹窗任务时,关弹窗回任务列表看进度
+      profileVisible.value = false
+      loadTasks()
+    }
   } catch (err) {
     ElMessage.error('重新生成失败:' + (err.response?.data?.detail || err.message))
   } finally {
     regenerating.value = false
   }
+}
+
+let regenPollTimer = null
+function stopRegenPoll() {
+  if (regenPollTimer) { clearTimeout(regenPollTimer); regenPollTimer = null }
+}
+function pollRegenerate(taskId) {
+  stopRegenPoll()
+  const tick = async () => {
+    regenPollTimer = null
+    if (!profileVisible.value || profile.value?.task?.id !== taskId) return
+    await reloadProfile(taskId, true)
+    if (profile.value?.task?.status === 'running') {
+      regenPollTimer = setTimeout(tick, 3000)
+    } else {
+      loadTasks()
+    }
+  }
+  regenPollTimer = setTimeout(tick, 2000)
 }
 
 function openImportDialog() {
@@ -818,8 +982,14 @@ async function onConfirmImport() {
       customer_names: selectedNames.value,
     })
     const created = r.tasks || []
+    const skipped = r.skipped_running || []
     const totalFiles = created.reduce((s, t) => s + (t.total_files || 0), 0)
-    ElMessage.success(`已创建 ${created.length} 个导入任务,共 ${totalFiles} 个文件,后台运行中`)
+    if (created.length) {
+      ElMessage.success(`已创建 ${created.length} 个导入任务,共 ${totalFiles} 个文件,后台运行中`)
+    }
+    if (skipped.length) {
+      ElMessage.warning(`以下客户已有运行中的任务,已跳过:${skipped.join('、')}`)
+    }
     importVisible.value = false
     await loadTasks()
     if (created.length === 1) openProfile({ id: created[0].task_id })
@@ -840,21 +1010,22 @@ async function openProfile(row) {
 
 watch(profileVisible, (v) => {
   if (!v) {
-    conflictVisible.value = false
-    personFilesVisible.value = false
+    stopRegenPoll()
+    credVisible.value = false
+    fileListVisible.value = false
   }
 })
 
-async function reloadProfile(taskId) {
-  profileLoading.value = true
+async function reloadProfile(taskId, silent = false) {
+  if (!silent) profileLoading.value = true
   try {
     profile.value = await getProfileTaskProfile(taskId)
-    await loadFiles(taskId)
+    await loadFiles(taskId, silent)
     loadMatrix(taskId)
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || err.message)
   } finally {
-    profileLoading.value = false
+    if (!silent) profileLoading.value = false
   }
 }
 
@@ -897,11 +1068,13 @@ function expiryTagText(e) {
   return e.level === 'expired' ? `已过期${-e.days_left}天` : `剩${e.days_left}天`
 }
 
-// 字段冲突提醒:后端 attach_field_conflicts 已聚合好,这里只做汇总文案
+// 多源字段提醒:字段可信度里 conflict_count>0 的字段汇总(覆盖全字段,不再仅限 8 个身份字段)
 const conflictAlerts = computed(() => {
   const out = []
   for (const p of profile.value?.persons || []) {
-    const labels = Object.values(p.field_conflicts || {}).map(c => c.label)
+    const labels = (p.fields || [])
+      .filter((f) => (f.credibility?.conflict_count || 0) > 0)
+      .map((f) => f.label || f.field)
     if (labels.length) out.push(`${p.name} ${labels.join('/')}`)
   }
   return out
@@ -918,8 +1091,8 @@ async function onCellClick(person, col) {
   }
 }
 
-async function loadFiles(taskId) {
-  filesLoading.value = true
+async function loadFiles(taskId, silent = false) {
+  if (!silent) filesLoading.value = true
   try {
     const f = await listProfileTaskFiles(taskId, {
       limit: filesPageSize.value,
@@ -930,7 +1103,7 @@ async function loadFiles(taskId) {
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || err.message)
   } finally {
-    filesLoading.value = false
+    if (!silent) filesLoading.value = false
   }
 }
 
@@ -948,7 +1121,7 @@ async function selectFile(row) {
   fileDetailVisible.value = true
   ocrFileData.value = null
   selectedExtraction.value = null
-  loadRaw(row.id)
+  loadRaw(row.id, row.filename)
   try {
     ocrFileData.value = await getCustomerFile(row.id)
   } catch (err) {
@@ -958,13 +1131,13 @@ async function selectFile(row) {
   if (exs.length) selectedExtraction.value = exs[0]
 }
 
-// ---- 多源字段核对(冲突解决) ----
+// ---- 字段来源与可信度(徽标点击 → 统一抽屉) ----
 
-function startResizeConflict(e) {
+function startResizeCred(e) {
   e.preventDefault()
   const onMove = (ev) => {
     const w = window.innerWidth - ev.clientX
-    conflictDrawerWidth.value = Math.min(Math.max(w, 300), window.innerWidth - 120)
+    credDrawerWidth.value = Math.min(Math.max(w, 300), window.innerWidth - 120)
   }
   const onUp = () => {
     document.removeEventListener('mousemove', onMove)
@@ -978,55 +1151,59 @@ function startResizeConflict(e) {
   document.body.style.userSelect = 'none'
 }
 
-async function openConflict(p, f) {
-  const conflict = p.field_conflicts[f.field]
-  conflictData.value = { personId: p.id, field: f.field, label: f.label || f.field }
-  conflictEditValue.value = f.value || ''
-  conflictVisible.value = true
-  // 收集所有来源文件(按 customer_file_id 去重)
-  const sources = []
+function openCredibility(p, f) {
+  credData.value = { personId: p.id, field: f.field, label: f.label || f.field, credibility: f.credibility || null }
+  credEditValue.value = f.value || ''
+  credVisible.value = true
+  // 来源按 (customer_file_id, value) 去重(重复导入/重新生成会产生重复提取记录)
   const seen = new Set()
-  for (const v of conflict.values) {
-    for (const s of v.sources) {
-      if (s.customer_file_id && !seen.has(s.customer_file_id)) {
-        seen.add(s.customer_file_id)
-        sources.push({ customer_file_id: s.customer_file_id, source: s.source, url: '', isImage: false, isPdf: false, mime: '', hint: '加载中…' })
-      }
+  const sources = []
+  for (const s of f.credibility?.sources || []) {
+    const k = `${s.customer_file_id}|${s.value}`
+    if (!seen.has(k)) {
+      seen.add(k)
+      sources.push(s)
     }
   }
-  conflictSources.value = sources
-  selectedSource.value = sources[0] || null
-  // 并行加载原件
-  for (const src of sources) {
-    fetchCustomerFileRawUrl(src.customer_file_id).then((raw) => {
-      src.url = raw.blobUrl
-      src.isImage = (raw.mime || '').startsWith('image/')
-      src.isPdf = (raw.mime || '').includes('pdf')
-      src.mime = raw.mime
-      src._revoke = raw.revoke
-    }).catch(() => { src.hint = '原件不可用' })
-  }
+  credSources.value = sources
 }
 
-async function saveConflict() {
-  conflictSaving.value = true
+async function saveCredibility() {
+  credSaving.value = true
   try {
-    await correctPersonField(conflictData.value.personId, { [conflictData.value.field]: conflictEditValue.value })
+    await correctPersonField(credData.value.personId, { [credData.value.field]: credEditValue.value })
     ElMessage.success('已更新')
-    conflictVisible.value = false
+    credVisible.value = false
     if (profile.value?.task?.id) await reloadProfile(profile.value.task.id)
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || err.message)
   } finally {
-    conflictSaving.value = false
+    credSaving.value = false
   }
 }
 
-// ---- 原件查看(blob 带鉴权;图片内联,PDF 新窗口) ----
+// ---- 原件查看(blob 带鉴权;图片内联,PDF/Office 转 PDF 走 iframe) ----
 
-async function loadRaw(fileId) {
+const OFFICE_EXTS = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']
+
+function isOfficeFile(filename) {
+  const lower = (filename || '').toLowerCase()
+  return OFFICE_EXTS.some((e) => lower.endsWith(e))
+}
+
+async function loadRaw(fileId, filename) {
   if (rawState.value._revoke) rawState.value._revoke()
   rawState.value = { url: '', isImage: false, hint: '原件加载中…', _revoke: null }
+  // Office 原件:优先 soffice 转 PDF 预览;失败回落提示
+  if (isOfficeFile(filename)) {
+    try {
+      const raw = await fetchCustomerFilePreviewPdfUrl(fileId)
+      rawState.value = { url: raw.blobUrl, isImage: false, hint: '', _revoke: raw.revoke }
+    } catch (err) {
+      rawState.value = { url: '', isImage: false, hint: '该文件类型不支持在线预览', _revoke: null }
+    }
+    return
+  }
   try {
     const raw = await fetchCustomerFileRawUrl(fileId)
     rawState.value = {
@@ -1046,9 +1223,30 @@ function openReviewCenter(targetItem = null) {
   reviewDrawerRef.value?.open(targetItem)
 }
 
-function openPersonFiles(p) {
-  personFilesPid.value = p.id
-  personFilesVisible.value = true
+async function openPersonFiles(p) {
+  fileListTitle.value = `人员文件 · ${p.name || ''}`
+  fileListVisible.value = true
+  await loadFileList(() => listPersonFiles(p.id))
+}
+
+async function openAssetFiles() {
+  const hid = profile.value?.household?.id
+  if (!hid) return
+  fileListTitle.value = '资产相关文件'
+  fileListVisible.value = true
+  await loadFileList(() => listHouseholdAssetFiles(hid))
+}
+
+async function loadFileList(fetcher) {
+  fileListLoading.value = true
+  fileListFiles.value = []
+  try {
+    fileListFiles.value = await fetcher()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message)
+  } finally {
+    fileListLoading.value = false
+  }
 }
 
 function startEdit(p) {
@@ -1363,17 +1561,62 @@ onMounted(() => {
   color: #b88230;
   font-size: 13px;
 }
-.conflict-tag {
+/* ---- 字段可信度徽标 + 来源抽屉 ---- */
+.cred-badge {
   margin-left: 6px;
   padding: 0 6px;
   border-radius: 4px;
   font-size: 12px;
+  cursor: pointer;
+  border: 1px solid;
+}
+.cred-badge.高 {
+  background: #f0f9eb;
+  color: #67c23a;
+  border-color: #e1f3d8;
+}
+.cred-badge.中 {
   background: #fdf6ec;
   color: #b88230;
-  border: 1px solid #faecd8;
+  border-color: #faecd8;
 }
-.conflict-tag.clickable {
-  cursor: pointer;
+.cred-badge.低 {
+  background: #fef0f0;
+  color: #f56c6c;
+  border-color: #fde2e2;
+}
+.cred-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.cred-score {
+  color: #606266;
+  font-weight: 600;
+}
+.cred-reason {
+  color: #909399;
+  background: #f4f4f5;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.cred-agree-tag {
+  flex-shrink: 0;
+}
+.cred-src-value {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #303133;
+  flex-shrink: 0;
+}
+.cred-footnote {
+  margin-top: 10px;
+  font-size: 12px;
 }
 .drawer-resize-handle {
   position: absolute;
@@ -1406,41 +1649,27 @@ onMounted(() => {
   color: #909399;
   font-size: 13px;
 }
-.conflict-sources {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: 12px;
-  flex: 1;
-  min-height: 0;
-}
 .conflict-source-list {
   border: 1px solid #e4e7ed;
   border-radius: 6px;
   overflow-y: auto;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 .conflict-source-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 10px;
   font-size: 12px;
-  cursor: pointer;
   border-bottom: 1px solid #f0f0f0;
-  white-space: nowrap;
+}
+.conflict-source-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.conflict-source-item:hover {
-  background: #f5f7fa;
-}
-.conflict-source-item.active {
-  background: #ecf5ff;
-  color: #409eff;
-}
-.conflict-source-view {
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
-  height: 100%;
-  padding: 10px;
-  background: #f5f7fa;
+  white-space: nowrap;
 }
 
 /* ---- 成员卡 ---- */

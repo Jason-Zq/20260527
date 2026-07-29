@@ -3,9 +3,10 @@
 
 按文件类型分发：
   .pdf            → ocr_service.process_file（自动判断文字型/图片型）
-  .doc            → olefile 纯 Python 解析 OLE2 文本（零系统依赖；soffice/antiword 仅作兜底，不走 OCR）
-  .docx           → python-docx 抽段落+表格（不走 OCR）
-  .xlsx           → openpyxl 抽 sheet/cell 文本
+  .doc            → olefile 纯 Python 解析 OLE2 文本（零系统依赖；soffice/antiword 兜底；
+                    文本过短疑扫描贴图时优先走 soffice→docx，嵌图 OCR）
+  .docx           → python-docx 抽段落+表格；纯文本过短（疑扫描贴图）时 zip 内 word/media/ 嵌图 OCR
+  .xlsx           → openpyxl 抽 sheet/cell 文本；纯文本过短时 xl/media/ 嵌图 OCR
   .pptx           → python-pptx 抽 slide 文本
   .png/.jpg/...   → ocr_service.extract_image_file
 
@@ -42,6 +43,13 @@ _PPTX_EXT = ".pptx"
 _PDF_EXT = ".pdf"
 _GIF_EXT = ".gif"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
+
+# Office 嵌图 OCR(扫描件贴进 Word/Excel 的场景):纯文本短于阈值才触发,
+# 正常文档里的 logo/公章图 OCR 只产噪音且占全局 OCR 锁,故不无条件跑
+OFFICE_IMG_OCR_TEXT_THRESHOLD = 80
+OFFICE_IMG_OCR_MAX_IMAGES = 10    # 单文档最多 OCR 的嵌图数
+OFFICE_IMG_OCR_MIN_SIDE = 150     # 图片短边小于此像素视为图标/装饰图,跳过
+_ZIP_MEDIA_RASTER_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
 
 
 # NUL/C0 控制字符清洗表:pdfplumber/python-docx/OCR 偶发混入 0x00 等控制符,
@@ -133,8 +141,39 @@ def _extract_doc_via_soffice(soffice: str, file_path: str) -> dict:
         if not os.path.exists(out_docx):
             raise ValueError(".doc 转换未生成 docx(LibreOffice 可能无法识别该文件)")
         result = _extract_docx(out_docx)
-    result["source"] = "doc_text"
+    # 保留嵌图 OCR 标记:docx_text→doc_text,docx_text+img_ocr→doc_text+img_ocr,docx_img_ocr→doc_img_ocr
+    result["source"] = (result.get("source") or "docx_text").replace("docx", "doc", 1)
     return result
+
+
+def office_to_pdf(src_path: str, dst_dir: str) -> str:
+    """soffice 把 Office 文档(doc/docx/xls/xlsx/ppt/pptx)转 PDF 到 dst_dir。
+
+    返回生成的 PDF 绝对路径(文件名=源 basename+.pdf)。
+    soffice 缺失/转换失败抛 RuntimeError。同步阻塞,调用方需 asyncio.to_thread。
+    """
+    soffice = _find_soffice()
+    if not soffice:
+        raise RuntimeError("服务器未安装 LibreOffice,无法预览 Office 原件")
+    cmd = [
+        soffice, "--headless",
+        "--convert-to", "pdf",
+        "--outdir", os.path.abspath(dst_dir),
+        os.path.abspath(src_path),
+    ]
+    try:
+        subprocess.run(cmd, timeout=90, check=True, capture_output=True)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Office 转 PDF 超时(文件可能过大或损坏)")
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or b"").decode("utf-8", errors="replace")[:200]
+        raise RuntimeError(f"Office 转 PDF 失败: {err}")
+    out_pdf = os.path.join(
+        os.path.abspath(dst_dir),
+        os.path.splitext(os.path.basename(src_path))[0] + ".pdf")
+    if not os.path.exists(out_pdf):
+        raise RuntimeError("Office 转 PDF 未生成输出文件(LibreOffice 可能无法识别该文件)")
+    return out_pdf
 
 
 def _extract_doc_via_olefile(file_path: str) -> dict:
@@ -295,18 +334,30 @@ def _clean_doc_text(text: str) -> str:
 def _extract_doc(file_path: str) -> dict:
     """旧版 .doc 二进制文本抽取。
 
-    优先用纯 Python 的 olefile 解析(零系统依赖);失败再尝试 soffice / antiword;
+    优先用纯 Python 的 olefile 解析(零系统依赖);olefile 成功但文本极短(疑扫描贴图)
+    时优先改走 soffice→docx 路线以触发嵌图 OCR;olefile 失败再尝试 soffice / antiword;
     都不行才抛 ValueError。
     """
     # 1) 纯 Python olefile(首选,服务器无需装任何系统包)
     last_err = None
+    ole_result = None
     try:
-        return _extract_doc_via_olefile(file_path)
+        ole_result = _extract_doc_via_olefile(file_path)
     except Exception as e:
         last_err = e
 
-    # 2) soffice 兜底(装了 LibreOffice 的环境)
     soffice = _find_soffice()
+    if ole_result is not None:
+        # olefile 成功但文本极短:可能是扫描件贴图型 .doc(OLE 嵌图纯 Python 拆不动),
+        # 有 soffice 时改走 soffice→docx 路线(_extract_docx 会对嵌图 OCR);失败保留 olefile 结果
+        if len(ole_result.get("text") or "") < OFFICE_IMG_OCR_TEXT_THRESHOLD and soffice:
+            try:
+                return _extract_doc_via_soffice(soffice, file_path)
+            except Exception:
+                pass
+        return ole_result
+
+    # 2) soffice 兜底(装了 LibreOffice 的环境)
     if soffice:
         try:
             return _extract_doc_via_soffice(soffice, file_path)
@@ -329,6 +380,97 @@ def _extract_doc(file_path: str) -> dict:
             last_err = e
 
     raise ValueError(f".doc 解析失败(文件可能已损坏、加密或为图片型): {last_err}")
+
+
+def _ocr_zip_media(file_path: str, media_prefix: str) -> tuple:
+    """OOXML(zip)文档 media_prefix(word/media/ 或 xl/media/)下嵌图 OCR。
+
+    返回 (ocr_text, ocr_image_count)。只处理光栅图(跳过 emf/wmf/gif 等);
+    按条目名排序保证确定性;OCR 满 OFFICE_IMG_OCR_MAX_IMAGES 张即停;
+    短边 < OFFICE_IMG_OCR_MIN_SIDE 的小图(图标/logo)跳过;单图异常跳过不杀整体。
+    """
+    import io
+    import tempfile
+    import zipfile
+    from PIL import Image
+
+    try:
+        zf = zipfile.ZipFile(file_path)
+    except Exception:
+        return "", 0
+    texts: list[str] = []
+    ocr_count = 0
+    try:
+        names = sorted(
+            n for n in zf.namelist()
+            if n.startswith(media_prefix)
+            and os.path.splitext(n)[1].lower() in _ZIP_MEDIA_RASTER_EXTS
+        )
+        for name in names:
+            if ocr_count >= OFFICE_IMG_OCR_MAX_IMAGES:
+                break
+            tmp_path = None
+            try:
+                data = zf.read(name)
+                with Image.open(io.BytesIO(data)) as im:
+                    if min(im.size) < OFFICE_IMG_OCR_MIN_SIDE:
+                        continue
+                with tempfile.NamedTemporaryFile(
+                        delete=False, suffix=os.path.splitext(name)[1].lower()) as tmp:
+                    tmp.write(data)
+                    tmp_path = tmp.name
+                ocr_result = ocr_service.run_ocr(tmp_path, cls=True)
+                ocr_count += 1
+                if ocr_result and ocr_result[0]:
+                    for line in ocr_result[0]:
+                        if float(line[1][1]) > 0.3:
+                            texts.append(line[1][0])
+            except Exception as e:
+                print(f"[text_extractor] 嵌图 OCR 失败(跳过): {name}: {e}")
+            finally:
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+    finally:
+        zf.close()
+    return "\n".join(texts).strip(), ocr_count
+
+
+def _log_office_img_ocr(file_path: str, media_prefix: str, ocr_images: int, ocr_chars: int) -> None:
+    """嵌图 OCR 触发事件(事件流可观测命中率);失败静默,不影响抽取。"""
+    try:
+        event_service.log_event(
+            event_service.INFO,
+            event_service.CATEGORY_FILE_OCR_SAMPLED,
+            f"Office 文档嵌入图片 OCR:{os.path.basename(file_path)}",
+            context={
+                "filename": os.path.basename(file_path),
+                "media_prefix": media_prefix,
+                "ocr_images": ocr_images,
+                "ocr_chars": ocr_chars,
+            },
+        )
+    except Exception:
+        pass
+
+
+def _merge_office_img_ocr(file_path: str, text: str, source: str, media_prefix: str) -> tuple:
+    """纯文本过短时对 OOXML 嵌图 OCR 并合并文本。返回 (text, source)。"""
+    if len(text) >= OFFICE_IMG_OCR_TEXT_THRESHOLD:
+        return text, source
+    ocr_text, ocr_images = _ocr_zip_media(file_path, media_prefix)
+    if not ocr_text:
+        return text, source
+    if text:
+        text = f"{text}\n\n--- 嵌入图片 OCR ---\n{ocr_text}"
+        source = f"{source}+img_ocr"
+    else:
+        text = ocr_text
+        source = source.replace("_text", "_img_ocr", 1)
+    _log_office_img_ocr(file_path, media_prefix, ocr_images, len(ocr_text))
+    return text, source
 
 
 def _extract_docx(file_path: str) -> dict:
@@ -354,9 +496,11 @@ def _extract_docx(file_path: str) -> dict:
                 parts.append(" | ".join(cells))
 
     text = "\n".join(parts).strip()
+    # 纯文本过短:疑扫描件贴图文档(证件扫描贴进 Word),对 word/media/ 嵌图 OCR
+    text, source = _merge_office_img_ocr(file_path, text, "docx_text", "word/media/")
     return {
         "text": text,
-        "source": "docx_text",
+        "source": source,
         "page_count": 1,                 # docx 没有"页"概念，记 1
         "char_count": len(text),
     }
@@ -393,9 +537,11 @@ def _extract_xlsx(file_path: str) -> dict:
         wb.close()
 
     text = "\n".join(parts).strip()
+    # 纯文本过短:疑扫描件贴图表格,对 xl/media/ 嵌图 OCR
+    text, source = _merge_office_img_ocr(file_path, text, "xlsx_text", "xl/media/")
     return {
         "text": text,
-        "source": "xlsx_text",
+        "source": source,
         "page_count": sheet_count,
         "char_count": len(text),
     }
@@ -537,14 +683,18 @@ def _extract_pdf(file_path: str) -> dict:
         # === 1. 文字型 PDF ===
         pdf_type = ocr_service.detect_pdf_type(file_path)
         if pdf_type == "text":
-            pages = ocr_service.extract_text_pdf(file_path)
-            text = "\n\n".join(p.get("text", "") for p in pages).strip()
-            return {
-                "text": text,
-                "source": "pdf_text",
-                "page_count": len(pages),
-                "char_count": len(text),
-            }
+            try:
+                pages = ocr_service.extract_text_pdf(file_path)
+                text = "\n\n".join(p.get("text", "") for p in pages).strip()
+                return {
+                    "text": text,
+                    "source": "pdf_text",
+                    "page_count": len(pages),
+                    "char_count": len(text),
+                }
+            except Exception as e:
+                # 文本层损坏(畸形 PDF 触发 pdfminer 内部 IndexError 等) → 按扫描件走 OCR 兜底
+                print(f"[text_extractor] PDF 文本层解析失败,降级按扫描件 OCR: {type(e).__name__}: {e}")
 
         # === 2. 拿总页数 ===
         import pypdfium2
@@ -570,7 +720,9 @@ def _extract_pdf(file_path: str) -> dict:
         head_text = "\n\n".join(p.get("text", "") for p in head_pages[:2]).strip()
 
         # === 5. LLM 初判 ===
-        verdict = llm_service.detect_large_table_doc(head_text, task_id=file_path)
+        # task_id 传短 id(上面构造的 fetched_*),不是文件全路径——路径会撑爆
+        # ai_api_calls.task_id varchar(64) 且日志里没有检索价值
+        verdict = llm_service.detect_large_table_doc(head_text, task_id=task_id)
         is_large_table = bool(verdict.get("is_large_table"))
         doc_type = verdict.get("doc_type") or "unknown"
         is_fallback = bool(verdict.get("_fallback"))

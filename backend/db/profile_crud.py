@@ -11,7 +11,8 @@ from datetime import date, datetime
 from typing import Optional
 
 import re
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from db.ai_api_call_crud import _clean_text
 from db.client_profile_crud import _parse_date, _clean_str
@@ -42,6 +43,7 @@ PROFILE_FIELDS: dict[str, tuple[str, str]] = {
     "marriage_date": ("结婚登记日期", "verified"),
     "marriage_authority": ("结婚登记机关", "verified"),
     "marriage_cert_no": ("结婚证编号", "verified"),
+    "spouse_name": ("配偶姓名", "verified"),
     "no_crime_cert_no": ("无犯罪记录证明编号", "verified"),
     "no_crime_issue_date": ("无犯罪证明开具日期", "verified"),
     "approval_no": ("批复号/获批卡号", "verified"),
@@ -184,10 +186,8 @@ async def get_or_create_household(name: str, legacy_client_id: Optional[int] = N
                                  created_at=datetime.now(), updated_at=datetime.now())
             session.add(h)
             await session.flush()
-            main = ProfilePerson(household_id=h.id, name=name, relation_to_main="户主",
-                                 is_main=True, created_at=datetime.now(), updated_at=datetime.now())
-            session.add(main)
-            await session.flush()
+            main, _, _ = await _create_person_in_session(
+                session, h.id, name, relation="户主", is_main=True)
             h.main_person_id = main.id
         else:
             dirty = False
@@ -211,6 +211,20 @@ async def get_household(household_id: int) -> Optional[dict]:
     async with async_session_maker() as session:
         h = await session.get(ProfileHousehold, household_id)
         return _to_household_dict(h) if h else None
+
+
+async def list_household_ids() -> list[int]:
+    """全部家庭 id(升序),全量同名合并扫描用。"""
+    async with async_session_maker() as session:
+        return list((await session.execute(
+            select(ProfileHousehold.id).order_by(ProfileHousehold.id))).scalars().all())
+
+
+async def get_person(person_id: int) -> Optional[dict]:
+    """单个人员(不含字段档案),手动合并端点校验用。"""
+    async with async_session_maker() as session:
+        p = await session.get(ProfilePerson, person_id)
+        return _to_person_dict(p) if p else None
 
 
 async def list_persons(household_id: int) -> list[dict]:
@@ -317,8 +331,13 @@ def collect_field_conflicts(samples: list) -> dict:
     return out
 
 
-async def attach_field_conflicts(persons: list[dict], household_id: int) -> list[dict]:
-    """给每人挂 field_conflicts:该家庭全部 done 提取结果里,同名字段多来源值不一致的明细。"""
+async def _collect_field_provenance(household_id: int) -> tuple:
+    """家庭全部 done 提取结果 → 字段来源样本 [(pid, field, raw_value, source, doc_type, cfid)] 与文件名表。
+
+    冲突检测(collect_field_conflicts,仅 _CROSS_CHECK_FIELDS)与可信度打分
+    (attach_field_credibility,全字段)共用同一采样,只查一次 DB;
+    masked/无效提取动作(skipped_masked/skipped_invalid)不采样。
+    """
     async with async_session_maker() as session:
         task_ids = (await session.execute(
             select(ProfileImportTask.id).where(ProfileImportTask.household_id == household_id)
@@ -348,7 +367,7 @@ async def attach_field_conflicts(persons: list[dict], household_id: int) -> list
         is_multi = isinstance(extracted, dict) and isinstance(extracted.get("persons"), list)
         for m in (r.mapped or []):
             field = m.get("field")
-            if field not in _CROSS_CHECK_FIELDS:
+            if not field:
                 continue
             if m.get("action") in ("skipped_masked", "skipped_invalid"):
                 continue
@@ -362,9 +381,42 @@ async def attach_field_conflicts(persons: list[dict], household_id: int) -> list
                 continue
             for pid in pids:
                 samples.append((pid, field, extracted.get(key), source, r.doc_type, r.customer_file_id))
+    return samples, fnames
+
+
+async def attach_field_conflicts(persons: list[dict], household_id: int,
+                                 provenance: tuple = None) -> list[dict]:
+    """给每人挂 field_conflicts:该家庭全部 done 提取结果里,同名字段多来源值不一致的明细。"""
+    if provenance is None:
+        provenance = await _collect_field_provenance(household_id)
+    samples, _fnames = provenance
     conflicts = collect_field_conflicts(samples)
     for p in persons:
         p["field_conflicts"] = conflicts.get(p["id"], {})
+    return persons
+
+
+async def attach_field_credibility(persons: list[dict], household_id: int,
+                                   provenance: tuple = None) -> list[dict]:
+    """给每人 fields[] 挂 credibility(读时打分:来源层/确认状态/多文件互证/冲突扣分)。
+
+    provenance 可复用 _collect_field_provenance 结果(与 attach_field_conflicts 共用一次采样)。
+    """
+    import credibility as _cred
+    if provenance is None:
+        provenance = await _collect_field_provenance(household_id)
+    samples, _fnames = provenance
+    by_key: dict[tuple, list] = {}
+    for pid, field, raw_value, source, doc_type, cfid in samples:
+        by_key.setdefault((pid, field), []).append(
+            {"value": raw_value, "source": source, "doc_type": doc_type,
+             "customer_file_id": cfid})
+    for p in persons:
+        for f in p.get("fields") or []:
+            f["credibility"] = _cred.compute_field_credibility(
+                layer=f.get("layer"), status=f.get("status"),
+                current_value=f.get("value"), field=f.get("field"),
+                samples=by_key.get((p["id"], f.get("field")), []))
     return persons
 
 
@@ -381,14 +433,31 @@ _opencc_t2s = None  # 懒加载单例(OpenCC 构造要读词典,避免每次新�
 
 
 def _fold_cjk(value) -> str:
-    """繁→简折叠 + 去全部空白(简体输入原样通过;非 CJK 字符不变)。"""
+    """繁→简折叠 + 去全部空白与间隔号(简体输入原样通过;非 CJK 字符不变)。
+
+    去间隔号: 阿不都·外力 == 阿不都外力(新疆/少数民族姓名 OCR 常丢间隔号)。
+    """
     global _opencc_t2s
     if not value:
         return ""
     if _opencc_t2s is None:
         from opencc import OpenCC
         _opencc_t2s = OpenCC("t2s")
-    return re.sub(r"\s+", "", _opencc_t2s.convert(str(value)))
+    return re.sub(r"[\s·•・‧∙]+", "", _opencc_t2s.convert(str(value)))
+
+
+def person_name_fold(value) -> str:
+    """建卡去重键: CJK 名=_fold_cjk(繁→简+去空白/间隔号); 拉丁名=_normalize_name_en(大写词序无关)。
+
+    两字母表不相交,不会中英误撞;空返回 ""。中英互中仍是 find_person_match 拼音路的职责,
+    本函数只产出"完全相同"兜底键(name_folded 列)。
+    """
+    folded = _fold_cjk(value)
+    if not folded:
+        return ""
+    if re.search(r"[一-鿿]", folded):
+        return folded
+    return _normalize_name_en(value)
 
 
 def _normalize_id_number(value) -> str:
@@ -428,6 +497,44 @@ def _result_person_ids(write_stats: Optional[dict]) -> list:
     if not ids and ws.get("person_id"):
         ids = [ws["person_id"]]
     return ids
+
+
+async def _find_person_by_fold(session, household_id: int, folded: str):
+    """会话内按 (household_id, name_folded) 查已有人(id 最小者);folded 空返回 None。"""
+    if not folded:
+        return None
+    return (await session.execute(
+        select(ProfilePerson)
+        .where(ProfilePerson.household_id == household_id,
+               ProfilePerson.name_folded == folded)
+        .order_by(ProfilePerson.id))).scalars().first()
+
+
+async def _create_person_in_session(session, household_id: int, name: str,
+                                    relation: str = "待确认", is_main: bool = False):
+    """会话内建人(折叠键 upsert): name_folded 命中已有卡直接返回不新建;
+    唯一索引(024)兜底并发 —— IntegrityError 时重查返回并发胜出者。
+
+    返回 (person, created, matched_by);matched_by="name_folded" 表示折叠键命中。
+    """
+    folded = person_name_fold(name)
+    existing = await _find_person_by_fold(session, household_id, folded)
+    if existing is not None:
+        return existing, False, "name_folded"
+    p = ProfilePerson(household_id=household_id, name=name, relation_to_main=relation,
+                      is_main=is_main, name_folded=folded or None,
+                      created_at=datetime.now(), updated_at=datetime.now())
+    try:
+        async with session.begin_nested():
+            session.add(p)
+            await session.flush()
+    except IntegrityError:
+        session.expunge(p)  # 失败 INSERT 的 pending 对象必须移除,否则后续 autoflush 重放毒化事务
+        winner = await _find_person_by_fold(session, household_id, folded)
+        if winner is not None:
+            return winner, False, "name_folded"
+        raise
+    return p, True, None
 
 
 async def find_person_match(household_id: int, id_number: Optional[str] = None,
@@ -492,7 +599,7 @@ async def find_person_match(household_id: int, id_number: Optional[str] = None,
 
 
 async def create_person(household_id: int, name: str, relation: str = "待确认") -> dict:
-    """新建成员;先按去重口径(繁简/拼音)查重,命中直接返回已有人(deduped=True)不重复建卡。"""
+    """新建成员;先按去重口径(繁简/间隔号/拼音 + name_folded 折叠键)查重,命中直接返回已有人(deduped=True)不重复建卡。"""
     name = (name or "").strip()
     is_latin = bool(re.fullmatch(r"[A-Za-z .'\-]+", name))
     match = await find_person_match(household_id, name=None if is_latin else name,
@@ -505,12 +612,15 @@ async def create_person(household_id: int, name: str, relation: str = "待确认
             d["matched_by"] = match.get("matched_by")
             return d
     async with async_session_maker() as session:
-        p = ProfilePerson(household_id=household_id, name=name, relation_to_main=relation,
-                          is_main=False, created_at=datetime.now(), updated_at=datetime.now())
-        session.add(p)
+        p, created, matched_by = await _create_person_in_session(
+            session, household_id, name, relation=relation)
         await session.commit()
         await session.refresh(p)
-        return _to_person_dict(p)
+        d = _to_person_dict(p)
+        if not created:
+            d["deduped"] = True
+            d["matched_by"] = matched_by
+        return d
 
 
 async def set_person_relation(person_id: int, relation: str) -> None:
@@ -545,13 +655,13 @@ async def apply_extracted_fields_v2(household_id: int, match: dict, field_items:
             if name and not plausible_person_name(name):
                 name = None  # 乱码假名不建人(如 "钅 lil蝴哪")
             if name:
-                p = ProfilePerson(household_id=household_id, name=name,
-                                  relation_to_main="待确认", is_main=False,
-                                  created_at=datetime.now(), updated_at=datetime.now())
-                session.add(p)
-                await session.flush()
+                p, created, fold_matched_by = await _create_person_in_session(
+                    session, household_id, name)
                 person_id = p.id
-                stats["person_created"] = 1
+                if created:
+                    stats["person_created"] = 1
+                else:
+                    stats["matched_by"] = fold_matched_by  # name_folded 折叠键命中已有卡
         if person_id is None:
             return {"person_id": None, "mapped": mapped, "write_stats": stats}
         stats["person_id"] = person_id
@@ -670,6 +780,18 @@ async def correct_person_field(person_id: int, field: str, value: Optional[str],
         row.status = "corrected"
         row.updated_by = corrected_by or "复核员"
         row.updated_at = datetime.now()
+        # 姓名特殊通道:同步名片 profile_persons.name + name_folded(人员卡标题/头像/合并分组都读骨架名);
+        # 折叠键撞上家庭内另一人时拒绝(会绕过建卡去重口径造出双卡),提示走人员合并
+        if field == "name":
+            person = await session.get(ProfilePerson, person_id)
+            if person is not None and clean != person.name:
+                folded = person_name_fold(clean)
+                conflict = await _find_person_by_fold(session, person.household_id, folded)
+                if conflict is not None and conflict.id != person_id:
+                    raise ValueError(f"姓名「{clean}」与家庭内另一成员「{conflict.name}」重复,请改用人员合并")
+                person.name = clean
+                person.name_folded = folded or None
+                person.updated_at = datetime.now()
         await session.commit()
         return {"ok": True, "action": "corrected"}
 
@@ -1104,8 +1226,28 @@ async def _infer_from_birth_cert(household_id: int, main_id: int, ex: dict,
 
 async def _infer_from_marriage_cert(household_id: int, main_id: int, holder_pid,
                                     ex: dict, result_id, inferred: list) -> None:
-    """结婚证:持证人与 spouse_name 一方为户主,另一方已建档且待确认 → 写'配偶'。"""
-    spouse = await _match_person_safe(household_id, None, ex.get("spouse_name"))
+    """结婚证:持证人与配偶一方为户主,另一方已建档且待确认 → 写'配偶'。
+
+    双格式兼容:
+    - 多人模式(rule v2 起): extracted={"persons":[{cert_role,name,id_number,...},...]},
+      按 cert_role 定位持证人/配偶,配偶带身份证号 → 证件号优先匹配(强归因);
+    - 旧单人模式(rule v1): extracted 顶层 spouse_name,仅按名匹配(历史数据)。
+    holder_pid 取 write_stats.person_id(多人模式=persons[0],prompt 约定=持证人;
+    cert_role 显示 persons[0] 非持证人时按持证人对象现查兜底)。
+    """
+    persons = ex.get("persons") if isinstance(ex, dict) else None
+    if isinstance(persons, list) and persons:
+        holder_ex = next((p for p in persons if (p.get("cert_role") or "") == "持证人"),
+                         persons[0])
+        spouse_ex = next((p for p in persons if p is not holder_ex), None) or {}
+        spouse = await _match_person_safe(household_id, spouse_ex.get("id_number"),
+                                          spouse_ex.get("name"))
+        if holder_ex is not persons[0]:
+            holder = await _match_person_safe(household_id, holder_ex.get("id_number"),
+                                              holder_ex.get("name"))
+            holder_pid = holder.get("person_id") or holder_pid
+    else:
+        spouse = await _match_person_safe(household_id, None, ex.get("spouse_name"))
     spid = spouse.get("person_id")
     pairs = []
     if holder_pid == main_id and spid and spid != main_id:
@@ -1181,6 +1323,210 @@ async def infer_family_relations(household_id: int) -> dict:
     # C1/C2 先于 C3:配偶落定后,启发式只处理剩余待确认
     await _infer_children_heuristic(household_id, main_id, inferred)
     return {"checked_results": len(results), "inferred": inferred}
+
+
+# ==================== 同名人员合并 ====================
+
+async def find_duplicate_person_groups(household_id: int) -> list[dict]:
+    """按 person_name_fold 分组找同名重复组(>1 人成组)。
+
+    keep 选择: is_main 优先 > 人工字段数多者 > id 小者。
+    守卫: 组内 ≥2 人各持归一化后互不相同的合法 id_number → skipped_reason='conflict_id_number'
+    (防同名父子真两人;gender 冲突不阻塞——间隔号/OCR 微差异双卡正是本场景)。
+    返回 [{folded, person_ids, keep_id, drop_ids, skipped_reason?}]
+    """
+    async with async_session_maker() as session:
+        persons = (await session.execute(
+            select(ProfilePerson).where(ProfilePerson.household_id == household_id)
+            .order_by(ProfilePerson.id))).scalars().all()
+        groups: dict[str, list] = {}
+        for p in persons:
+            folded = person_name_fold(p.name)
+            if folded:
+                groups.setdefault(folded, []).append(p)
+
+        out: list[dict] = []
+        for folded, members in groups.items():
+            if len(members) < 2:
+                continue
+            ids = [p.id for p in members]
+            fields = (await session.execute(
+                select(ProfilePersonField).where(ProfilePersonField.person_id.in_(ids))
+            )).scalars().all()
+            human_cnt = {pid: 0 for pid in ids}
+            id_numbers: dict[int, set] = {}
+            for f in fields:
+                if f.status in _HUMAN_STATUSES:
+                    human_cnt[f.person_id] = human_cnt.get(f.person_id, 0) + 1
+                if f.field == "id_number" and f.value and valid_id_number(f.value):
+                    norm = _normalize_id_number(f.value)
+                    if norm:
+                        id_numbers.setdefault(f.person_id, set()).add(norm)
+            entry = {
+                "folded": folded,
+                "person_ids": ids,
+                "keep_id": sorted(members, key=lambda p: (
+                    not p.is_main, -human_cnt.get(p.id, 0), p.id))[0].id,
+            }
+            entry["drop_ids"] = [pid for pid in ids if pid != entry["keep_id"]]
+            distinct_values = {v for s in id_numbers.values() for v in s}
+            holders = {pid for pid, s in id_numbers.items() if s}
+            if len(distinct_values) >= 2 and len(holders) >= 2:
+                entry["skipped_reason"] = "conflict_id_number"
+            out.append(entry)
+        return out
+
+
+async def merge_persons(household_id: int, keep_id: int, drop_id: int, *,
+                        keep_name: Optional[str] = None) -> dict:
+    """把 drop 人并入 keep 人(单 session 单事务)。
+
+    字段仲裁((person_id, field) 唯一约束下逐 field):
+      keep 无该 field → drop 行直接迁(证据链原样);人工(confirmed/corrected)永远胜 AI;
+      双人工 keep 胜(主卡人工值=用户最后意志);双 AI → updated_at 晚者胜(后续覆盖前面,相等 keep 胜)。
+      drop 胜时值/层/来源/status/updated_by/updated_at 整体拷到 keep 行(保留 keep 行 id)。
+    败方字段快照进返回 fields_lost(事件留痕,可恢复性唯一凭据)。
+    person.name 缺省恒保持 keep 原值;keep_name 显式指定时(手动合并让用户选保留哪个人名)
+      在 drop 删除 flush 后改名 + 重算 name_folded,撞家庭内第三人折叠键报 ValueError。
+    relation/avatar 只补空;drop.is_main 交接给 keep;
+    customer_files.person_id / profile_assets.owner_person_id / doc_extract_results
+    write_stats(顶层+persons[]+mapped[]) 先重挂再删人(assets FK 是 SET NULL)。
+    """
+    if keep_id == drop_id:
+        raise ValueError("keep_id 与 drop_id 不能相同")
+    async with async_session_maker() as session:
+        keep = await session.get(ProfilePerson, keep_id)
+        drop = await session.get(ProfilePerson, drop_id)
+        if not keep or not drop:
+            raise ValueError("人员不存在")
+        if keep.household_id != household_id or drop.household_id != household_id:
+            raise ValueError("人员不属于目标家庭")
+        household = await session.get(ProfileHousehold, household_id)
+
+        stats = {"keep_id": keep_id, "drop_id": drop_id, "fields_moved": 0,
+                 "fields_arbitrated": 0, "fields_lost": [], "files_repointed": 0,
+                 "assets_repointed": 0, "results_rewritten": 0}
+
+        # 1) 骨架交接
+        if drop.is_main:
+            keep.is_main = True
+            keep.relation_to_main = "户主"
+        if household and household.main_person_id == drop_id:
+            household.main_person_id = keep_id
+        if keep.relation_to_main in (None, "", "待确认") and \
+                drop.relation_to_main not in (None, "", "待确认"):
+            keep.relation_to_main = drop.relation_to_main
+        if not keep.avatar_file_id and drop.avatar_file_id:
+            keep.avatar_file_id = drop.avatar_file_id
+
+        # 2) 字段仲裁
+        keep_fields = {f.field: f for f in (await session.execute(
+            select(ProfilePersonField).where(ProfilePersonField.person_id == keep_id)
+        )).scalars().all()}
+        drop_fields = (await session.execute(
+            select(ProfilePersonField).where(ProfilePersonField.person_id == drop_id)
+        )).scalars().all()
+
+        def _snapshot(f) -> dict:
+            return {"field": f.field, "value": f.value, "status": f.status,
+                    "layer": f.layer, "source_file_id": f.source_file_id,
+                    "source_result_id": f.source_result_id, "updated_by": f.updated_by}
+
+        for df in drop_fields:
+            kf = keep_fields.get(df.field)
+            if kf is None:
+                df.person_id = keep_id
+                keep_fields[df.field] = df
+                stats["fields_moved"] += 1
+                continue
+            kf_human = kf.status in _HUMAN_STATUSES
+            df_human = df.status in _HUMAN_STATUSES
+            drop_wins = (df_human and not kf_human) or (
+                not df_human and not kf_human and
+                (df.updated_at or datetime.min) > (kf.updated_at or datetime.min))
+            stats["fields_arbitrated"] += 1
+            if drop_wins:
+                stats["fields_lost"].append(_snapshot(kf))
+                kf.value = df.value
+                kf.layer = df.layer
+                kf.source_file_id = df.source_file_id
+                kf.source_result_id = df.source_result_id
+                kf.status = df.status
+                kf.updated_by = df.updated_by
+                kf.updated_at = df.updated_at or datetime.now()
+            else:
+                stats["fields_lost"].append(_snapshot(df))
+            await session.delete(df)
+
+        # 3) 重挂(先重挂再删人)
+        stats["files_repointed"] = (await session.execute(
+            update(CustomerFile).where(CustomerFile.person_id == drop_id)
+            .values(person_id=keep_id))).rowcount
+        stats["assets_repointed"] = (await session.execute(
+            update(ProfileAsset).where(ProfileAsset.owner_person_id == drop_id)
+            .values(owner_person_id=keep_id))).rowcount
+
+        # 4) write_stats/mapped 归因回写(查询条件同 list_person_files 三路并集中的后两路;
+        #    mapped[].person_id 必与 write_stats 顶层/persons[] 同步出现,两条件足够覆盖)
+        task_ids = (await session.execute(
+            select(ProfileImportTask.id).where(ProfileImportTask.household_id == household_id)
+        )).scalars().all()
+        if task_ids:
+            results = (await session.execute(
+                select(DocExtractResult).where(
+                    DocExtractResult.import_task_id.in_(task_ids),
+                    or_(
+                        DocExtractResult.write_stats["person_id"].as_string() == str(drop_id),
+                        DocExtractResult.write_stats.contains({"persons": [{"person_id": drop_id}]}),
+                    ))
+            )).scalars().all()
+            for r in results:
+                changed = False
+                ws = dict(r.write_stats or {})
+                if ws.get("person_id") == drop_id:
+                    ws["person_id"] = keep_id
+                    changed = True
+                if isinstance(ws.get("persons"), list):
+                    persons_list = []
+                    for p in ws["persons"]:
+                        if isinstance(p, dict) and p.get("person_id") == drop_id:
+                            p = {**p, "person_id": keep_id}
+                            changed = True
+                        persons_list.append(p)
+                    ws["persons"] = persons_list
+                if changed:
+                    r.write_stats = ws
+                if isinstance(r.mapped, list):
+                    mapped_list = []
+                    mapped_changed = False
+                    for m in r.mapped:
+                        if isinstance(m, dict) and m.get("person_id") == drop_id:
+                            m = {**m, "person_id": keep_id}
+                            mapped_changed = True
+                        mapped_list.append(m)
+                    if mapped_changed:
+                        r.mapped = mapped_list
+                        changed = True
+                if changed:
+                    stats["results_rewritten"] += 1
+
+        # 5) 删 drop(person_fields 残余行靠 DB CASCADE;正常已空)
+        keep.updated_at = datetime.now()
+        await session.delete(drop)
+        await session.flush()
+        # 6) 可选改名:手动合并用户选了保留 drop 的名字。drop 行已 flush 删除,
+        #    不会撞 (household_id, name_folded) 唯一索引;撞家庭内第三人则拒绝
+        clean_name = (keep_name or "").strip()
+        if clean_name and clean_name != keep.name:
+            folded = person_name_fold(clean_name)
+            conflict = await _find_person_by_fold(session, household_id, folded)
+            if conflict is not None and conflict.id != keep_id:
+                raise ValueError(f"保留名「{clean_name}」与家庭内另一成员「{conflict.name}」重复,无法使用")
+            stats["name_changed"] = {"from": keep.name, "to": clean_name}
+            keep.name = clean_name
+            keep.name_folded = folded or None
+        await session.commit()
+        return stats
 
 
 # ==================== 完备度矩阵(人 × 材料类型) ====================

@@ -144,8 +144,10 @@ def group_api_customers(customers: list) -> list[dict]:
 # ==================== 导入编排 ====================
 
 import asyncio
+import hashlib
 import os
 import time
+import traceback
 from datetime import datetime, timedelta
 
 import httpx
@@ -166,6 +168,14 @@ _TYPE_COUNTER = {
     "degree_cert": "degree_cert_count",
     "birth_cert": "birth_cert_count",
 }
+
+# 任务内文件级并发:重叠 LLM 网络等待与 OCR/下载。OCR 引擎有全局锁(ocr_service._OCR_ENGINE_LOCK),
+# 推理天然串行,并发不提速 OCR 本身,只掩盖 LLM(10-30s/次)与下载等待;画像提取跑主进程,勿调大。
+_IMPORT_CONCURRENCY = 3
+
+# 归因+画像写库锁:并发文件共享同一家庭域(person/person_fields/asset/case 是跨行读写),
+# 串行化防 get-or-create 竞态与字段写冲突;只包 DB 写段(毫秒级),LLM 调用在锁外。
+_ATTR_WRITE_LOCK = asyncio.Lock()
 
 # 原件落盘目录(相对 output/ 存 DB,绝对路径落盘);GC 按 file_keep_until 清理
 _OUTPUT_DIR = os.path.normpath(os.path.join(
@@ -238,6 +248,25 @@ def _persist_local_file(src_path: str, file_code: str, filename: str) -> str:
     return f"{_CUSTOMER_FILES_SUBDIR}/{file_code}_{safe_name}"
 
 
+def _sha256_file(path: str) -> str:
+    """文件内容 sha256(同家庭跨项目重复文件的内容级去重键)。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _rule_has_case_fields(rule: dict) -> bool:
+    """规则是否含 entity=case 字段(submission/receipt/approval)。
+
+    case 里程碑按文件行 affter_entryoid 路由到本项目案件,同内容重复文件也必须重跑提取;
+    纯 person/asset 类提取幂等(同值 skipped_same),重复文件可整体跳过 LLM 调用。
+    """
+    return any((f.get("target") or {}).get("entity") == "case"
+               for f in rule.get("fields") or [])
+
+
 async def ensure_local_file(row: dict) -> tuple[str, str]:
     """返回 (原件绝对路径, mime)。本地有直接用;没有/已 GC 则刷新 URL 重下并顺延 30 天。
 
@@ -271,41 +300,128 @@ async def run_infer_relations(household_id: int, *, trigger: str = "import") -> 
     return result
 
 
-async def run_import(task_id: int) -> None:
-    """导入任务主流程(主进程 asyncio.create_task 串行跑)。
+async def run_merge_duplicate_persons(household_id: int, *, trigger: str = "import") -> dict:
+    """同名折叠重复组扫描 + 逐组自动合并 + 事件留痕(run_import 收尾与管理端点共用)。
 
-    逐文件: 取 OCR(relink/复用/下载) -> 分类(关键词->LLM 兜底) -> 4 类提取+归因写库。
-    单文件异常只标该文件 error,不杀任务;任务级异常落 finish_import_task('error')。
+    被 id_number 冲突守卫跳过的组只记录不合并(人工端点/前端按钮处理)。
+    """
+    groups = await profile_crud.find_duplicate_person_groups(household_id)
+    merged, skipped = [], []
+    for g in groups:
+        if g.get("skipped_reason"):
+            skipped.append(g)
+            continue
+        for drop_id in g["drop_ids"]:
+            result = await profile_crud.merge_persons(household_id, g["keep_id"], drop_id)
+            merged.append(result)
+            event_service.log_event(
+                event_service.INFO, event_service.CATEGORY_PROFILE_PERSON_MERGED,
+                f"同名人员自动合并: person#{drop_id} → person#{g['keep_id']}",
+                context={"household_id": household_id, "trigger": trigger,
+                         "folded": g["folded"], **result})
+    return {"groups": len(groups), "merged": merged, "skipped": skipped}
+
+
+# ---- 活跃任务内存登记(区分真在跑 vs 进程重启后卡 running 的 stale 任务;单 uvicorn 进程内有效) ----
+_ACTIVE_TASKS: set[int] = set()
+
+# run_import 进度计数器字段(resume 模式从 DB 基线初始化,进度条不归零)
+_COUNTER_KEYS = (
+    "processed_files", "reused_count", "relinked_count", "fresh_ocr_count",
+    "failed_count", "extracted_count", "id_card_count", "hukou_count",
+    "degree_cert_count", "birth_cert_count", "needs_review_count",
+)
+
+
+def mark_task_active(task_id: int) -> bool:
+    """同步登记任务为活跃(已在跑返回 False)。恢复端点靠它排除真 running + 关双点击竞态。"""
+    if task_id in _ACTIVE_TASKS:
+        return False
+    _ACTIVE_TASKS.add(task_id)
+    return True
+
+
+def unmark_task_active(task_id: int) -> None:
+    _ACTIVE_TASKS.discard(task_id)
+
+
+async def run_import(task_id: int, *, resume: bool = False, assume_active: bool = False) -> None:
+    """导入任务入口:活跃登记 + 防重。
+
+    resume=True 断点续跑(恢复 stale 任务):计数器从 DB 基线继续,只跑未完成文件(done 不重跑)。
+    assume_active=True 表示调用方(resume-stale 端点)已同步 mark 过,此处不再重复登记。
+    """
+    if not assume_active and not mark_task_active(task_id):
+        print(f"[profile_import:{task_id}] 任务已在运行,忽略重复触发")
+        return
+    try:
+        await _run_import(task_id, resume=resume)
+    finally:
+        unmark_task_active(task_id)
+
+
+async def _run_import(task_id: int, *, resume: bool = False) -> None:
+    """导入任务主流程(主进程 asyncio.create_task,文件级 _IMPORT_CONCURRENCY 并发跑)。
+
+    逐文件: 取 OCR(relink/archive 复用/同内容兄弟复用/下载+OCR) -> 分类(关键词->LLM 兜底)
+    -> 4 类提取+归因写库。单文件异常只标该文件 error,不杀任务;任务级异常落 finish_import_task('error')。
     """
     task = await customer_file_crud.get_import_task(task_id)
     if not task:
         return
-    counters = {
-        "processed_files": 0, "reused_count": 0, "relinked_count": 0,
-        "fresh_ocr_count": 0, "failed_count": 0, "extracted_count": 0,
-        "id_card_count": 0, "hukou_count": 0, "degree_cert_count": 0,
-        "birth_cert_count": 0, "needs_review_count": 0,
-    }
+    if resume:
+        # 断点续跑:计数器从 DB 基线初始化(进度条不归零);只跑未完成文件(pending/error)
+        counters = {k: int(task.get(k) or 0) for k in _COUNTER_KEYS}
+        list_files = customer_file_crud.list_unfinished_files
+    else:
+        counters = {k: 0 for k in _COUNTER_KEYS}
+        list_files = customer_file_crud.list_pending_files
     try:
-        rows = await customer_file_crud.list_pending_files(task_id)
-        for row in rows:
-            # 任务被删除(列表页删除按钮)时在下一个文件边界协作停止
-            if await customer_file_crud.get_import_task(task_id) is None:
-                print(f"[profile_import:{task_id}] 任务已被删除,停止导入")
-                return
-            counters["processed_files"] += 1
-            await customer_file_crud.update_task_progress(
-                task_id, current_file=row.get("filename") or row.get("file_code"), **counters)
+        rows = await list_files(task_id)
+        # 文件级并发:LLM 等待与后续文件的下载+OCR 重叠(OCR 引擎锁保证推理串行,CPU 不叠加)
+        sem = asyncio.Semaphore(_IMPORT_CONCURRENCY)
+        task_deleted = False
+
+        async def _guarded(row: dict) -> None:
+            nonlocal task_deleted
+            async with sem:
+                # 任务被删除(列表页删除按钮)时在下一个文件边界协作停止
+                if task_deleted:
+                    return
+                if await customer_file_crud.get_import_task(task_id) is None:
+                    task_deleted = True
+                    print(f"[profile_import:{task_id}] 任务已被删除,停止导入")
+                    return
+                counters["processed_files"] += 1
+                await customer_file_crud.update_task_progress(
+                    task_id, current_file=row.get("filename") or row.get("file_code"), **counters)
+                try:
+                    await _process_one_file(task, row, counters)
+                except Exception as e:
+                    counters["failed_count"] += 1
+                    await customer_file_crud.mark_file_error(row["id"], f"{type(e).__name__}: {e}")
+                    print(f"[profile_import:{task_id}] 文件 {row.get('file_code')} 处理失败: {e}")
+                    traceback.print_exc()
+                await customer_file_crud.update_task_progress(task_id, **counters)
+
+        await asyncio.gather(*[_guarded(row) for row in rows])
+        if task_deleted:
+            return
+
+        # 同名折叠重复组合并(全部文件处理完后;先于关系推导,在干净人集上跑;异常不杀任务)
+        household_id = task.get("household_id")
+        if household_id:
             try:
-                await _process_one_file(task, row, counters)
+                await run_merge_duplicate_persons(household_id, trigger="import")
             except Exception as e:
-                counters["failed_count"] += 1
-                await customer_file_crud.mark_file_error(row["id"], f"{type(e).__name__}: {e}")
-                print(f"[profile_import:{task_id}] 文件 {row.get('file_code')} 处理失败: {e}")
-            await customer_file_crud.update_task_progress(task_id, **counters)
+                print(f"[profile_import:{task_id}] 同名人员合并失败(忽略): {e}")
+                event_service.log_event(
+                    event_service.WARN, event_service.CATEGORY_PROFILE_PERSON_MERGED,
+                    f"同名人员合并失败: {e}",
+                    context={"task_id": task_id, "household_id": household_id,
+                             "error": str(e)})
 
         # 家庭关系交叉推导(全部文件处理完后;异常不杀任务)
-        household_id = task.get("household_id")
         if household_id:
             try:
                 await run_infer_relations(household_id, trigger="import")
@@ -332,19 +448,23 @@ async def run_import(task_id: int) -> None:
         )
 
 
-async def run_imports_sequential(task_ids: list[int]) -> None:
+async def run_imports_sequential(task_ids: list[int], *, resume: bool = False,
+                                 assume_active: bool = False) -> None:
     """多任务串行跑(接口导入一次建多户任务时避免并发打爆 OCR/LLM)。
 
     run_import 内部自吞异常标 error,不会中断后续任务。
+    resume/assume_active 透传给 run_import(恢复中断任务用)。
     """
     for tid in task_ids:
-        await run_import(tid)
+        await run_import(tid, resume=resume, assume_active=assume_active)
 
 
 async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
     task_id = task["id"]
+    household_id = task.get("household_id")
     file_code = row.get("file_code") or ""
     ocr_text = row.get("ocr_text") or ""
+    dup_of = None  # 同家庭同内容兄弟行(内容级去重的复用源)
 
     # ---- 1) 取 OCR ----
     if row.get("status") == "done" and ocr_text:
@@ -366,26 +486,55 @@ async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
                 raise ValueError("缺少文件编码,无法刷新下载地址")
             url, _ = await file_fetcher.refresh_download_url(file_code)
             tmp_path, fname, mime = await file_fetcher.fetch_url_to_temp(url)
-            result = await text_extractor.extract_text(tmp_path, mime)
-            ocr_text = result.get("text") or ""
+            # 内容级去重:同一文件跨售后项目 file_code 不同(编号去重拦不住),
+            # 按内容 sha256 找同家庭已 OCR 兄弟行,命中则跳过 OCR 直接复用文本
+            digest = _sha256_file(tmp_path)
+            dup_of = await customer_file_crud.find_household_dup_ocr(
+                household_id, digest, exclude_id=row["id"])
+            result = None
+            if dup_of:
+                ocr_text = dup_of["ocr_text"] or ""
+            else:
+                result = await text_extractor.extract_text(tmp_path, mime)
+                ocr_text = result.get("text") or ""
             # 原件落盘留存(30 天 GC;复核在线查看用),不再删除
             rel_path = _persist_local_file(tmp_path, file_code, fname)
             await customer_file_crud.update_file_local(
                 row["id"], local_path=rel_path,
                 file_keep_until=datetime.now() + timedelta(days=_FILE_KEEP_DAYS))
-            await customer_file_crud.update_file_ocr(
-                row["id"], status="ocr", ocr_source="fresh", ocr_text=ocr_text,
-                mime_type=mime,
-                page_count=result.get("page_count"),
-                char_count=result.get("char_count"),
-            )
-            counters["fresh_ocr_count"] += 1
+            if dup_of:
+                # ocr_source 沿用兄弟行(fresh=原文/reused=脱敏),保持文本性质可溯源
+                await customer_file_crud.update_file_ocr(
+                    row["id"], status="ocr",
+                    ocr_source=dup_of.get("ocr_source") or "fresh",
+                    ocr_text=ocr_text, mime_type=mime,
+                    page_count=dup_of.get("page_count"),
+                    char_count=dup_of.get("char_count"),
+                    content_sha256=digest)
+                counters["reused_count"] += 1
+            else:
+                await customer_file_crud.update_file_ocr(
+                    row["id"], status="ocr", ocr_source="fresh", ocr_text=ocr_text,
+                    mime_type=mime,
+                    page_count=result.get("page_count"),
+                    char_count=result.get("char_count"),
+                    content_sha256=digest)
+                counters["fresh_ocr_count"] += 1
 
-    # ---- 2) 分类 ----
+    # ---- 2) 分类(同内容重复直接沿用兄弟行分类,跳过 matcher/LLM) ----
     doc_type = None
     classify_by = "none"
     classify_score = None
-    if ocr_text.strip():
+    if dup_of:
+        doc_type = dup_of.get("doc_type")
+        classify_by = dup_of.get("classify_by") or "none"
+        classify_score = dup_of.get("classify_score")
+        await customer_file_crud.update_file_classify(
+            row["id"], doc_type=doc_type, classify_by=classify_by,
+            classify_score=classify_score)
+        if doc_type in _TYPE_COUNTER:
+            counters[_TYPE_COUNTER[doc_type]] += 1
+    elif ocr_text.strip():
         m = doc_type_matcher.classify(
             row.get("folder_name"), row.get("filename"),
             ocr_text[: doc_type_matcher.OCR_HEAD_CHARS], row.get("rel_path"))
@@ -410,7 +559,13 @@ async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
     # ---- 3) 4 类提取 + 归因写库(无 active 规则则留 skipped 痕) ----
     extract_outcome = None
     if doc_type in llm_service.DOC_EXTRACT_TYPES and ocr_text.strip():
-        extract_outcome = await _extract_one(task, row, doc_type, ocr_text, counters)
+        rule = extract_rules.get_rule(doc_type)
+        if dup_of and rule and not _rule_has_case_fields(rule):
+            # 同内容重复:person/asset 类提取幂等(同值 skipped_same),跳过 LLM 调用;
+            # case 类里程碑按 affter_entryoid 路由到本项目案件,必须重跑提取
+            extract_outcome = await _record_dup_extract_skip(task, row, doc_type, rule, dup_of)
+        else:
+            extract_outcome = await _extract_one(task, row, doc_type, ocr_text, counters)
 
     # ---- 4) 质量评级(纯规则,复核轻重缓急的依据) ----
     q = review_service.evaluate_file_quality(
@@ -424,6 +579,40 @@ async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
         review_status=q["review_status"], review_reason=q["review_reason"])
     if q["review_status"] == "needs_review":
         counters["needs_review_count"] += 1
+
+
+async def _record_dup_extract_skip(task: dict, row: dict, doc_type: str,
+                                   rule: dict, dup_of: dict) -> dict:
+    """同内容重复文件的提取跳过留痕:不调 LLM,沿用兄弟行最新提取的归因人。
+
+    write_stats 带 person_id/persons[],人员「查看文件」与完备度矩阵的并集查询
+    (customer_files.person_id ∪ write_stats 顶层 ∪ write_stats.persons[])能关联到本文件。
+    """
+    person_id = None
+    persons = None
+    sibling_result = await doc_extract_crud.get_latest_result_for_file(dup_of["id"])
+    ws = (sibling_result or {}).get("write_stats") or {}
+    if ws.get("persons"):
+        persons = [{"person_id": p["person_id"]} for p in ws["persons"] if p.get("person_id")]
+        person_id = persons[0]["person_id"] if persons else None
+    elif ws.get("person_id"):
+        person_id = ws["person_id"]
+    write_stats = {"matched_by": "dup_content", "person_id": person_id,
+                   "dup_of_file_id": dup_of["id"]}
+    if persons:
+        write_stats["persons"] = persons
+    file_code = row.get("file_code") or ""
+    await doc_extract_crud.insert_result(
+        customer_file_id=row["id"], import_task_id=task["id"], file_id=file_code,
+        client_id=task.get("client_id"), doc_type=doc_type,
+        rule_id=None, rule_version=rule["version"],
+        status="skipped", skip_reason="dup_content", write_stats=write_stats)
+    event_service.log_event(
+        event_service.INFO, event_service.CATEGORY_EXTRACT_SKIP,
+        f"同内容重复,跳过提取: {file_code} (复用 {dup_of.get('file_code')})",
+        context={"task_id": task["id"], "file_code": file_code, "doc_type": doc_type,
+                 "reason": "dup_content", "dup_of_file_id": dup_of["id"]})
+    return {"status": "skipped", "skip_reason": "dup_content", "id_masked": False}
 
 
 def _clean_field_items(rule: dict, extracted: dict) -> tuple:
@@ -483,35 +672,37 @@ async def _extract_one_multi(task: dict, row: dict, doc_type: str, ocr_text: str
     persons_stats: list = []
     agg = {"written": 0, "updated": 0, "person_created": 0}
     first_pid, first_matched_by = None, None
-    for pext in persons_raw:
-        field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, pext)
-        outcome["id_masked"] = outcome["id_masked"] or id_masked
-        if not id_number and not name and not name_en:
-            all_mapped.append({"key": "*", "field": None, "person_id": None,
-                               "action": "skipped_no_name"})
-            continue
-        match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
-        write = await profile_crud.apply_extracted_fields_v2(
-            household_id, match, field_items, source_file_id=row["id"])
-        pid = write.get("person_id")
-        pname = name or next((p["person_name"] for p in persons_stats
-                              if p["person_id"] == pid), None)
-        value_by_key = {it["key"]: it["value"] for it in field_items}
-        for m in write["mapped"]:
-            m["person_name"] = pname
-            # 带上提取值:交叉验证(attach_field_conflicts)多人模式按条目取值用
-            m["value"] = value_by_key.get(m.get("key"))
-        all_mapped += write["mapped"]
-        ws = write["write_stats"]
-        persons_stats.append({
-            "person_id": pid, "person_name": pname,
-            "matched_by": ws.get("matched_by"),
-            "written": ws.get("written", 0), "updated": ws.get("updated", 0),
-            "person_created": ws.get("person_created", 0)})
-        for k in agg:
-            agg[k] += ws.get(k, 0)
-        if first_pid is None and pid:
-            first_pid, first_matched_by = pid, ws.get("matched_by")
+    # 归因+写库串行化:并发文件共享家庭域,防 person get-or-create 竞态与字段写冲突
+    async with _ATTR_WRITE_LOCK:
+        for pext in persons_raw:
+            field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, pext)
+            outcome["id_masked"] = outcome["id_masked"] or id_masked
+            if not id_number and not name and not name_en:
+                all_mapped.append({"key": "*", "field": None, "person_id": None,
+                                   "action": "skipped_no_name"})
+                continue
+            match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
+            write = await profile_crud.apply_extracted_fields_v2(
+                household_id, match, field_items, source_file_id=row["id"])
+            pid = write.get("person_id")
+            pname = name or next((p["person_name"] for p in persons_stats
+                                  if p["person_id"] == pid), None)
+            value_by_key = {it["key"]: it["value"] for it in field_items}
+            for m in write["mapped"]:
+                m["person_name"] = pname
+                # 带上提取值:交叉验证(attach_field_conflicts)多人模式按条目取值用
+                m["value"] = value_by_key.get(m.get("key"))
+            all_mapped += write["mapped"]
+            ws = write["write_stats"]
+            persons_stats.append({
+                "person_id": pid, "person_name": pname,
+                "matched_by": ws.get("matched_by"),
+                "written": ws.get("written", 0), "updated": ws.get("updated", 0),
+                "person_created": ws.get("person_created", 0)})
+            for k in agg:
+                agg[k] += ws.get(k, 0)
+            if first_pid is None and pid:
+                first_pid, first_matched_by = pid, ws.get("matched_by")
 
     if not persons_stats:
         await doc_extract_crud.insert_result(
@@ -602,42 +793,44 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
         field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, extracted)
         outcome["id_masked"] = id_masked
 
-        match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
         case_items = [it for it in field_items if it.get("entity") == "case"]
-        if match.get("person_id") is None and not name and not case_items:
-            await doc_extract_crud.insert_result(
-                customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
-                client_id=task.get("client_id"), doc_type=doc_type,
-                rule_id=None, rule_version=rule["version"],
-                status="skipped", skip_reason="no_person",
-                extracted=extracted,
-                elapsed_ms=int((time.time() - t0) * 1000))
-            event_service.log_event(
-                event_service.WARN, event_service.CATEGORY_EXTRACT_SKIP,
-                f"提取结果无姓名无法归属: {file_code}",
-                context={"task_id": task_id, "file_code": file_code, "doc_type": doc_type,
-                         "reason": "no_person"})
-            outcome.update(status="skipped", skip_reason="no_person")
-            return outcome
+        # 归因+写库串行化:并发文件共享家庭域,防 person/case get-or-create 竞态与字段写冲突
+        async with _ATTR_WRITE_LOCK:
+            match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
+            if match.get("person_id") is None and not name and not case_items:
+                await doc_extract_crud.insert_result(
+                    customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
+                    client_id=task.get("client_id"), doc_type=doc_type,
+                    rule_id=None, rule_version=rule["version"],
+                    status="skipped", skip_reason="no_person",
+                    extracted=extracted,
+                    elapsed_ms=int((time.time() - t0) * 1000))
+                event_service.log_event(
+                    event_service.WARN, event_service.CATEGORY_EXTRACT_SKIP,
+                    f"提取结果无姓名无法归属: {file_code}",
+                    context={"task_id": task_id, "file_code": file_code, "doc_type": doc_type,
+                             "reason": "no_person"})
+                outcome.update(status="skipped", skip_reason="no_person")
+                return outcome
 
-        write = await profile_crud.apply_extracted_fields_v2(
-            household_id, match, field_items, source_file_id=row["id"])
-        # entity=asset 的字段写入家庭资产表(房产证类),去重靠 attrs.cert_no/name
-        asset_items = [it for it in field_items if it.get("entity") == "asset"]
-        if asset_items:
-            aw = await profile_crud.apply_extracted_asset(
-                household_id, write.get("person_id"), asset_items,
-                source_file_id=row["id"])
-            write["mapped"] += aw["mapped"]
-            write["write_stats"].update(aw["stats"])
-        # entity=case 的字段写入案件时间线(递交/签收/批复里程碑,按文件所属项目路由到项目案件)
-        if case_items:
-            cw = await profile_crud.apply_case_milestones(
-                household_id, case_items, source_file_id=row["id"],
-                affter_entryoid=row.get("affter_entryoid"),
-                project_name_hint=row.get("project_name"))
-            write["mapped"] += cw["mapped"]
-            write["write_stats"].update(cw["stats"])
+            write = await profile_crud.apply_extracted_fields_v2(
+                household_id, match, field_items, source_file_id=row["id"])
+            # entity=asset 的字段写入家庭资产表(房产证类),去重靠 attrs.cert_no/name
+            asset_items = [it for it in field_items if it.get("entity") == "asset"]
+            if asset_items:
+                aw = await profile_crud.apply_extracted_asset(
+                    household_id, write.get("person_id"), asset_items,
+                    source_file_id=row["id"])
+                write["mapped"] += aw["mapped"]
+                write["write_stats"].update(aw["stats"])
+            # entity=case 的字段写入案件时间线(递交/签收/批复里程碑,按文件所属项目路由到项目案件)
+            if case_items:
+                cw = await profile_crud.apply_case_milestones(
+                    household_id, case_items, source_file_id=row["id"],
+                    affter_entryoid=row.get("affter_entryoid"),
+                    project_name_hint=row.get("project_name"))
+                write["mapped"] += cw["mapped"]
+                write["write_stats"].update(cw["stats"])
         await doc_extract_crud.insert_result(
             customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
             client_id=task.get("client_id"), doc_type=doc_type,

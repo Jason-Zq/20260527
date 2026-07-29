@@ -776,6 +776,11 @@ export async function deleteProfileTask(taskId) {
   return r.data
 }
 
+export async function resumeStaleProfileTasks() {
+  const r = await axios.post(`${API_BASE}/profile/tasks/resume-stale`)
+  return r.data
+}
+
 export async function listProfileTaskFiles(taskId, params = {}) {
   const r = await axios.get(`${API_BASE}/profile/tasks/${taskId}/files`, { params })
   return r.data
@@ -835,8 +840,10 @@ export async function listHouseholdPersons(householdId) {
   return r.data
 }
 
-export async function regenerateHouseholdProfile(householdId) {
-  const r = await axios.post(`${API_BASE}/profile/households/${householdId}/regenerate`)
+export async function regenerateHouseholdProfile(householdId, taskId) {
+  const r = await axios.post(`${API_BASE}/profile/households/${householdId}/regenerate`, null, {
+    params: taskId ? { task_id: taskId } : {},
+  })
   return r.data
 }
 
@@ -863,6 +870,20 @@ export async function fetchCustomerFileRawUrl(fileId) {
   }
 }
 
+// Office 原件(doc/docx/xls/xlsx/ppt/pptx)转 PDF 预览;501=服务器无 LibreOffice
+export async function fetchCustomerFilePreviewPdfUrl(fileId) {
+  const r = await axios.get(`${API_BASE}/profile/files/${fileId}/preview-pdf`, {
+    responseType: 'blob',
+    timeout: 180000,
+  })
+  const blobUrl = URL.createObjectURL(r.data)
+  return {
+    blobUrl,
+    mime: r.headers['content-type'] || 'application/pdf',
+    revoke: () => URL.revokeObjectURL(blobUrl),
+  }
+}
+
 export async function correctPersonField(personId, fields, reviewedBy, relation) {
   const payload = { fields, reviewed_by: reviewedBy }
   if (relation !== undefined) payload.relation = relation
@@ -872,6 +893,18 @@ export async function correctPersonField(personId, fields, reviewedBy, relation)
 
 export async function listPersonFiles(personId) {
   const r = await axios.get(`${API_BASE}/profile/persons/${personId}/files`)
+  return r.data
+}
+
+export async function mergeProfilePersons(keepId, dropId, keepName) {
+  const payload = { keep_id: keepId, drop_id: dropId }
+  if (keepName) payload.keep_name = keepName
+  const r = await axios.post(`${API_BASE}/profile/persons/merge`, payload)
+  return r.data
+}
+
+export async function listHouseholdAssetFiles(householdId) {
+  const r = await axios.get(`${API_BASE}/profile/households/${householdId}/asset-files`)
   return r.data
 }
 
