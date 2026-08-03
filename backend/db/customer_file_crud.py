@@ -536,9 +536,10 @@ def _result_person_ids(write_stats: Optional[dict]) -> list:
 async def list_files_for_assignment(*, client_name: Optional[str] = None,
                                     doc_type: Optional[str] = None,
                                     assigned: Optional[str] = None,
+                                    file_name: Optional[str] = None,
                                     limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
     """文件归属页全局文件列表(分页+筛选)。每行带 household_id、归属人(列优先,提取归因兜底)、
-    attributed_by(manual/extract/None)。"""
+    attributed_by(manual/extract/None)。file_name 同时模糊匹配 filename 与 file_code(列表展示 filename || file_code)。"""
     async with async_session_maker() as session:
         # 有效归属(person_id 列 ∪ write_stats 归因)的 EXISTS 条件,assigned 筛选用
         attr_exists = exists(
@@ -556,6 +557,11 @@ async def list_files_for_assignment(*, client_name: Optional[str] = None,
             filters.append(CustomerFile.client_name.ilike(f"%{client_name}%"))
         if doc_type:
             filters.append(CustomerFile.doc_type == doc_type)
+        if file_name:
+            filters.append(or_(
+                CustomerFile.filename.ilike(f"%{file_name}%"),
+                CustomerFile.file_code.ilike(f"%{file_name}%"),
+            ))
         if assigned == "none":
             filters += [CustomerFile.person_id.is_(None), ~attr_exists]
         elif assigned == "any":

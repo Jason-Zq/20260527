@@ -11,7 +11,7 @@
 1. **文件留底检测 / 业务审核**（主线）：接收业务方传入的客户+项目+进展+文件 URL，后台 OCR/文本抽取 + LLM 按公司留底分类体系判定，持久化单文件结果、OCR 脱敏文本、批次总体报告。
 2. **AI 材料解析**：上传 PDF/图片 → OCR + LLM 提取结构化字段 → 人工复核 → 归档到客户档案。
 3. **客户档案结构化生成**：从业务审核完成的 OCR 文件中批量抽取客户/家庭成员/资产事实，自动写入结构化表；**只补空字段，不覆盖已有非空人工数据**。
-4. **客户画像（接口导入）**：画像页弹窗从业务方接口 `getAfterCustomerAllFiles` 拉客户文件清单（预览勾选，客户编号可空=最近 100 条）→ 全量 OCR 入客户文件库（fresh 存原文，原件落盘留存 30 天可在线查看）→ 关键词+LLM 分类（12 类：身份证/户口本/学位证/出生证明/护照/KYC表/结婚证/房产证/无犯罪/批复/递交包/签收回执）→ 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 领域表（不写 clients/family_members；**人员去重：简体/繁体/拼音同一人不重复建卡**——find_person_match 证件号归一化→姓名繁简折叠(OpenCC)→name_en 词序无关→拼音互转(pypinyin 连写两序)；entity=asset 写 profile_assets、entity=case 写 profile_cases 案件时间线（migration 022 起按项目多案件：一个售后项目=一个案件，按文件行 `affter_entryoid` 路由，NULL→默认案件，导入时先建全部项目案件壳；接口项目字段 projectno/projectname/明细项目同步落库）；**同家庭同内容文件去重**（`content_sha256`,migration 025：跨售后项目 file_code 不同的同一文件，命中兄弟行复用 OCR/分类、非 case 类跳过 LLM 提取）+ **任务内文件级并发 3**（LLM 等待与 OCR/下载重叠，归因写库段 asyncio 锁串行）；纯规则质量评级驱动复核闭环（待复核队列+人工修正永远覆盖）+ 完备度矩阵（人×材料）+ 文件归属页（`/file-assign`，手动指定文件归属人，写 `customer_files.person_id`，人员「查看文件」/矩阵按 列∪write_stats 并集）；画像弹窗标题栏「重新生成画像」→ `POST /api/profile/households/{id}/regenerate`（家庭名下跨任务重跑：有 OCR 复用、缺 OCR 重识别、缺文件按编码重下载，人工字段不覆盖）；**删除画像=只删画像数据**（household/persons/fields/assets/cases），任务/文件/OCR/提取结果/磁盘原件全保留，重新导入按 file_code re-link 复用 OCR 重建；**结婚证多人模式**（RULES_VERSION=3：抽全配偶字段、配偶无卡自动建卡、互写 spouse_name 字段）；**字段可信度徽标**（`credibility.compute_field_credibility` 纯函数：人工确认短路 100/基底 verified 70·declared 50/多文件互证 +15~20/跨类型 +5/冲突 -25，画像接口 `attach_field_credibility` 读时挂载，前端高/中/低徽标+来源抽屉）；**Office 嵌图 OCR**（docx/xlsx 纯文本过短时解 zip 内 media 图 OCR，扫描贴图文档可分类提取）+ `GET /api/profile/files/{id}/preview-pdf`（soffice 转 PDF 预览 Office 原件）。详见 docs/09 + docs/10。
+4. **客户画像（接口导入）**：画像页弹窗从业务方接口 `getAfterCustomerAllFiles` 拉客户文件清单（预览勾选，客户编号可空=最近 100 条）→ 全量 OCR 入客户文件库（fresh 存原文，原件落盘留存 30 天可在线查看）→ 关键词+LLM 分类（12 类：身份证/户口本/学位证/出生证明/护照/KYC表/结婚证/房产证/无犯罪/批复/递交包/签收回执）→ 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 领域表（不写 clients/family_members；**人员去重：简体/繁体/拼音同一人不重复建卡**——find_person_match 证件号归一化→姓名繁简折叠(OpenCC)→name_en 词序无关→拼音互转(pypinyin 连写两序)；entity=asset 写 profile_assets、entity=case 写 profile_cases 案件时间线（migration 022 起按项目多案件：一个售后项目=一个案件，按文件行 `affter_entryoid` 路由，NULL→默认案件，导入时先建全部项目案件壳；接口项目字段 projectno/projectname/明细项目同步落库）；**同家庭同内容文件去重**（`content_sha256`,migration 025：跨售后项目 file_code 不同的同一文件，命中兄弟行复用 OCR/分类、非 case 类跳过 LLM 提取）+ **任务内文件级并发 3**（LLM 等待与 OCR/下载重叠，归因写库段 asyncio 锁串行）；纯规则质量评级驱动复核闭环（待复核队列+人工修正永远覆盖）+ 完备度矩阵（人×材料）+ 文件归属页（`/file-assign`，手动指定文件归属人，写 `customer_files.person_id`，人员「查看文件」/矩阵按 列∪write_stats 并集）；画像弹窗标题栏「重新生成画像」→ `POST /api/profile/households/{id}/regenerate`（家庭名下跨任务重跑：有 OCR 复用、缺 OCR 重识别、缺文件按编码重下载，人工字段不覆盖）；**删除画像=只删画像数据**（household/persons/fields/assets/cases），任务/文件/OCR/提取结果/磁盘原件全保留，重新导入按 file_code re-link 复用 OCR 重建；**结婚证多人模式**（RULES_VERSION=3：抽全配偶字段、配偶无卡自动建卡、互写 spouse_name 字段）；**英文证件建人+家属关系边+到期提醒**（RULES_VERSION=4：无中文名时按合法拉丁名(≥2词)建卡，approval 规则抽 sponsor_name(DP/LTVP 主签持证人)→关系推导命中户主+年长>15岁写「子/女」，approval_expiry_date/id_card_expiry_date 到期日入库→`GET /api/profile/expiry-reminders` 全库提醒+前端 /expiry-reminders 页；清洗层丢弃 "None"/"null" 占位字符串；存量家庭需「重新生成画像」生效）；**字段可信度徽标**（`credibility.compute_field_credibility` 纯函数：人工确认短路 100/基底 verified 70·declared 50/多文件互证 +15~20/跨类型 +5/冲突 -25，画像接口 `attach_field_credibility` 读时挂载，前端高/中/低徽标+来源抽屉）；**Office 嵌图 OCR**（docx/xlsx 纯文本过短时解 zip 内 media 图 OCR，扫描贴图文档可分类提取）+ `GET /api/profile/files/{id}/preview-pdf`（soffice 转 PDF 预览 Office 原件）。详见 docs/09 + docs/10。
 5. **AI 填写文件（Word 模板）**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
 6. **处理超长 PDF**：上传多证件合并 PDF → 全页 OCR + LLM 判断证件边界 → 按类型拆为独立子 PDF。
 7. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
@@ -25,7 +25,7 @@
 | 后端框架 | FastAPI + Pydantic |
 | 数据库 ORM / 迁移 | SQLAlchemy 2 (asyncpg) + Alembic |
 | 数据库 | PostgreSQL 14+，业务表用 JSONB 存灵活字段 |
-| OCR | RapidOCR (`rapidocr-onnxruntime`)，CPU 推理，模型内置 |
+| OCR | RapidOCR 3.x (`rapidocr`，PP-OCRv6 small)，onnxruntime CPU 推理，模型内置 |
 | PDF 渲染/处理 | pypdfium2、pdfplumber、pypdf |
 | LLM | OpenAI 兼容接口；模型 ID 完全由 `config.json` 驱动 |
 | Word 处理 | python-docx、docxtpl、mammoth；Windows 用 `docx2pdf`，Linux 用 LibreOffice |
@@ -43,7 +43,9 @@
 │   ├── archive_detect_service.py    # 文件留底检测编排（提交入队、增量复用、finalize 总报告）
 │   ├── client_profile_service.py    # 客户档案结构化生成编排
 │   ├── llm_service.py               # LLM 调用封装与各业务 prompt
-│   ├── ocr_service.py               # RapidOCR 封装 + PDF/图片 OCR 统一入口
+│   ├── ocr_service.py               # RapidOCR 3.x 封装 + PDF/图片 OCR 统一入口(引擎锁/adaptive 前处理)
+│   ├── image_preprocess.py          # OCR 图像前处理(纯函数:纠偏/小图放大/低对比度增强)
+│   ├── field_validators.py          # 提取字段校验(纯函数:身份证校验位修复/字段派生/日期合理性)
 │   ├── text_extractor.py            # PDF/图片/docx/doc/xls/pptx 统一文本抽取(Office 嵌图 OCR + office_to_pdf)
 │   ├── credibility.py               # 画像字段可信度打分(纯函数:来源层/确认状态/多文件互证/冲突)
 │   ├── split_service.py             # PDF 按页拆分

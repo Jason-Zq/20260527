@@ -2,7 +2,7 @@
 
 质量分 quality_score 0-100,越小越急需复核:
   P1(0-20): 无文本/OCR 乱码/提取异常/no_person —— 数据不可用或无法归属
-  P2(30-50): 文本过短/证件号脱敏/分类置信低 —— 数据可用但需人工看一眼
+  P2(30-50): 文本过短/证件号脱敏/字段校验疑点/分类置信低 —— 数据可用但需人工看一眼
   none(100): 无待复核项
 
 证件照类文件夹(folder 含"证件照")无文本是预期,不判待复核。
@@ -55,8 +55,12 @@ def evaluate_file_quality(*, ocr_text: Optional[str], folder_name: Optional[str]
                           classify_score: Optional[int] = None,
                           extract_status: Optional[str] = None,
                           extract_skip_reason: Optional[str] = None,
-                          id_masked: bool = False) -> dict:
+                          id_masked: bool = False,
+                          validation_flags: int = 0) -> dict:
     """评估单个文件的质量与复核需求。
+
+    validation_flags: 提取字段校验未自动修的疑点数(field_validators flags;
+    校验位唯一候选已自动修复的不计入)。
 
     返回 {"quality_score": int, "review_status": "none"|"needs_review",
           "review_reason": str|None}
@@ -80,6 +84,8 @@ def evaluate_file_quality(*, ocr_text: Optional[str], folder_name: Optional[str]
         return {"quality_score": 20, "review_status": "needs_review", "review_reason": "no_person"}
     if id_masked:
         return {"quality_score": 40, "review_status": "needs_review", "review_reason": "masked_id"}
+    if validation_flags > 0:
+        return {"quality_score": 45, "review_status": "needs_review", "review_reason": "field_validation"}
     if classify_by == "llm" and (classify_score or 0) < _LOW_CONFIDENCE:
         return {"quality_score": 50, "review_status": "needs_review", "review_reason": "low_confidence"}
     return {"quality_score": 100, "review_status": "none", "review_reason": None}

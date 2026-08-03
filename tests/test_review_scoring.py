@@ -106,6 +106,32 @@ def test_priority_order():
     assert _reason(r) == "extract_error", r
 
 
+def test_field_validation():
+    text = "姓名 张三 性别 男 民族 汉 出生 1990年1月1日 住址 北京市朝阳区 公民身份号码 110101199003077715"
+    r = rs.evaluate_file_quality(ocr_text=text, doc_type="id_card",
+                                 classify_by="keyword", classify_score=90,
+                                 extract_status="done", validation_flags=1)
+    assert _reason(r) == "field_validation" and r["quality_score"] == 45, r
+    # 无疑点不受影响
+    r2 = rs.evaluate_file_quality(ocr_text=text, doc_type="id_card",
+                                  classify_by="keyword", classify_score=90,
+                                  extract_status="done", validation_flags=0)
+    assert r2["review_status"] == "none", r2
+
+
+def test_field_validation_priority():
+    """masked_id(40) 优先于 field_validation(45);field_validation 优先于 low_confidence(50)。"""
+    text = "姓名 张三 性别 男 民族 汉 出生 1990年1月1日 住址 北京市朝阳区 公民身份号码 [身份证] 某某分局"
+    r = rs.evaluate_file_quality(ocr_text=text, doc_type="id_card",
+                                 classify_by="llm", classify_score=40,
+                                 extract_status="done", id_masked=True, validation_flags=2)
+    assert _reason(r) == "masked_id", r
+    r2 = rs.evaluate_file_quality(ocr_text=text, doc_type="id_card",
+                                  classify_by="llm", classify_score=40,
+                                  extract_status="done", validation_flags=2)
+    assert _reason(r2) == "field_validation", r2
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

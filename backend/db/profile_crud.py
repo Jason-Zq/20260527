@@ -48,6 +48,9 @@ PROFILE_FIELDS: dict[str, tuple[str, str]] = {
     "no_crime_issue_date": ("无犯罪证明开具日期", "verified"),
     "approval_no": ("批复号/获批卡号", "verified"),
     "approval_date": ("批复/签发日期", "verified"),
+    "approval_expiry_date": ("准证/批复有效期至", "verified"),
+    "sponsor_name": ("主卡/主签持证人", "verified"),
+    "id_card_expiry_date": ("身份证有效期至", "verified"),
     "school_name": ("学校名", "verified"),
     "major": ("专业", "verified"),
     "degree": ("学位", "verified"),
@@ -70,7 +73,8 @@ PROFILE_FIELDS: dict[str, tuple[str, str]] = {
 }
 
 DATE_FIELDS = {"birth_date", "passport_issue_date", "passport_expiry_date",
-               "marriage_date", "graduation_date", "no_crime_issue_date", "approval_date"}
+               "marriage_date", "graduation_date", "no_crime_issue_date", "approval_date",
+               "approval_expiry_date", "id_card_expiry_date"}
 
 _HUMAN_STATUSES = ("confirmed", "corrected")
 
@@ -110,6 +114,24 @@ def plausible_person_name(value) -> bool:
     if not value:
         return False
     return bool(_NAME_RE.match(str(value).strip()))
+
+
+def plausible_latin_name(value) -> bool:
+    """拉丁名合理性(建人门槛):字母/空格/.'- 组成,2-4 个词,每词 ≥2 字母,总长 5-40。
+
+    用于英文证件(批复/准证/护照)无中文名时按 name_en 建卡。要求 ≥2 词
+    (姓+名结构),防 OCR 把 "PASSPORT"/"SGWORKPASS" 这类单词噪声建成人。
+    """
+    if not value:
+        return False
+    text = str(value).strip()
+    if not (5 <= len(text) <= 40):
+        return False
+    words = [w for w in re.split(r"\s+", text) if w]
+    if not (2 <= len(words) <= 4):
+        return False
+    return all(len(re.sub(r"[^A-Za-z]", "", w)) >= 2 for w in words) and \
+        bool(re.fullmatch(r"[A-Za-z .'\-]+", text))
 
 
 def field_label(field: str) -> str:
@@ -271,6 +293,61 @@ def attach_passport_expiry(persons: list[dict], today: Optional[date] = None) ->
     for p in persons:
         p["passport_expiry"] = passport_expiry_info(p.get("fields"), today)
     return persons
+
+
+# ==================== 全库证件到期提醒 ====================
+
+# 参与到期提醒的字段 → 证件显示名(新增到期类字段时在此登记)
+EXPIRY_FIELD_TYPES = {
+    "passport_expiry_date": "护照",
+    "approval_expiry_date": "准证/批复",
+    "id_card_expiry_date": "身份证",
+}
+
+
+async def list_expiry_reminders(days: int = PASSPORT_EXPIRY_WARNING_DAYS,
+                                include_ok: bool = False,
+                                keyword: Optional[str] = None,
+                                limit: int = 50, offset: int = 0) -> dict:
+    """全库证件到期提醒:扫 profile_person_fields 到期类字段,按剩余天数升序。
+
+    续签/换证 = 移民服务的 recurring revenue 入口。level: expired(<0) / expiring(≤days) / ok;
+    默认只回 active(expired+expiring),include_ok=True 带全部。keyword 模糊家庭名/成员名。
+    Python 层过滤(数据量小,与 sales_crud 同模式),total 为过滤后全量。
+    """
+    today = date.today()
+    async with async_session_maker() as session:
+        rows = (await session.execute(
+            select(ProfilePersonField, ProfilePerson, ProfileHousehold)
+            .join(ProfilePerson, ProfilePerson.id == ProfilePersonField.person_id)
+            .join(ProfileHousehold, ProfileHousehold.id == ProfilePerson.household_id)
+            .where(ProfilePersonField.field.in_(list(EXPIRY_FIELD_TYPES)))
+            .order_by(ProfilePersonField.id)
+        )).all()
+    kw = (keyword or "").strip().lower()
+    items: list[dict] = []
+    for f, p, h in rows:
+        expiry = _parse_date(f.value)
+        if not expiry:
+            continue  # 无法解析的日期(历史脏数据)不提醒
+        days_left = (expiry - today).days
+        level = "expired" if days_left < 0 else (
+            "expiring" if days_left <= days else "ok")
+        if level == "ok" and not include_ok:
+            continue
+        if kw and kw not in (h.name or "").lower() and kw not in (p.name or "").lower():
+            continue
+        items.append({
+            "household_id": h.id, "household_name": h.name,
+            "customer_code": h.customer_code,
+            "person_id": p.id, "person_name": p.name,
+            "relation_to_main": p.relation_to_main,
+            "credential_type": EXPIRY_FIELD_TYPES[f.field], "field": f.field,
+            "expiry_date": expiry.isoformat(), "days_left": days_left, "level": level,
+            "field_status": f.status, "source_file_id": f.source_file_id,
+        })
+    items.sort(key=lambda x: x["days_left"])
+    return {"total": len(items), "items": items[offset:offset + limit]}
 
 
 # ==================== 交叉验证(多来源同名字段比对,只提示不改值) ====================
@@ -639,7 +716,8 @@ async def apply_extracted_fields_v2(household_id: int, match: dict, field_items:
                                     source_result_id: Optional[int] = None) -> dict:
     """把提取字段写入 profile_person_fields。
 
-    match: {"person_id": int|None, "matched_by": ...};person_id 为 None 且有 name → 新建 person。
+    match: {"person_id": int|None, "matched_by": ...};person_id 为 None 且有 name → 新建 person;
+    无中文名但有合法 name_en(≥2 词拉丁名)→ 按 name_en 建卡(英文证件场景,如新加坡 DP 卡)。
     field_items: [{key, value, column(=profile 字段名), layer(可选,默认按字段字典)}]
     返回 {person_id, mapped, write_stats}
     """
@@ -654,6 +732,13 @@ async def apply_extracted_fields_v2(household_id: int, match: dict, field_items:
                          if it.get("column") == "name" and it.get("value")), None)
             if name and not plausible_person_name(name):
                 name = None  # 乱码假名不建人(如 "钅 lil蝴哪")
+            if not name:
+                # 英文证件(批复/准证/护照)无中文名:按 name_en 建卡,人名卡先用拉丁名,
+                # 后续中文证件到达时经 find_person_match 拼音路归并到同一张卡
+                name_en = next((it["value"] for it in field_items
+                                if it.get("column") == "name_en" and it.get("value")), None)
+                if name_en and not is_masked(name_en) and plausible_latin_name(name_en):
+                    name = " ".join(str(name_en).split())  # 规整连续空格
             if name:
                 p, created, fold_matched_by = await _create_person_in_session(
                     session, household_id, name)
@@ -1320,9 +1405,58 @@ async def infer_family_relations(household_id: int) -> dict:
             await _infer_from_marriage_cert(household_id, main_id, holder_pid,
                                             ex, r.id, inferred)
 
+    # 证件明示关系(DP/LTVP 主签持证人)先于纯启发式:证据强度更高
+    await _infer_from_sponsor(household_id, main_id, inferred)
     # C1/C2 先于 C3:配偶落定后,启发式只处理剩余待确认
     await _infer_children_heuristic(household_id, main_id, inferred)
     return {"checked_results": len(results), "inferred": inferred}
+
+
+async def _infer_from_sponsor(household_id: int, main_id: int,
+                              inferred: list) -> None:
+    """家属准证主签持证人(DP/LTVP 卡面 MAIN PASS HOLDER)→ 持证人=户主且年龄差>15岁 → 按性别写 子/女。
+
+    sponsor_name 字段由 approval 规则 v3 起随提取落库(verified 层,带 source_result_id 证据链)。
+    年龄差不足/性别未知时不写(DP 本身区分不了配偶与子女,不猜);只处理'待确认'的人。
+    """
+    persons = await list_persons(household_id)
+    main = next((p for p in persons if p["id"] == main_id), None)
+    if not main:
+        return
+    fmain = {f["field"]: f.get("value") for f in main.get("fields") or []}
+    main_birth = _parse_date(fmain.get("birth_date"))
+    if not main_birth:
+        return
+    for p in persons:
+        if p["id"] == main_id or p.get("relation_to_main") != "待确认":
+            continue
+        sponsor_f = next((f for f in p.get("fields") or []
+                          if f["field"] == "sponsor_name" and f.get("value")), None)
+        if not sponsor_f:
+            continue
+        sponsor = sponsor_f["value"].strip()
+        if is_masked(sponsor):
+            continue
+        # sponsor 拉丁名走 name_en 通道,中文名走 name 通道(折叠/拼音互转在 find_person_match 内)
+        if re.search(r"[一-鿿]", sponsor):
+            match = await find_person_match(household_id, None, sponsor, None)
+        else:
+            match = await find_person_match(household_id, None, None, sponsor)
+        if match.get("person_id") != main_id:
+            continue  # 主签持证人不是本家庭户主 → 表达不了与户主关系,跳过
+        fp = {f["field"]: f.get("value") for f in p.get("fields") or []}
+        p_birth = _parse_date(fp.get("birth_date"))
+        if not p_birth or (p_birth - main_birth).days <= _CHILD_MIN_AGE_GAP_DAYS:
+            continue  # 户主年长不足 15 岁(可能是配偶/同龄亲属)→ 不猜
+        g = (fp.get("gender") or "").strip()
+        gnorm = _GENDER_MAP.get(g) or _GENDER_MAP.get(g.lower())
+        rel = {"M": "子", "F": "女"}.get(gnorm)
+        if not rel:
+            continue
+        await _write_relation(household_id, p["id"], rel,
+                              basis="sponsor:main_pass_holder",
+                              source_result_id=sponsor_f.get("source_result_id"),
+                              inferred=inferred)
 
 
 # ==================== 同名人员合并 ====================

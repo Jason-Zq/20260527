@@ -2,7 +2,7 @@
 
 场景 A: assign_file_person 设置/清除 + list_person_files 三路并集
         (person_id 列 / write_stats 顶层 person_id / write_stats.persons[] 多人明细)。
-场景 B: list_files_for_assignment 筛选(客户名/类型/归属状态)与归属人 enrichment(manual/extract)。
+场景 B: list_files_for_assignment 筛选(客户名/文件名称/类型/归属状态)与归属人 enrichment(manual/extract)。
 
   cd e:/qoderproject/20260527
   PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_file_assign.py
@@ -133,6 +133,17 @@ async def scenario_b_list_for_assignment():
         rows, total = await customer_file_crud.list_files_for_assignment(
             client_name=cname, doc_type="hukou")
         assert total == 2 and {r["id"] for r in rows} == {fb, fc}
+
+        # 文件名称筛选:filename 与 file_code 均模糊匹配
+        rows, total = await customer_file_crud.list_files_for_assignment(
+            client_name=cname, file_name=f"{codes[0]}.pdf")
+        assert total == 1 and rows[0]["id"] == fa, (total, rows)
+        rows, total = await customer_file_crud.list_files_for_assignment(
+            client_name=cname, file_name=codes[1])  # file_code 片段(不带扩展名)
+        assert total == 1 and rows[0]["id"] == fb, (total, rows)
+        rows, total = await customer_file_crud.list_files_for_assignment(
+            client_name=cname, file_name="不存在的文件名xyz")
+        assert total == 0 and rows == [], (total, rows)
 
         # 归属状态筛选(列 ∪ write_stats 都算已归属)
         rows, total = await customer_file_crud.list_files_for_assignment(

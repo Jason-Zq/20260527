@@ -23,6 +23,9 @@
     "timeout_sec": 20
   },
   "max_ocr_pages": 5,
+  "ocr_max_side_len": 2560,
+  "ocr_preprocess": true,
+  "profile_ocr_render_dpi": 300,
   "document_types": [
     "身份证", "护照", "户口本", "结婚证", "出生证明",
     "学历证书", "学位证书", "工作证明", "银行流水",

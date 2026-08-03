@@ -32,6 +32,7 @@
         <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button> -->
         <button class="nav-item" :class="{ active: isActive('/file-info') }" @click="go('/file-info')">文件信息</button>
         <button class="nav-item" :class="{ active: isActive('/profile') }" @click="go('/profile')">客户画像</button>
+        <button class="nav-item" :class="{ active: isActive('/expiry-reminders') }" @click="go('/expiry-reminders')">到期提醒</button>
         <button class="nav-item" :class="{ active: isActive('/file-assign') }" @click="go('/file-assign')">文件归属</button>
 
         <!-- <el-dropdown trigger="click">

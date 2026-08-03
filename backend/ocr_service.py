@@ -8,7 +8,7 @@ import threading
 import uuid
 import pdfplumber
 import pypdfium2
-from rapidocr_onnxruntime import RapidOCR
+from rapidocr import RapidOCR
 
 # PDF类型检测的文字长度阈值
 TEXT_LENGTH_THRESHOLD = 100
@@ -20,12 +20,25 @@ OCR_RENDER_SCALE = 200 / 72
 # 单页最大像素数(W*H),超过则等比缩放兜底,防止超大扫描件直接打爆 numpy/OpenCV
 MAX_PIXELS = 16_000_000  # ≈ 4000 × 4000
 
+
+def _render_scale(render_dpi: int = 0) -> float:
+    """渲染缩放系数:render_dpi<=0 用默认 200dpi(业务审核);画像管线传 300 提升小字识别。"""
+    return (render_dpi / 72) if render_dpi and render_dpi > 0 else OCR_RENDER_SCALE
+
 # 全局 OCR 引擎（懒加载）
 _ocr_engine = None
 
 # RapidOCR(onnxruntime)单实例多线程推理不保证安全。所有调用都通过 run_ocr,
 # 用此锁串行化,避免业务审核 worker 与拆分流程 worker 在不同线程池里同时打它。
 _OCR_ENGINE_LOCK = threading.Lock()
+
+# 检测输入上限(长边像素):v3 引擎先把输入图等比压到该值再检测,调大=小字更准但 CPU 更贵。
+# config.json 键 ocr_max_side_len 覆盖(引擎包默认 2000)。
+_DEFAULT_MAX_SIDE_LEN = 2560
+
+# 图像前处理开关(config.json 键 ocr_preprocess 覆盖):纠偏/小图放大/低对比度增强,
+# 全部自适应(好图近零成本),CPU 开销在引擎锁外。首次调用时读配置并缓存。
+_PREPROCESS_ENABLED = None
 
 # 输出目录
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output")
@@ -46,12 +59,28 @@ def _downscale_if_too_large(pil_image):
 
 
 def _get_ocr_engine():
-    """懒加载 RapidOCR 引擎(onnxruntime,CPU)。模型权重随包内置,无需联网下载。"""
+    """懒加载 RapidOCR 引擎(v3, onnxruntime, CPU)。模型权重(PP-OCRv6 small)随包内置,无需联网下载。"""
     global _ocr_engine
     if _ocr_engine is None:
-        print("正在初始化 RapidOCR 引擎...")
-        _ocr_engine = RapidOCR()
+        print("正在初始化 RapidOCR 引擎(PP-OCRv6)...")
+        import file_fetcher  # 延迟导入,避免模块级环
+        cfg = file_fetcher._load_config()
+        max_side = int(cfg.get("ocr_max_side_len") or _DEFAULT_MAX_SIDE_LEN)
+        _ocr_engine = RapidOCR(params={
+            "Global.log_level": "warning",      # 引擎自带 INFO 日志太吵,只留 warning+
+            "Global.max_side_len": max_side,
+        })
     return _ocr_engine
+
+
+def _preprocess_enabled() -> bool:
+    """图像前处理开关(首次调用读 config.json 的 ocr_preprocess 键,默认开)。"""
+    global _PREPROCESS_ENABLED
+    if _PREPROCESS_ENABLED is None:
+        import file_fetcher  # 延迟导入,避免模块级环
+        cfg = file_fetcher._load_config()
+        _PREPROCESS_ENABLED = bool(cfg.get("ocr_preprocess", True))
+    return _PREPROCESS_ENABLED
 
 
 def run_ocr(img_path: str, cls: bool = True):
@@ -60,14 +89,31 @@ def run_ocr(img_path: str, cls: bool = True):
     返回结构兼容旧 PaddleOCR 格式:[[ [bbox, (text, confidence)], ... ]],
     无文字时返回 [None]。这样下游 ocr_result[0] / line[0] / line[1][0] / line[1][1]
     的解析逻辑无需任何改动。
-    cls 参数保留以兼容旧签名,RapidOCR 内部自带方向处理。
+    cls 参数保留以兼容旧签名,引擎自带方向分类。
+
+    图像前处理(纠偏/放大/对比度)在引擎锁外做;失败回退为原路径直接喂引擎。
     """
     engine = _get_ocr_engine()
+    ocr_input = img_path
+    if _preprocess_enabled():
+        try:
+            import image_preprocess
+            arr = image_preprocess.preprocess_for_ocr(img_path)
+            if arr is not None:
+                ocr_input = arr
+        except Exception as e:
+            print(f"[ocr_service] 图像前处理失败,按原图 OCR: {e}")
     with _OCR_ENGINE_LOCK:
-        result, _elapse = engine(img_path)
-    if not result:
+        result = engine(ocr_input)
+    txts = getattr(result, "txts", None)
+    if not txts:
         return [None]
-    converted = [[box, (text, float(score))] for box, text, score in result]
+    boxes = result.boxes
+    scores = result.scores
+    converted = [
+        [boxes[i].tolist(), (txts[i], float(scores[i]))]
+        for i in range(len(txts))
+    ]
     return [converted]
 
 
@@ -193,7 +239,8 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
     return results
 
 
-def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> list:
+def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0,
+                      render_dpi: int = 0) -> list:
     """逐页混合提取:含大图的页 → 渲染+OCR;无大图的页 → 直接读文本层。
 
     用于「含扫描页的 PDF」(detect_pdf_type=image 但可能有数字页):
@@ -202,6 +249,7 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
       保留数字页的精确文本且不浪费 OCR。
 
     max_ocr_pages 语义同 extract_image_pdf(限制处理的页数,文本页同样计入)。
+    render_dpi>0 时按该 DPI 渲染扫描页(默认 200;画像管线传 300 提升小字识别)。
     返回格式同 extract_image_pdf;文本页 image=None, ocr_details=[]。
     """
     pdf = pypdfium2.PdfDocument(pdf_path)
@@ -211,6 +259,7 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
     os.makedirs(img_dir, exist_ok=True)
 
     page_limit = total_pages if max_ocr_pages <= 0 else min(max_ocr_pages, total_pages)
+    scale = _render_scale(render_dpi)
 
     results = []
     with pdfplumber.open(pdf_path) as plumber:
@@ -237,7 +286,7 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
 
             # 扫描页:渲染 + OCR(忽略可能存在的内嵌垃圾文本层)
             page = pdf[i]
-            bitmap = page.render(scale=OCR_RENDER_SCALE)
+            bitmap = page.render(scale=scale)
             pil_image = bitmap.to_pil()
             pil_image, _shrunk = _downscale_if_too_large(pil_image)
 

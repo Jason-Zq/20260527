@@ -408,6 +408,12 @@ export async function listChildAgeLeads(params = {}) {
   return r.data
 }
 
+// 全库证件到期提醒(护照/准证/身份证,续签商机)
+export async function listExpiryReminders(params = {}) {
+  const r = await axios.get(`${API_BASE}/profile/expiry-reminders`, { params })
+  return r.data
+}
+
 // ==================== 文件留底检测后台管理(只读) ====================
 
 export async function listArchiveAdminBatches(params = {}) {

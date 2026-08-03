@@ -3582,10 +3582,11 @@ class FileAssignPayload(BaseModel):
 @app.get(
     "/api/profile/files",
     tags=["客户画像"],
-    summary="文件归属页全局文件列表(分页+客户/类型/归属状态筛选)",
+    summary="文件归属页全局文件列表(分页+客户/文件名称/类型/归属状态筛选)",
 )
 async def profile_file_list(
     client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
+    file_name: Optional[str] = Query(None, description="文件名称/文件编码模糊查询"),
     doc_type: Optional[str] = Query(None, description="证件类型:id_card/hukou/degree_cert/birth_cert/other"),
     assigned: Optional[str] = Query(None, description="归属状态:none=未归属/any=已归属,缺省全部"),
     limit: int = Query(50, ge=1, le=200),
@@ -3593,7 +3594,7 @@ async def profile_file_list(
 ):
     from db import customer_file_crud
     items, total = await customer_file_crud.list_files_for_assignment(
-        client_name=client_name, doc_type=doc_type, assigned=assigned,
+        client_name=client_name, file_name=file_name, doc_type=doc_type, assigned=assigned,
         limit=limit, offset=offset)
     return {"items": items, "total": total}
 
@@ -3717,6 +3718,22 @@ async def profile_infer_relations(household_id: int):
         raise HTTPException(status_code=404, detail="家庭不存在")
     return await profile_import_service.run_infer_relations(
         household_id, trigger="manual")
+
+
+@app.get(
+    "/api/profile/expiry-reminders",
+    tags=["客户画像"],
+    summary="全库证件到期提醒(护照/准证/身份证,按剩余天数升序;续签商机入口)",
+)
+async def profile_expiry_reminders(
+        days: int = Query(180, ge=1, le=3650, description="到期预警阈值(天),剩余 ≤days 视为即将到期"),
+        include_ok: bool = Query(False, description="true 时连同正常证件一起返回"),
+        keyword: Optional[str] = Query(None, description="家庭名/成员名模糊筛选"),
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0)):
+    from db import profile_crud
+    return await profile_crud.list_expiry_reminders(
+        days=days, include_ok=include_ok, keyword=keyword, limit=limit, offset=offset)
 
 
 @app.get(

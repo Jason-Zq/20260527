@@ -1152,7 +1152,7 @@ function startResizeCred(e) {
 }
 
 function openCredibility(p, f) {
-  credData.value = { personId: p.id, field: f.field, label: f.label || f.field, credibility: f.credibility || null }
+  credData.value = { personId: p.id, field: f.field, label: f.label || f.field, value: f.value || '', credibility: f.credibility || null }
   credEditValue.value = f.value || ''
   credVisible.value = true
   // 来源按 (customer_file_id, value) 去重(重复导入/重新生成会产生重复提取记录)
@@ -1169,6 +1169,12 @@ function openCredibility(p, f) {
 }
 
 async function saveCredibility() {
+  // 原样保存不提交:避免未改动字段被后端误标 status=corrected(「已修正」)
+  if ((credEditValue.value ?? '').toString().trim() === (credData.value.value || '').trim()) {
+    ElMessage.info('没有改动')
+    credVisible.value = false
+    return
+  }
   credSaving.value = true
   try {
     await correctPersonField(credData.value.personId, { [credData.value.field]: credEditValue.value })
@@ -1262,11 +1268,23 @@ function cancelEdit() {
 }
 
 async function saveEdit(p) {
+  // 只提交真正改动的字段:后端 correct_person_field 是"永远覆盖并标 corrected"语义,
+  // 整包 editBuffer 提交会把未改动字段也误标成「已修正」
+  const orig = Object.fromEntries((p.fields || []).map((f) => [f.field, (f.value || '').trim()]))
+  const changedFields = {}
+  for (const [field, raw] of Object.entries(editBuffer.value)) {
+    if ((raw ?? '').toString().trim() !== (orig[field] ?? '')) changedFields[field] = raw
+  }
+  const relationChanged = !p.is_main && editRelation.value && editRelation.value !== p.relation_to_main
+  if (!Object.keys(changedFields).length && !relationChanged) {
+    ElMessage.info('没有改动')
+    cancelEdit()
+    return
+  }
   editSaving.value = true
   try {
-    const relationChanged = !p.is_main && editRelation.value && editRelation.value !== p.relation_to_main
     await correctPersonField(
-      p.id, editBuffer.value, undefined,
+      p.id, changedFields, undefined,
       relationChanged ? editRelation.value : undefined,
     )
     ElMessage.success('已保存')

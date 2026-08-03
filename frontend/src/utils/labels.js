@@ -37,6 +37,7 @@ const _REVIEW_REASONS = {
   extract_error: '提取失败',
   no_person: '无法归属',
   masked_id: '证件号脱敏',
+  field_validation: '字段校验待确认',
 }
 
 export function reviewReasonLabel(reason) {
@@ -78,6 +79,8 @@ const _FIELD_LABELS = {
   name: '姓名', gender: '性别', ethnicity: '民族', birth_date: '出生日期',
   id_number: '公民身份号码', hukou_address: '住址', issue_authority: '签发机关',
   issuing_authority: '签发机关', valid_period: '有效期限', spouse_name: '配偶姓名',
+  sponsor_name: '主卡/主签持证人', expiry_date: '有效期至',
+  approval_expiry_date: '准证/批复有效期至', id_card_expiry_date: '身份证有效期至',
 }
 
 export function fieldLabelOf(key) {
@@ -88,14 +91,15 @@ export function fieldLabelOf(key) {
 const _FIELD_GROUP_OF = {
   name: 'basic', name_en: 'basic', gender: 'basic', birth_date: 'basic', birth_place: 'basic',
   nationality: 'basic', ethnicity: 'basic', id_number: 'basic', hukou_address: 'basic', marital_status: 'basic',
-  spouse_name: 'basic',
+  spouse_name: 'basic', sponsor_name: 'basic',
   passport_no: 'passport', passport_issue_date: 'passport', passport_expiry_date: 'passport',
   phone: 'income', email: 'income', current_address: 'income', postal_code: 'income',
   occupation: 'income', employer: 'income', business_nature: 'income', annual_income: 'income',
   shareholding: 'income', source_of_funds: 'income', planned_deposit: 'income', residence_plan: 'income',
   birth_cert_no: 'other', birth_hospital: 'other', marriage_date: 'other', marriage_authority: 'other',
   marriage_cert_no: 'other', no_crime_cert_no: 'other', no_crime_issue_date: 'other', approval_no: 'other',
-  approval_date: 'other', school_name: 'other', major: 'other', degree: 'other', graduation_date: 'other',
+  approval_date: 'other', approval_expiry_date: 'other', id_card_expiry_date: 'other',
+  school_name: 'other', major: 'other', degree: 'other', graduation_date: 'other',
   graduation_cert_no: 'other', degree_cert_no: 'other',
 }
 const _FIELD_GROUP_LABELS = { basic: '基础个人信息', passport: '护照信息', income: '公司收入', other: '其他证件' }

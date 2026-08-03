@@ -146,6 +146,7 @@ def group_api_customers(customers: list) -> list[dict]:
 import asyncio
 import hashlib
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -155,6 +156,7 @@ import httpx
 import doc_type_matcher
 import event_service
 import extract_rules
+import field_validators
 import file_fetcher
 import llm_service
 import review_service
@@ -176,6 +178,18 @@ _IMPORT_CONCURRENCY = 3
 # 归因+画像写库锁:并发文件共享同一家庭域(person/person_fields/asset/case 是跨行读写),
 # 串行化防 get-or-create 竞态与字段写冲突;只包 DB 写段(毫秒级),LLM 调用在锁外。
 _ATTR_WRITE_LOCK = asyncio.Lock()
+
+# 画像管线 PDF 扫描页渲染 DPI(config.json 键 profile_ocr_render_dpi 覆盖):
+# 证件小字(户口本/房产证)是主要受益场景;画像量小跑得起 300,业务审核 worker 保持 200。
+_PROFILE_RENDER_DPI = None
+
+
+def _profile_render_dpi() -> int:
+    global _PROFILE_RENDER_DPI
+    if _PROFILE_RENDER_DPI is None:
+        _PROFILE_RENDER_DPI = int(
+            file_fetcher._load_config().get("profile_ocr_render_dpi") or 300)
+    return _PROFILE_RENDER_DPI
 
 # 原件落盘目录(相对 output/ 存 DB,绝对路径落盘);GC 按 file_keep_until 清理
 _OUTPUT_DIR = os.path.normpath(os.path.join(
@@ -495,7 +509,8 @@ async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
             if dup_of:
                 ocr_text = dup_of["ocr_text"] or ""
             else:
-                result = await text_extractor.extract_text(tmp_path, mime)
+                result = await text_extractor.extract_text(
+                    tmp_path, mime, render_dpi=_profile_render_dpi())
                 ocr_text = result.get("text") or ""
             # 原件落盘留存(30 天 GC;复核在线查看用),不再删除
             rel_path = _persist_local_file(tmp_path, file_code, fname)
@@ -573,7 +588,8 @@ async def _process_one_file(task: dict, row: dict, counters: dict) -> None:
         doc_type=doc_type, classify_by=classify_by, classify_score=classify_score,
         extract_status=(extract_outcome or {}).get("status"),
         extract_skip_reason=(extract_outcome or {}).get("skip_reason"),
-        id_masked=bool((extract_outcome or {}).get("id_masked")))
+        id_masked=bool((extract_outcome or {}).get("id_masked")),
+        validation_flags=(extract_outcome or {}).get("validation_flags") or 0)
     await customer_file_crud.update_file_review(
         row["id"], quality_score=q["quality_score"],
         review_status=q["review_status"], review_reason=q["review_reason"])
@@ -615,10 +631,17 @@ async def _record_dup_extract_skip(task: dict, row: dict, doc_type: str,
     return {"status": "skipped", "skip_reason": "dup_content", "id_masked": False}
 
 
-def _clean_field_items(rule: dict, extracted: dict) -> tuple:
-    """字段清洗(单人/多人分支共用):去空 → field_items + 归因三要素 + id_masked。
+# LLM 偶把空值输出成占位字符串("None"/"null" 等),按空值处理(精确匹配,不误伤中文"无"等 legit 值)
+_LLM_NULL_TOKENS = {"none", "null", "n/a", "nil"}
 
-    返回 (field_items, id_number, name, name_en, id_masked)。
+
+def _clean_field_items(rule: dict, extracted: dict) -> tuple:
+    """字段清洗+校验(单人/多人分支共用)。
+
+    流程:去空 → field_validators 校验(校验位唯一候选自动修/派生缺失字段/疑点 flag)
+    → field_items + 归因三要素 + id_masked。修复后的证件号参与归因(强匹配受益)。
+
+    返回 (field_items, id_number, name, name_en, id_masked, repairs, validation_flags)。
     masked 值不候选归因/写库(在 apply 内记 skipped_masked);乱码假名置 None。
     """
     field_items = []
@@ -626,6 +649,8 @@ def _clean_field_items(rule: dict, extracted: dict) -> tuple:
         v = extracted.get(f.get("key"))
         if v is None or (isinstance(v, str) and not v.strip()):
             continue
+        if isinstance(v, str) and v.strip().lower() in _LLM_NULL_TOKENS:
+            continue  # "None"/"null" 等占位字符串按空值处理
         field_items.append({
             "key": f.get("key"), "label": f.get("label"),
             "value": str(v).strip(),
@@ -633,6 +658,14 @@ def _clean_field_items(rule: dict, extracted: dict) -> tuple:
             "layer": (f.get("target") or {}).get("layer"),
             "entity": (f.get("target") or {}).get("entity") or "person",
         })
+    field_items, repairs, validation_flags = field_validators.validate_field_items(field_items)
+    # sponsor=本人时丢弃(主签持证人=自己没有信息量;LLM 偶把本人姓名填进 sponsor_name)
+    sponsor_it = next((it for it in field_items if it["column"] == "sponsor_name"), None)
+    if sponsor_it:
+        raw_name = next((it["value"] for it in field_items if it["column"] == "name"), None)
+        raw_name_en = next((it["value"] for it in field_items if it["column"] == "name_en"), None)
+        if _is_self_sponsor(sponsor_it["value"], raw_name, raw_name_en):
+            field_items.remove(sponsor_it)
     id_number = next(
         (it["value"] for it in field_items
          if it["column"] == "id_number"
@@ -650,7 +683,29 @@ def _clean_field_items(rule: dict, extracted: dict) -> tuple:
     id_masked = any(
         it["column"] == "id_number" and doc_extract_crud.is_masked(it["value"])
         for it in field_items)
-    return field_items, id_number, name, name_en, id_masked
+    return field_items, id_number, name, name_en, id_masked, repairs, validation_flags
+
+
+def _is_self_sponsor(sponsor: str, name, name_en) -> bool:
+    """sponsor_name 与本人姓名/name_en 相同(含拼音连写变体)判定。
+
+    三种口径:拉丁词序无关(SONG GUOE==GUOE SONG)、CJK 繁简折叠、
+    拉丁连写 vs 中文名拼音连写(SONGGUOE==宋国娥)。
+    """
+    s = (sponsor or "").strip()
+    if not s:
+        return False
+    if name_en and profile_crud._normalize_name_en(s) and \
+            profile_crud._normalize_name_en(s) == profile_crud._normalize_name_en(name_en):
+        return True
+    if name and profile_crud._fold_cjk(s) and \
+            profile_crud._fold_cjk(s) == profile_crud._fold_cjk(name):
+        return True
+    if name and re.fullmatch(r"[A-Za-z .'\-]+", s):
+        glued = re.sub(r"[^A-Za-z]", "", s).upper()
+        if glued and glued in profile_crud._pinyin_glued_variants(name):
+            return True
+    return False
 
 
 async def _extract_one_multi(task: dict, row: dict, doc_type: str, ocr_text: str,
@@ -670,13 +725,18 @@ async def _extract_one_multi(task: dict, row: dict, doc_type: str, ocr_text: str
 
     all_mapped: list = []
     persons_stats: list = []
+    all_repairs: list = []
+    all_vflags: list = []
     agg = {"written": 0, "updated": 0, "person_created": 0}
     first_pid, first_matched_by = None, None
     # 归因+写库串行化:并发文件共享家庭域,防 person get-or-create 竞态与字段写冲突
     async with _ATTR_WRITE_LOCK:
         for pext in persons_raw:
-            field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, pext)
+            field_items, id_number, name, name_en, id_masked, repairs, vflags = \
+                _clean_field_items(rule, pext)
             outcome["id_masked"] = outcome["id_masked"] or id_masked
+            all_repairs += repairs
+            all_vflags += vflags
             if not id_number and not name and not name_en:
                 all_mapped.append({"key": "*", "field": None, "person_id": None,
                                    "action": "skipped_no_name"})
@@ -722,6 +782,11 @@ async def _extract_one_multi(task: dict, row: dict, doc_type: str, ocr_text: str
 
     write_stats = {"matched_by": first_matched_by, "person_id": first_pid,
                    "person_count": len(persons_stats), "persons": persons_stats, **agg}
+    if all_repairs:
+        write_stats["repairs"] = all_repairs
+    if all_vflags:
+        write_stats["validation_flags"] = all_vflags
+        outcome["validation_flags"] = len(all_vflags)
     await doc_extract_crud.insert_result(
         customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
         client_id=task.get("client_id"), doc_type=doc_type,
@@ -735,7 +800,9 @@ async def _extract_one_multi(task: dict, row: dict, doc_type: str, ocr_text: str
         f"证件信息提取完成(多人 {len(persons_stats)} 人): {file_code} ({doc_type})",
         context={"task_id": task_id, "file_code": file_code, "doc_type": doc_type,
                  "rule_version": rule["version"], "person_count": len(persons_stats),
-                 "writes": dict(agg)})
+                 "writes": dict(agg),
+                 **({"repairs": len(all_repairs)} if all_repairs else {}),
+                 **({"validation_flags": len(all_vflags)} if all_vflags else {})})
     outcome.update(status="done")
     return outcome
 
@@ -747,7 +814,8 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
     household_id = task.get("household_id")
     file_code = row.get("file_code") or ""
     t0 = time.time()
-    outcome = {"status": None, "skip_reason": None, "id_masked": False}
+    outcome = {"status": None, "skip_reason": None, "id_masked": False,
+               "validation_flags": 0}
 
     rule = extract_rules.get_rule(doc_type)
     if not rule:
@@ -789,15 +857,20 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
             task_id=str(task_id), file_id=file_code)
         extracted = raw.get("fields") or {}
 
-        # 字段清洗:去空;masked 不候选归因/写库(在 apply 内记 skipped_masked)
-        field_items, id_number, name, name_en, id_masked = _clean_field_items(rule, extracted)
+        # 字段清洗+校验:去空 → 校验位修复/派生/疑点 flag;masked 不候选归因/写库
+        field_items, id_number, name, name_en, id_masked, repairs, vflags = \
+            _clean_field_items(rule, extracted)
         outcome["id_masked"] = id_masked
+        outcome["validation_flags"] = len(vflags)
 
         case_items = [it for it in field_items if it.get("entity") == "case"]
         # 归因+写库串行化:并发文件共享家庭域,防 person/case get-or-create 竞态与字段写冲突
         async with _ATTR_WRITE_LOCK:
             match = await profile_crud.find_person_match(household_id, id_number, name, name_en)
-            if match.get("person_id") is None and not name and not case_items:
+            # 中文名可建人,或 ≥2 词拉丁名可建人(英文证件场景,apply 内按 name_en 建卡)
+            can_create = bool(name) or bool(
+                name_en and profile_crud.plausible_latin_name(name_en))
+            if match.get("person_id") is None and not can_create and not case_items:
                 await doc_extract_crud.insert_result(
                     customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
                     client_id=task.get("client_id"), doc_type=doc_type,
@@ -831,6 +904,10 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
                     project_name_hint=row.get("project_name"))
                 write["mapped"] += cw["mapped"]
                 write["write_stats"].update(cw["stats"])
+        if repairs:
+            write["write_stats"]["repairs"] = repairs
+        if vflags:
+            write["write_stats"]["validation_flags"] = vflags
         await doc_extract_crud.insert_result(
             customer_file_id=row["id"], import_task_id=task_id, file_id=file_code,
             client_id=task.get("client_id"), doc_type=doc_type,
@@ -846,7 +923,9 @@ async def _extract_one(task: dict, row: dict, doc_type: str,
                      "rule_version": rule["version"],
                      "matched_by": write["write_stats"].get("matched_by"),
                      "writes": {k: v for k, v in write["write_stats"].items()
-                                if k in ("written", "updated", "person_created")}})
+                                if k in ("written", "updated", "person_created")},
+                     **({"repairs": len(repairs)} if repairs else {}),
+                     **({"validation_flags": len(vflags)} if vflags else {})})
         outcome.update(status="done")
         return outcome
     except Exception as e:

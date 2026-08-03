@@ -18,6 +18,7 @@
       <section class="card filter-card">
         <div class="filter-grid">
           <el-input v-model="filters.client_name" clearable placeholder="客户姓名" size="small" />
+          <el-input v-model="filters.file_name" clearable placeholder="文件名称" size="small" />
           <el-select v-model="filters.doc_type" clearable placeholder="证件类型" size="small" style="width: 140px">
             <el-option v-for="o in DOC_TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
@@ -121,7 +122,7 @@ const total = ref(0)
 const loading = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(25)
-const filters = ref({ client_name: '', doc_type: null, assigned: null })
+const filters = ref({ client_name: '', file_name: '', doc_type: null, assigned: null })
 
 async function loadList() {
   loading.value = true
@@ -131,6 +132,7 @@ async function loadList() {
       offset: (currentPage.value - 1) * pageSize.value,
     }
     if (filters.value.client_name?.trim()) params.client_name = filters.value.client_name.trim()
+    if (filters.value.file_name?.trim()) params.file_name = filters.value.file_name.trim()
     if (filters.value.doc_type) params.doc_type = filters.value.doc_type
     if (filters.value.assigned) params.assigned = filters.value.assigned
     const data = await listFilesForAssign(params)
@@ -149,7 +151,7 @@ function handleSearch() {
 }
 
 function resetFilters() {
-  filters.value = { client_name: '', doc_type: null, assigned: null }
+  filters.value = { client_name: '', file_name: '', doc_type: null, assigned: null }
   handleSearch()
 }
 

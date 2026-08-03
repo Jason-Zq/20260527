@@ -13,12 +13,13 @@ from typing import Optional
 
 # 规则整体版本号:写入 doc_extract_results.rule_version 供溯源(改规则时手动 +1)
 # v3: marriage_cert 改多人模式(抽全配偶字段+自动建配偶卡)
-RULES_VERSION = 3
+# v4: approval 到期日入库(approval_expiry_date)+家属准证主签持证人(sponsor_name);id_card 到期日(id_card_expiry_date)
+RULES_VERSION = 4
 
 
 EXTRACT_RULES: dict[str, dict] = {
     "id_card": {
-        "version": 1,
+        "version": 2,
         "fields": [
             {
                 "key": "name",
@@ -107,9 +108,20 @@ EXTRACT_RULES: dict[str, dict] = {
                 "example": "2020.01.01-2040.01.01",
                 "required": False,
                 "description": "如「2010.01.01-2030.01.01」或「长期」"
+            },
+            {
+                "key": "id_card_expiry_date",
+                "label": "身份证有效期至",
+                "target": {
+                    "column": "id_card_expiry_date",
+                    "entity": "person"
+                },
+                "example": "2040-01-01",
+                "required": False,
+                "description": "有效期限的止日期,统一 YYYY-MM-DD;「长期」或看不清则 None"
             }
         ],
-        "prompt_extra": "1. 身份证有正反面，正面为个人信息（姓名、性别、民族、出生日期、住址、身份证号），反面为签发机关和有效期限，需合并提取。\n2. 出生日期、有效期限中的日期部分一律转换为 YYYY-MM-DD 标准格式，注意年份可能为两位（需补全为四位）或四位。\n3. 身份证号倒数第二位为性别校验位（奇男偶女），但直接提取性别字段优先取版面文字。\n4. 注意与临时身份证、护照等区分，临时身份证无有效期或不同；居民身份证号码固定18位，末位可能为X（大写）。"
+        "prompt_extra": "1. 身份证有正反面，正面为个人信息（姓名、性别、民族、出生日期、住址、身份证号），反面为签发机关和有效期限，需合并提取。\n2. 出生日期、有效期限中的日期部分一律转换为 YYYY-MM-DD 标准格式，注意年份可能为两位（需补全为四位）或四位。\n3. 身份证号倒数第二位为性别校验位（奇男偶女），但直接提取性别字段优先取版面文字。\n4. 注意与临时身份证、护照等区分，临时身份证无有效期或不同；居民身份证号码固定18位，末位可能为X（大写）。\n5. id_card_expiry_date 取有效期限的止日期(如「2010.01.01-2030.01.01」取 2030-01-01);有效期限为「长期」时输出 None。"
     },
     "hukou": {
         "version": 2,
@@ -1117,7 +1129,7 @@ EXTRACT_RULES: dict[str, dict] = {
         "prompt_extra": "签收函重点抽两类日期:签收日期与交付日期,统一 YYYY-MM-DD。项目名称原样提取。手写签名通常识别不清,客户姓名以打印体为准,没有就 None。"
     },
     "approval": {
-        "version": 2,
+        "version": 3,
         "fields": [
             {
                 "key": "name",
@@ -1222,12 +1234,23 @@ EXTRACT_RULES: dict[str, dict] = {
                 "key": "expiry_date",
                 "label": "有效期至",
                 "target": {
-                    "column": None,
+                    "column": "approval_expiry_date",
                     "entity": "person"
                 },
                 "example": "2028-01-14",
                 "required": False,
-                "description": "证件过期日期，统一 YYYY-MM-DD 格式；无可写列对应，仅抽取不写入"
+                "description": "准证/批复的过期日期(如 EP/DP 卡面 VALID TILL、批复函有效期),统一 YYYY-MM-DD;证件未标注则 None"
+            },
+            {
+                "key": "sponsor_name",
+                "label": "主卡/主签持证人",
+                "target": {
+                    "column": "sponsor_name",
+                    "entity": "person"
+                },
+                "example": "SONG GUOE",
+                "required": False,
+                "description": "家属/受抚养人准证(DP/LTVP 等)上印的主准证持证人姓名(如 MAIN PASS HOLDER'S NAME);持证人本人就是主签持有人、或证件无此栏时输出 None"
             },
             {
                 "key": "issuing_authority",
@@ -1252,7 +1275,7 @@ EXTRACT_RULES: dict[str, dict] = {
                 "description": "获批/签发日期(与 approval_date 相同),作为案件里程碑"
             }
         ],
-        "prompt_extra": "1. 正反面信息合并：永居卡正面通常有照片、姓名、卡号、出生日期等，背面可能包含签发机关、有效期、国籍等，需将正反面 OCR 结果合并后再提取。\n2. 日期格式统一：所有日期（出生日期、签发日期、有效期）均需转换为 YYYY-MM-DD 格式，原格式若为其他（如 DD/MM/YYYY 或 MMM DD, YYYY）需解析后转换。\n3. 区分永居卡与批复函：永居卡带有生物信息（照片、指纹）且卡号格式固定，批复函通常为公文格式且可能包含批准类别、关联护照号等信息，需根据版面特征区分并对应提取字段。\n4. 注意英文名大小写：英文名/拼音按照证件原文保留大写字母，无需强制全大写或首字母大写。 3. 一份文件含多张卡/多人时,只提取第一位(主卡持有人)。"
+        "prompt_extra": "1. 正反面信息合并：永居卡正面通常有照片、姓名、卡号、出生日期等，背面可能包含签发机关、有效期、国籍等，需将正反面 OCR 结果合并后再提取。\n2. 日期格式统一：所有日期（出生日期、签发日期、有效期）均需转换为 YYYY-MM-DD 格式，原格式若为其他（如 DD/MM/YYYY 或 MMM DD, YYYY）需解析后转换。\n3. 区分永居卡与批复函：永居卡带有生物信息（照片、指纹）且卡号格式固定，批复函通常为公文格式且可能包含批准类别、关联护照号等信息，需根据版面特征区分并对应提取字段。\n4. 注意英文名大小写：英文名/拼音按照证件原文保留大写字母，无需强制全大写或首字母大写。\n5. 一份文件含多张卡/多人时,只提取第一位(主卡持有人)。\n6. sponsor_name 仅用于家属/受抚养人准证(如新加坡 DP/LTVP):卡面或函件印有 MAIN PASS HOLDER(主准证持证人)姓名时提取它;EP/SP/WP 等主申请人本人的准证、批复函上没有主签持证人栏目时,输出 None,不要把本人姓名填进 sponsor_name。"
     }
 }
 

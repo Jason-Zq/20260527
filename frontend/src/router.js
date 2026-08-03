@@ -25,6 +25,7 @@ const routes = [
   { path: '/archive-admin', component: () => import('./components/ArchiveAdminPage.vue') },
   { path: '/file-info', component: () => import('./components/FileInfoPage.vue') },
   { path: '/profile', component: () => import('./components/ProfilePage.vue') },
+  { path: '/expiry-reminders', component: () => import('./components/ExpiryRemindersPage.vue') },
   { path: '/file-assign', component: () => import('./components/FileAssignPage.vue') },
   { path: '/events', component: () => import('./components/EventsPage.vue') },
   { path: '/request-logs', component: () => import('./components/RequestLogsPage.vue') },

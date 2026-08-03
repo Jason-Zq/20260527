@@ -621,7 +621,8 @@ def _cleanup_ocr_dir(task_id: str) -> None:
         print(f"[text_extractor] 清理 {task_id} 失败(忽略): {e}")
 
 
-def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int) -> str:
+def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int,
+                     render_dpi: int = 0) -> str:
     """只取指定页(0-based 索引)的文本。用于大文件 early-exit 时抓末页盖章/合计。
 
     逐页混合:该页含大图 → 渲染+OCR;无大图 → 直接读文本层(数字页不浪费 OCR)。
@@ -643,7 +644,7 @@ def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int) -> st
     pdf = pypdfium2.PdfDocument(file_path)
     try:
         page = pdf[page_index_0based]
-        bitmap = page.render(scale=ocr_service.OCR_RENDER_SCALE)
+        bitmap = page.render(scale=ocr_service._render_scale(render_dpi))
         pil_image = bitmap.to_pil()
         pil_image, _ = ocr_service._downscale_if_too_large(pil_image)
         img_filename = f"page_{page_index_0based + 1}.png"
@@ -664,8 +665,10 @@ def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int) -> st
     return "\n".join(lines)
 
 
-def _extract_pdf(file_path: str) -> dict:
+def _extract_pdf(file_path: str, render_dpi: int = 0) -> dict:
     """PDF 文字提取,带大文件 early-exit 优化。
+
+    render_dpi>0 时按该 DPI 渲染扫描页(默认 200;画像管线传 300 提升小字识别)。
 
     流程:
     1. 文字型 PDF(有文字层) → pdfplumber 全文(秒级)
@@ -706,7 +709,8 @@ def _extract_pdf(file_path: str) -> dict:
 
         # === 3. 小文件直接全 OCR(逐页混合:扫描页 OCR,数字页读文本层) ===
         if total_pages <= OCR_EARLY_EXIT_THRESHOLD:
-            pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=0)
+            pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=0,
+                                                  render_dpi=render_dpi)
             text = "\n\n".join(p.get("text", "") for p in pages).strip()
             return {
                 "text": text,
@@ -716,7 +720,8 @@ def _extract_pdf(file_path: str) -> dict:
             }
 
         # === 4. 大文件 early-exit:先取前 2 页(逐页混合) ===
-        head_pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=2)
+        head_pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=2,
+                                                   render_dpi=render_dpi)
         head_text = "\n\n".join(p.get("text", "") for p in head_pages[:2]).strip()
 
         # === 5. LLM 初判 ===
@@ -730,7 +735,8 @@ def _extract_pdf(file_path: str) -> dict:
         # === 6a. 是大表类(或 LLM 抽风) → 加一页末页就返回 ===
         if is_large_table:
             try:
-                tail_text = _ocr_single_page(file_path, task_id, total_pages - 1)
+                tail_text = _ocr_single_page(file_path, task_id, total_pages - 1,
+                                             render_dpi=render_dpi)
             except Exception as e:
                 print(f"[text_extractor] 末页 OCR 失败,只用前 2 页: {e}")
                 tail_text = ""
@@ -769,7 +775,8 @@ def _extract_pdf(file_path: str) -> dict:
             }
 
         # === 6b. 不是大表类 → 取全文(逐页混合;前 2 页缓存重复跑,代价小,逻辑简单) ===
-        pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=0)
+        pages = ocr_service.extract_mixed_pdf(file_path, task_id, max_ocr_pages=0,
+                                              render_dpi=render_dpi)
         text = "\n\n".join(p.get("text", "") for p in pages).strip()
         return {
             "text": text,
@@ -822,8 +829,11 @@ def _extract_gif(file_path: str) -> dict:
             pass
 
 
-async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
+async def extract_text(file_path: str, mime_type: Optional[str] = None,
+                       render_dpi: int = 0) -> dict:
     """统一文字提取入口（异步，把同步阻塞代码扔到线程池）。
+
+    render_dpi>0 时 PDF 扫描页按该 DPI 渲染(默认 200;画像管线传 300 提升小字识别)。
 
     抛出：
       ValueError - 不支持的扩展名
@@ -854,7 +864,7 @@ async def extract_text(file_path: str, mime_type: Optional[str] = None) -> dict:
         return _sanitize_extracted(await asyncio.to_thread(_extract_doc, file_path))
 
     if ext == _PDF_EXT:
-        return _sanitize_extracted(await asyncio.to_thread(_extract_pdf, file_path))
+        return _sanitize_extracted(await asyncio.to_thread(_extract_pdf, file_path, render_dpi))
 
     if ext in _IMAGE_EXTS:
         return _sanitize_extracted(await asyncio.to_thread(_extract_image, file_path))

@@ -97,19 +97,19 @@ def test_extract_doc_fields_multi_retry():
 def test_clean_field_items_shared():
     """单/多人共用的字段清洗:masked 剔除归因、假名置 None、id_masked 标记。"""
     import profile_import_service as pis
-    items, idn, name, name_en, id_masked = pis._clean_field_items(_RULE, {
+    items, idn, name, name_en, id_masked, repairs, vflags = pis._clean_field_items(_RULE, {
         "name": "张三", "id_number": "110101199001011234", "gender": "男"})
     assert idn == "110101199001011234" and name == "张三" and id_masked is False
     keys = {it["key"] for it in items}
     assert {"name", "id_number", "gender"} <= keys, keys
 
     # masked 证件号:不参与归因,id_masked=True
-    items, idn, name, name_en, id_masked = pis._clean_field_items(_RULE, {
+    items, idn, name, name_en, id_masked, repairs, vflags = pis._clean_field_items(_RULE, {
         "name": "张三", "id_number": "[身份证]"})
     assert idn is None and name == "张三" and id_masked is True
 
     # 乱码假名置 None
-    items, idn, name, name_en, id_masked = pis._clean_field_items(_RULE, {
+    items, idn, name, name_en, id_masked, repairs, vflags = pis._clean_field_items(_RULE, {
         "name": "钅 lil蝴哪"})
     assert name is None
 
@@ -151,8 +151,8 @@ def test_marriage_persons_payload():
     assert rows[0]["spouse_name"] == "刘小娟" and rows[1]["spouse_name"] == "张三", rows
     assert rows[1]["birth_date"] is None, rows[1]  # 缺的 key 补 None
     # 清洗:两人各自可归因(姓名+证件号);cert_role 无 column 不写库
-    _, idn0, name0, _, _ = pis._clean_field_items(rule, rows[0])
-    _, idn1, name1, _, _ = pis._clean_field_items(rule, rows[1])
+    _, idn0, name0, _, _, _, _ = pis._clean_field_items(rule, rows[0])
+    _, idn1, name1, _, _, _, _ = pis._clean_field_items(rule, rows[1])
     assert (name0, idn0) == ("张三", "110101199001011234")
     assert (name1, idn1) == ("刘小娟", "110101199202022345")
     items0, *_ = pis._clean_field_items(rule, rows[0])

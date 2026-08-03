@@ -63,9 +63,23 @@ def test_marriage_is_multi():
     assert cols.get("cert_role") is None, cols  # 只抽不写库,供推导定位持证人/配偶
 
 
-def test_approval_is_v2():
+def test_approval_is_v3():
+    """approval v3 起:到期日入库(approval_expiry_date)+家属准证主签持证人(sponsor_name)。"""
     r = er.get_rule("approval")
+    assert r is not None and r["version"] == 3, r
+    cols = {f["key"]: f["target"].get("column") for f in r["fields"]}
+    assert cols.get("expiry_date") == "approval_expiry_date", cols
+    assert cols.get("sponsor_name") == "sponsor_name", cols
+    assert "sponsor_name" in (r["prompt_extra"] or ""), r["prompt_extra"]
+
+
+def test_id_card_is_v2():
+    """id_card v2 起:有效期限止日期入库(id_card_expiry_date)。"""
+    r = er.get_rule("id_card")
     assert r is not None and r["version"] == 2, r
+    cols = {f["key"]: f["target"].get("column") for f in r["fields"]}
+    assert cols.get("id_card_expiry_date") == "id_card_expiry_date", cols
+    assert cols.get("valid_period") is None, cols  # 原始有效期限仍只抽不写
 
 
 def test_unknown_type_returns_none():
@@ -86,10 +100,12 @@ if __name__ == "__main__":
     print("PASS test_hukou_is_multi")
     test_marriage_is_multi()
     print("PASS test_marriage_is_multi")
-    test_approval_is_v2()
-    print("PASS test_approval_is_v2")
+    test_approval_is_v3()
+    print("PASS test_approval_is_v3")
+    test_id_card_is_v2()
+    print("PASS test_id_card_is_v2")
     test_unknown_type_returns_none()
     print("PASS test_unknown_type_returns_none")
     test_rules_version_constant()
     print("PASS test_rules_version_constant")
-    print("\n全部 7 个测试通过")
+    print("\n全部 8 个测试通过")
