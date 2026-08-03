@@ -69,6 +69,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ExpiryRemindersPage' })
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listExpiryReminders } from '../api.js'

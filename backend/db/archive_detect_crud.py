@@ -903,6 +903,71 @@ async def admin_list_batches(
         return {"items": items, "total": total}
 
 
+async def admin_daily_report(date_str: str) -> dict:
+    """每日留底检测报告:按 created_at 取某一天全部批次,按客户分组统计总体判定分布。
+
+    分桶: status=done 按 overall_verdict 分 match/partial/mismatch(NULL 落 other);
+    status=error 记 error;其余(running 等)记 in_progress。avg_score 仅统计 done 且有分的批次。
+    无客户的批次(历史 quick 类)归入 client_id=None 的合成桶。
+    """
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    next_day = day + timedelta(days=1)
+    async with async_session_maker() as session:
+        stmt = (
+            select(
+                Client.id, Client.client_code, Client.name,
+                ArchiveDetectBatch.status, ArchiveDetectBatch.overall_verdict,
+                ArchiveDetectBatch.overall_score, ArchiveDetectBatch.total_files,
+            )
+            .outerjoin(ArchiveDetectProgress, ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id)
+            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
+            .where(ArchiveDetectBatch.created_at >= day, ArchiveDetectBatch.created_at < next_day)
+        )
+        rows = (await session.execute(stmt)).all()
+
+    buckets = ("match", "partial", "mismatch", "other", "error", "in_progress")
+
+    def _new_bucket(client_id, client_code, client_name):
+        return {
+            "client_id": client_id, "client_code": client_code or "", "name": client_name or "（无客户信息）",
+            "batches": 0, "files": 0,
+            **{k: 0 for k in buckets},
+            "_scores": [],
+        }
+
+    def _bucket_of(status: str, verdict: Optional[str]) -> str:
+        if status == "done":
+            return verdict if verdict in ("match", "partial", "mismatch") else "other"
+        return "error" if status == "error" else "in_progress"
+
+    clients_map: dict = {}
+    totals = _new_bucket(None, "", "")
+    for client_id, client_code, client_name, status, verdict, score, total_files in rows:
+        key = client_id if client_id is not None else "__no_client__"
+        if key not in clients_map:
+            clients_map[key] = _new_bucket(client_id, client_code, client_name)
+        b = _bucket_of(status, verdict)
+        for agg in (clients_map[key], totals):
+            agg["batches"] += 1
+            agg["files"] += total_files or 0
+            agg[b] += 1
+            if status == "done" and score is not None:
+                agg["_scores"].append(score)
+
+    def _finalize(agg: dict) -> dict:
+        scores = agg.pop("_scores")
+        agg["avg_score"] = round(sum(scores) / len(scores), 1) if scores else None
+        return agg
+
+    clients = sorted(
+        (_finalize(a) for a in clients_map.values()),
+        key=lambda a: (-a["batches"], a["name"]),
+    )
+    totals = _finalize(totals)
+    totals["clients"] = len(clients_map)
+    return {"date": date_str, "totals": totals, "clients": clients}
+
+
 async def admin_list_progress(
     *,
     client_code: Optional[str] = None,

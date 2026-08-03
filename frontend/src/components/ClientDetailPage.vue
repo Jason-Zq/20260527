@@ -260,6 +260,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ClientDetailPage' })
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {

@@ -111,6 +111,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'FileAssignPage' })
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'

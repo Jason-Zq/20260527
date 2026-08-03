@@ -4,7 +4,7 @@ using DocReview.ArchiveDetect.Services;
 namespace DocReview.ArchiveDetect.Controllers;
 
 /// <summary>
-/// 审核任务管理后台。对标 Python 后端 /api/archive-detect/admin/*。
+/// 检测批次管理后台。对标 Python 后端 /api/archive-detect/admin/*。
 /// </summary>
 [ApiController]
 [Route("api/archive-detect/admin")]

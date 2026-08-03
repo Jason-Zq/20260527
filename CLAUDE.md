@@ -176,6 +176,8 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
   frontend/src/router.js                 路由: /login, /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /file-info, /profile, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads;全局守卫:无 token 一律跳 /login
   frontend/src/api.js                    axios API 封装(token 存 localStorage,请求拦截器自动带 Bearer,401 清 token 跳登录)
+  frontend/src/menu.js                   侧边栏菜单配置(与路由分离;App.vue 渲染左侧分组 el-sub-menu,点击展开/收缩,可折叠;新增页面=router.js 加路由+这里加项)
+  frontend/src/tabs.js + components/TagsView.vue   多页签(tags-view):keep-alive 保活已访问页面,右键菜单(刷新/关闭其他/关闭全部);**新增页面还需:路由 meta 加 title/cache + 页面组件 defineOptions name**(异步组件拿不到 name,keep-alive include 走 meta.cache)
   frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ExternalApiLogsPage / ChildAgeLeadsPage)
 
 后端: FastAPI + SQLAlchemy 2 async + Alembic
@@ -306,7 +308,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - DB `split_tasks` 是权威状态；内存 `_split_task_status` 只做轮询 fast-path。
 - `/api/split/history` 必须声明在 `/api/split/{task_id}` 之前。
 
-### 审核任务管理后台
+### 检测批次管理后台
 
 - 路由 `/api/archive-detect/admin/*`，前端 `ArchiveAdminPage.vue`（`/archive-admin`）。
 - 筛选:状态/来源/批次ID/客户/进展/日期范围 + **总体判断多选(match/partial/mismatch)** + **仅看有失败文件**(EXISTS 子查询)。
@@ -410,4 +412,4 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - **`tests/test_profile_api_import.py` 是一次性参考脚本（非单元测试）**：业务方 `getAfterCustomerAllFiles` 接口 → 复用生产适配 `profile_import_service.parse_api_manifest`（过滤 `._` 开头 macOS 垃圾文件、按文件编号去重）→ 复用 `run_import` 逐户串行跑，是「业务方接口作为文件来源」的早期验证脚本（生产入口已上线为 `POST /api/profile/import-remote`，脚本保留白名单/心跳等批处理特性）。`--dry-run` 只拉清单不写库，`--only 姓名1,姓名2` 补跑指定客户。实测注意：接口全量约百个客户且动态变化，同一客户可能多条目（不同 affter_entryoid），条目可能后续返回 0 文件（affter_entryoid 变 null）。
 - **线程上下文写库必须走 psycopg2 同步引擎，跨 loop 用 asyncpg 是致命的（2026-07-29 实锤修复）**：IOD 生产 uvicorn 两次无声死亡（各在画像任务恢复跑批 ~40 分钟后），内核日志显示均为 asyncpg `protocol.so` 同一指令偏移段错误——根因是 `event_service.log_event` 同步分支在 worker 线程里 `asyncio.run(async 写)`，临时 loop 跨用绑在主 loop 的 asyncpg 连接池。修复：同步分支改走 `event_crud.insert_event_sync`（psycopg2，与 `insert_ai_api_call_sync` 同模式）；同时 `ai_api_call_crud._build_row` 对所有短 varchar 字段按列宽硬截断（`_clean_short`，不加截断标记——`_clean_text` 的标记会超出列宽），`detect_large_table_doc` 的 task_id 从临时全路径改传短 id（此前 107 次 StringDataRightTruncation）。**教训：跨 loop 用 asyncpg 不是"丢日志"级别，是杀整个进程级别，且无任何 Python traceback。**
 - **根目录一次性产物勿当流程依赖**：`gen_ceo_report.py`、`o2.txt`、`*.docx` 汇报文档是临时汇报产物；`tests/test_archive_detect_queue.py.deprecated` 是退役测试留档。
-- **导航栏部分入口被注释**：App.vue 里「客户档案」「子女年龄线索」按钮已注释隐藏（路由仍在，可直接输 URL 访问）。原「复核中心」页已改造为「文件归属」页（`/file-assign`，见客户画像节）；复核入口从画像页红色横幅进。
+- **导航为左侧分组侧边栏(2026-08-03 由顶栏改造)**：菜单配置在 `frontend/src/menu.js`(与路由分离,加页面=router.js 加路由+menu.js 加项),App.vue 渲染可折叠 el-menu 分组侧边栏(业务审核/客户画像/日志监控/工具箱 4 组)。「客户档案」(/clients)、「子女年龄线索」(/child-age-leads) 不在菜单(路由仍在,可直接输 URL 访问)。原「复核中心」页已改造为「文件归属」页（`/file-assign`，见客户画像节）；复核入口从画像页红色横幅进。

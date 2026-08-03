@@ -126,6 +126,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'EventsPage' })
 import { ref, onMounted, computed } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'

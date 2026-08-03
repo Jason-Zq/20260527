@@ -2557,6 +2557,30 @@ class ArchiveDetectAdminBatchListResponse(BaseModel):
     total: int = Field(..., description="符合筛选条件的总条数")
 
 
+class ArchiveDetectDailyReportBucket(BaseModel):
+    """每日报告统计桶(客户维度或全量合计)。"""
+    client_id: Optional[int] = Field(None, description="客户 ID(全量合计/无客户桶为 null)")
+    client_code: str = Field("", description="客户编码")
+    name: str = Field("", description="客户姓名")
+    batches: int = Field(..., description="批次数")
+    files: int = Field(..., description="文件总数")
+    match: int = Field(..., description="总体判断=符合 的批次数")
+    partial: int = Field(..., description="总体判断=部分符合 的批次数")
+    mismatch: int = Field(..., description="总体判断=不符合 的批次数")
+    other: int = Field(..., description="已完成但无总体判断 的批次数")
+    error: int = Field(..., description="识别失败 的批次数")
+    in_progress: int = Field(..., description="进行中 的批次数")
+    avg_score: Optional[float] = Field(None, description="已完成批次总体匹配度均值(无则 null)")
+    clients: int = Field(0, description="涉及客户数(仅 totals 合计桶有意义)")
+
+
+class ArchiveDetectDailyReportResponse(BaseModel):
+    """每日留底检测报告返回。"""
+    date: str = Field(..., description="统计日期 YYYY-MM-DD(按批次创建时间)")
+    totals: ArchiveDetectDailyReportBucket = Field(..., description="当天全量合计(多一个 clients 字段)")
+    clients: list[ArchiveDetectDailyReportBucket] = Field(..., description="按客户分组的统计,批次数降序")
+
+
 class ArchiveDetectAdminProgressItem(BaseModel):
     """后台管理进展包列表项。"""
     id: int = Field(..., description="进展包数据库 ID")
@@ -3885,6 +3909,24 @@ async def archive_detect_admin_batches(
         limit=limit,
         offset=offset,
     )
+
+
+@app.get(
+    "/api/archive-detect/admin/daily-report",
+    tags=["文件留底检测"],
+    summary="后台管理 - 每日留底检测报告",
+    response_model=ArchiveDetectDailyReportResponse,
+)
+async def archive_detect_admin_daily_report(
+    date: Optional[str] = Query(None, description="统计日期 YYYY-MM-DD(按批次创建时间),缺省为今天"),
+):
+    """每日留底检测报告:当天全部批次按客户分组的总体判定分布统计。"""
+    date_str = date or datetime.now().strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date 日期格式必须是 YYYY-MM-DD")
+    return await archive_detect_crud.admin_daily_report(date_str)
 
 
 class RejudgeOverallPayload(BaseModel):

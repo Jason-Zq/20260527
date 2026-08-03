@@ -85,7 +85,7 @@
             <article class="tool-card" @click="go('/archive-admin')" tabindex="0" @keydown.enter="go('/archive-admin')">
               <div class="tool-icon icon-admin"><el-icon :size="22"><Reading /></el-icon></div>
               <div class="tool-body">
-                <h4 class="tool-title">审核任务管理</h4>
+                <h4 class="tool-title">检测批次管理</h4>
                 <p class="tool-desc">查看批次、进度、文件结果与 OCR 文本</p>
               </div>
               <el-icon class="tool-arrow"><ArrowRight /></el-icon>
@@ -107,6 +107,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'HomePage' })
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {

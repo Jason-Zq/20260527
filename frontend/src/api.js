@@ -436,6 +436,11 @@ export async function getArchiveAdminFileDetail(recordId) {
   return r.data
 }
 
+export async function getArchiveDailyReport(date) {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/daily-report`, { params: { date } })
+  return r.data
+}
+
 // ==================== Word 模板 相关接口 (v2: anchor-based) ====================
 
 /**

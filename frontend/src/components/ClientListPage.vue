@@ -164,6 +164,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ClientListPage' })
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowLeft, Search, Loading, Plus, Warning, Document, User, Wallet } from '@element-plus/icons-vue'

@@ -260,6 +260,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'SplitEntryPage' })
 import { ref, computed, onUnmounted } from 'vue'
 import { ArrowLeft, Upload, Download, Files, View, Clock, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'

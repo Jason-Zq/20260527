@@ -584,6 +584,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ProfilePage' })
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, MagicStick, Refresh, WarningFilled } from '@element-plus/icons-vue'

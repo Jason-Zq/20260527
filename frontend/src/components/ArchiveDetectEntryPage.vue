@@ -391,6 +391,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ArchiveDetectEntryPage' })
 import { ref, computed, onUnmounted, watch } from 'vue'
 import {
   EditPen, Files, Reading, MagicStick,

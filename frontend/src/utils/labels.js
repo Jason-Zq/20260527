@@ -87,6 +87,33 @@ export function fieldLabelOf(key) {
   return _FIELD_LABELS[key] || key
 }
 
+// ---- 文件留底检测:批次/文件状态与判定映射(检测批次管理页、每日报告页、批次详情弹窗共用) ----
+
+export function verdictLabel(v) {
+  return { match: '符合', partial: '部分符合', mismatch: '不符合', no_text: '无文字' }[v] || '-'
+}
+
+export function verdictTag(v) {
+  if (v === 'match') return 'success'
+  if (v === 'partial') return 'warning'
+  if (v === 'no_text') return 'info'
+  return 'info'
+}
+
+export function batchStatusLabel(s) {
+  return { running: '进行中', done: '完成', error: '失败', pending: '排队中', fetching: '下载中', ocr: 'OCR中', llm: 'AI分析中' }[s] || s || '-'
+}
+
+export function batchStatusTag(s) {
+  if (s === 'done') return 'success'
+  if (s === 'error') return 'danger'
+  return 'warning'
+}
+
+export function sourceKindLabel(v) {
+  return { batch: '业务', recheck: '重审', upload: '上传', url: 'URL' }[v] || v || '-'
+}
+
 // 字段分组(画像成员卡按组分段展示:基础个人信息/护照信息/公司收入/其他证件)
 const _FIELD_GROUP_OF = {
   name: 'basic', name_en: 'basic', gender: 'basic', birth_date: 'basic', birth_place: 'basic',

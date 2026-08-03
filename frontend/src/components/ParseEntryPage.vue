@@ -209,6 +209,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ParseEntryPage' })
 import { ref, computed, onUnmounted, onMounted, reactive, nextTick } from 'vue'
 import { ArrowLeft, Upload, User, Lightning } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'

@@ -52,6 +52,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'ChildAgeLeadsPage' })
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'

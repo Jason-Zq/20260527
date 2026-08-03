@@ -1,91 +1,110 @@
 <template>
   <div class="app-container">
-    <!-- 顶部标题栏(登录页不显示) -->
-    <header v-if="!isLoginPage" class="app-header">
-      <div class="header-left" @click="go('/')">
-        <div class="header-logo"></div>
-        <h1 class="app-title">智能文档审核工作台</h1>
-      </div>
-      <nav class="top-nav">
-                <el-dropdown trigger="hover">
-          <button class="nav-item" :class="{ active: isAnyActive(['/archive-admin', '/archive-detect']) }">文件留底</button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="go('/archive-admin')">审核任务管理</el-dropdown-item>
-              <el-dropdown-item @click="go('/archive-detect')">文件留底检测</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+    <template v-if="!isLoginPage">
+      <!-- 左侧分组侧边栏(Ant Design Pro 经典中后台布局);菜单项配置在 menu.js -->
+      <aside class="sidebar" :class="{ collapsed }">
+        <div class="logo-area" @click="go('/')">
+          <div class="header-logo"></div>
+          <span v-show="!collapsed" class="logo-title">智能文档审核工作台</span>
+        </div>
 
-        <el-dropdown trigger="hover">
-          <button class="nav-item" :class="{ active: isAnyActive(['/ai-api-calls', '/request-logs', '/events']) }">日志消息</button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="go('/ai-api-calls')">AI 调用记录</el-dropdown-item>
-              <el-dropdown-item @click="go('/request-logs')">请求记录</el-dropdown-item>
-              <el-dropdown-item @click="go('/events')">系统日志</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-        
-        <!-- <button class="nav-item" :class="{ active: isActive('/clients') }" @click="go('/clients')">客户档案</button>
-        <button class="nav-item" :class="{ active: isActive('/child-age-leads') }" @click="go('/child-age-leads')">子女年龄线索</button> -->
-        <button class="nav-item" :class="{ active: isActive('/file-info') }" @click="go('/file-info')">文件信息</button>
-        <button class="nav-item" :class="{ active: isActive('/profile') }" @click="go('/profile')">客户画像</button>
-        <button class="nav-item" :class="{ active: isActive('/expiry-reminders') }" @click="go('/expiry-reminders')">到期提醒</button>
-        <button class="nav-item" :class="{ active: isActive('/file-assign') }" @click="go('/file-assign')">文件归属</button>
+        <el-menu
+          ref="menuRef"
+          class="side-menu"
+          :default-active="route.path"
+          :collapse="collapsed"
+          :collapse-transition="false"
+          router
+        >
+          <el-menu-item index="/">
+            <el-icon><HomeFilled /></el-icon>
+            <template #title>首页</template>
+          </el-menu-item>
 
-        <!-- <el-dropdown trigger="click">
-          <button class="nav-item more">更多工具</button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="go('/parse')">AI 材料解析</el-dropdown-item>
-              <el-dropdown-item @click="go('/template')">AI 填写文件</el-dropdown-item>
-              <el-dropdown-item @click="go('/split')">处理超长 PDF</el-dropdown-item>
-              <el-dropdown-item @click="go('/summary')">URL 文件摘要</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown> -->
-      </nav>
-      <div class="header-right">
-        <el-tooltip content="退出登录" placement="bottom">
-          <button class="nav-item logout" @click="onLogout">
-            <el-icon><SwitchButton /></el-icon>
-          </button>
-        </el-tooltip>
-      </div>
-    </header>
+          <el-sub-menu v-for="group in menuGroups" :key="group.key" :index="group.key">
+            <template #title>
+              <el-icon><component :is="group.icon" /></el-icon>
+              <span>{{ group.title }}</span>
+            </template>
+            <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path">
+              <el-icon><component :is="item.icon" /></el-icon>
+              <template #title>{{ item.title }}</template>
+            </el-menu-item>
+          </el-sub-menu>
+        </el-menu>
 
-    <!-- 路由出口：每个页面通过 router-view 渲染 -->
-    <router-view class="full-view" />
+        <div class="sidebar-footer">
+          <el-tooltip :content="collapsed ? '展开菜单' : '收起菜单'" placement="right">
+            <button class="footer-btn" @click="collapsed = !collapsed">
+              <el-icon><Expand v-if="collapsed" /><Fold v-else /></el-icon>
+            </button>
+          </el-tooltip>
+          <el-tooltip content="退出登录" placement="right">
+            <button class="footer-btn logout" @click="onLogout">
+              <el-icon><SwitchButton /></el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+      </aside>
+
+      <!-- 右侧:页签条 + 路由出口(keep-alive 保活已访问页面) -->
+      <main class="main-area">
+        <TagsView />
+        <div class="content-area">
+          <router-view v-slot="{ Component }">
+            <keep-alive :include="cachedNames">
+              <component
+                :is="Component"
+                :key="route.fullPath + ':' + (tabsState.epochs[route.fullPath] || 0)"
+                class="full-view"
+              />
+            </keep-alive>
+          </router-view>
+        </div>
+      </main>
+    </template>
+
+    <!-- 登录页不显示侧边栏 -->
+    <router-view v-else class="full-view" />
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { SwitchButton } from '@element-plus/icons-vue'
+import { SwitchButton, Fold, Expand, HomeFilled } from '@element-plus/icons-vue'
 import { clearToken } from './api'
+import { menuGroups } from './menu'
+import { tabsState, cachedNames, resetTabs } from './tabs'
+import TagsView from './components/TagsView.vue'
 
 const router = useRouter()
 const route = useRoute()
 
+const collapsed = ref(false)
+const menuRef = ref()
+
 const isLoginPage = computed(() => route.path === '/login')
+
+// 当前路由所在分组;路由变化时幂等展开(open 不会收起用户已开的组)
+const activeGroupKey = computed(() =>
+  menuGroups.find((g) => g.items.some((i) => route.path === i.path || route.path.startsWith(i.path + '/')))?.key
+)
+watch(
+  activeGroupKey,
+  (key) => {
+    if (key) nextTick(() => menuRef.value?.open(key))
+  },
+  { immediate: true }
+)
 
 function go(path) {
   router.push(path)
 }
 
-function isActive(path) {
-  return route.path === path || route.path.startsWith(path + '/')
-}
-
-function isAnyActive(paths) {
-  return paths.some((path) => route.path === path || route.path.startsWith(path + '/'))
-}
-
 function onLogout() {
   clearToken()
+  resetTabs()
   router.push('/login')
 }
 </script>
@@ -112,77 +131,157 @@ html, body {
 .app-container {
   height: 100vh;
   display: flex;
-  flex-direction: column;
   background: #f0f2f8;
   color: #1e293b;
 }
 
-.app-header {
-  padding: 0 28px;
-  height: 56px;
-  background: #ffffff;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
+/* ========== 侧边栏 ========== */
+.sidebar {
+  width: 216px;
   flex-shrink: 0;
-  position: relative;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border-right: 1px solid #e8ebf5;
+  transition: width 0.2s ease;
+  overflow: hidden;
 }
 
-.app-header::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+.sidebar.collapsed {
+  width: 64px;
 }
 
-.header-left {
+.logo-area {
+  height: 56px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  padding: 0 14px;
   cursor: pointer;
-  justify-self: start;
+  flex-shrink: 0;
+  border-bottom: 1px solid #f1f5f9;
+  white-space: nowrap;
 }
 
-.top-nav {
+.sidebar.collapsed .logo-area {
+  padding: 0;
+  justify-content: center;
+}
+
+.logo-title {
+  font-size: 15px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: 0.5px;
+}
+
+.side-menu {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-right: none;
+  padding: 8px;
+  --el-menu-text-color: #475569;
+  --el-menu-hover-bg-color: #f5f7ff;
+  --el-menu-active-color: #4f46e5;
+  --el-menu-item-height: 42px;
+}
+
+.side-menu :deep(.el-menu-item),
+.side-menu :deep(.el-sub-menu__title) {
+  border-radius: 8px;
+  margin: 2px 0;
+  font-weight: 500;
+}
+
+.side-menu :deep(.el-menu-item.is-active) {
+  background: #eef2ff;
+  font-weight: 600;
+}
+
+/* 折叠态去掉横向内边距,图标与底部按钮对齐;分组图标 hover 出 flyout 子菜单 */
+.side-menu.el-menu--collapse {
+  padding: 8px 0;
+}
+
+/* 子项激活时一级标题高亮(不加背景色,背景留给具体激活子项) */
+.side-menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
+  color: var(--el-menu-active-color);
+  font-weight: 600;
+}
+
+.sidebar-footer {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
-  justify-self: center;
+  padding: 10px 12px;
+  border-top: 1px solid #f1f5f9;
 }
 
-.header-right {
-  justify-self: end;
+.sidebar.collapsed .sidebar-footer {
+  flex-direction: column;
+  padding: 10px 0;
 }
 
-.nav-item {
+.footer-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   color: #64748b;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 7px 10px;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
-.nav-item:hover,
-.nav-item.active {
-  background: #eef2ff;
+.footer-btn:hover {
+  background: #f1f5f9;
   color: #4f46e5;
 }
 
-.nav-item.more {
-  outline: none;
+.footer-btn.logout:hover {
+  background: #fef2f2;
+  color: #ef4444;
+}
+
+/* ========== 内容区 ========== */
+.main-area {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-area {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.full-view {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 登录页:router-view 是 app-container 唯一直接子节点 */
+.app-container > .full-view {
+  flex: 1;
 }
 
 .header-logo {
   width: 32px;
   height: 32px;
+  flex-shrink: 0;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
   border-radius: 8px;
   position: relative;
@@ -197,22 +296,6 @@ html, body {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.5px;
-}
-
-.app-title {
-  font-size: 17px;
-  font-weight: 700;
-  margin: 0;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  letter-spacing: 0.5px;
-}
-
-.full-view {
-  flex: 1;
-  overflow: hidden;
 }
 
 /* 滚动条 */

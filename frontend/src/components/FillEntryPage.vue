@@ -31,6 +31,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'FillEntryPage' })
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'

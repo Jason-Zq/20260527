@@ -121,6 +121,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'RequestLogsPage' })
 import { ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'

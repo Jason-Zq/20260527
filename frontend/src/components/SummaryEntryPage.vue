@@ -226,6 +226,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'SummaryEntryPage' })
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import {
   ArrowLeft, Link, MagicStick, Reading, Document, Star,
