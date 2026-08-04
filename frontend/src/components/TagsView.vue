@@ -15,6 +15,14 @@
       </div>
     </div>
 
+    <!-- 右侧固定操作区:对当前激活 tab 起作用的下拉(与右键菜单同一浮层/handler) -->
+    <div class="tags-actions">
+      <span class="divider"></span>
+      <button ref="moreBtnRef" class="more-btn" title="页签操作" @click.stop="openMoreMenu">
+        <el-icon><ArrowDown /></el-icon>
+      </button>
+    </div>
+
     <!-- 右键菜单(teleport 到 body,避免被 tab 条横向滚动裁剪) -->
     <teleport to="body">
       <ul
@@ -34,7 +42,7 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Close, Refresh, CircleClose, FolderDelete } from '@element-plus/icons-vue'
+import { Close, Refresh, CircleClose, FolderDelete, ArrowDown } from '@element-plus/icons-vue'
 import { tabsState, addTab, closeTab, closeOthers, closeAll, refreshTab } from '../tabs'
 
 const route = useRoute()
@@ -97,13 +105,26 @@ function onWheel(e) {
 
 // ---- 右键菜单 ----
 const menu = reactive({ visible: false, left: 0, top: 0, tab: null })
+const moreBtnRef = ref()
 
-function openMenu(tab, e) {
+function openMenuAt(tab, x, y) {
   menu.tab = tab
   // 防止菜单超出视口右/下边缘
-  menu.left = Math.min(e.clientX, window.innerWidth - 140)
-  menu.top = Math.min(e.clientY, window.innerHeight - 150)
+  menu.left = Math.min(x, window.innerWidth - 140)
+  menu.top = Math.min(y, window.innerHeight - 150)
   menu.visible = true
+}
+
+function openMenu(tab, e) {
+  openMenuAt(tab, e.clientX, e.clientY)
+}
+
+// 右侧下拉:作用于当前激活 tab,菜单右对齐钉在按钮下方
+function openMoreMenu() {
+  const tab = tabsState.tabs.find((t) => t.path === route.fullPath) || null
+  const rect = moreBtnRef.value?.getBoundingClientRect()
+  if (!rect) return
+  openMenuAt(tab, rect.right - 134, rect.bottom + 6)
 }
 
 function closeMenu() {
@@ -126,6 +147,8 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 }
 
 .tags-scroll {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -177,6 +200,40 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 .tag-close:hover {
   background: #c7d2fe;
   color: #ffffff;
+}
+
+/* 右侧固定操作区 */
+.tags-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.tags-actions .divider {
+  width: 1px;
+  height: 16px;
+  background: #e2e8f0;
+}
+
+.more-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.more-btn:hover {
+  background: #f1f5f9;
+  color: #4f46e5;
 }
 
 /* 右键菜单(teleport 到 body,scoped 的 data-v 属性仍会生效) */

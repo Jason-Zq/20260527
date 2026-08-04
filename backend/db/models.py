@@ -616,7 +616,7 @@ class SystemEvent(Base):
 
 
 class ApiRequestLog(Base):
-    """API 请求记录。middleware 自动拦截 /api/archive-detect/* 写入,保留 30 天。"""
+    """API 外部请求日志。middleware 自动拦截 /api/archive-detect/* 写入,保留 30 天。"""
     __tablename__ = "api_request_logs"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -636,7 +636,7 @@ class ApiRequestLog(Base):
 
 
 class ExternalApiLog(Base):
-    """出站外部接口调用记录:URL 刷新(getFileDownloadUrl)/ LLM。保留 30 天。"""
+    """出站调用外部接口记录:URL 刷新(getFileDownloadUrl)/ LLM。保留 30 天。"""
     __tablename__ = "external_api_logs"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)

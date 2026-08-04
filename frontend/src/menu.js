@@ -19,9 +19,9 @@ export const menuGroups = [
     icon: Files,
     items: [
       { path: '/archive-daily-report', title: '每日留底检测报告', icon: DataAnalysis },
-      { path: '/archive-detect', title: '文件留底检测', icon: DocumentChecked },
       { path: '/archive-admin', title: '检测批次管理', icon: Tickets },
       { path: '/file-info', title: '文件信息查询', icon: Document },
+      { path: '/archive-detect', title: '文件留底检测', icon: DocumentChecked },
     ],
   },
   {
@@ -40,8 +40,8 @@ export const menuGroups = [
     icon: Monitor,
     items: [
       { path: '/ai-api-calls', title: 'AI 调用记录', icon: Cpu },
-      { path: '/request-logs', title: '请求记录', icon: List },
-      { path: '/external-api-logs', title: '外部接口记录', icon: Connection },
+      { path: '/request-logs', title: '外部请求日志', icon: List },
+      { path: '/external-api-logs', title: '调用外部接口记录', icon: Connection },
       { path: '/events', title: '系统事件', icon: Bell },
     ],
   },

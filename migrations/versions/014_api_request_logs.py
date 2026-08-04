@@ -1,4 +1,4 @@
-"""API 请求记录表 api_request_logs。
+"""API 外部请求日志表 api_request_logs。
 
 Revision ID: 014_api_request_logs
 Revises: 013_worker_lease

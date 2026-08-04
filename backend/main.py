@@ -74,13 +74,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API 请求记录中间件(纯 ASGI,可安全读 body 并重放给下游)
+# API 外部请求日志中间件(纯 ASGI,可安全读 body 并重放给下游)
 from middleware.request_log_middleware import RequestLogMiddleware
 app.add_middleware(RequestLogMiddleware)
 
 # 鉴权中间件(纯 ASGI,统一 Bearer Token 校验)。
 # Starlette 中间件后注册先执行:Auth 后注册 = 比 RequestLog 先执行,
-# 未授权请求直接 401,不会被请求记录中间件入库。
+# 未授权请求直接 401,不会被外部请求日志中间件入库。
 from middleware.auth_middleware import AuthMiddleware
 app.add_middleware(AuthMiddleware)
 
@@ -2148,30 +2148,30 @@ async def _split_cleanup_loop():
                 print(f"[event_gc] 清理 {deleted_events} 条 >30 天的事件")
         except Exception as e:
             print(f"[event_gc] 异常(忽略): {e}")
-        # 请求记录 GC:30 天
+        # 外部请求日志 GC:30 天
         try:
             from db import request_log_crud as _rlc
             deleted_req = await _rlc.delete_request_logs_older_than(days=30)
             if deleted_req:
-                print(f"[request_log_gc] 清理 {deleted_req} 条 >30 天的请求记录")
+                print(f"[request_log_gc] 清理 {deleted_req} 条 >30 天的外部请求日志")
                 event_service.log_event(
                     severity="info",
                     category="gc.cleanup",
-                    message=f"清理 {deleted_req} 条 >30 天的请求记录",
+                    message=f"清理 {deleted_req} 条 >30 天的外部请求日志",
                     context={"table": "api_request_logs", "deleted": deleted_req, "days": 30},
                 )
         except Exception as e:
             print(f"[request_log_gc] 异常(忽略): {e}")
-        # 外部接口调用记录 GC:30 天
+        # 调用外部接口记录 GC:30 天
         try:
             from db import external_api_log_crud as _ealc
             deleted_ext = await _ealc.delete_external_api_logs_older_than(days=30)
             if deleted_ext:
-                print(f"[external_api_log_gc] 清理 {deleted_ext} 条 >30 天的外部接口记录")
+                print(f"[external_api_log_gc] 清理 {deleted_ext} 条 >30 天的调用外部接口记录")
                 event_service.log_event(
                     severity="info",
                     category="gc.cleanup",
-                    message=f"清理 {deleted_ext} 条 >30 天的外部接口记录",
+                    message=f"清理 {deleted_ext} 条 >30 天的调用外部接口记录",
                     context={"table": "external_api_logs", "deleted": deleted_ext, "days": 30},
                 )
         except Exception as e:
@@ -2832,7 +2832,7 @@ async def admin_event_categories():
 @app.get(
     "/api/admin/request-logs",
     tags=["运维"],
-    summary="请求记录查询",
+    summary="外部请求日志查询",
 )
 async def admin_list_request_logs(
     source: Optional[str] = Query(None, description="business/admin/poll/other"),
@@ -2871,7 +2871,7 @@ async def admin_list_request_logs(
 @app.get(
     "/api/admin/external-api-logs",
     tags=["运维"],
-    summary="外部接口调用记录查询",
+    summary="调用外部接口记录查询",
 )
 async def admin_list_external_api_logs(
     service: Optional[str] = Query(None, description="refresh_url | llm"),

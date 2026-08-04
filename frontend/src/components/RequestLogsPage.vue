@@ -3,7 +3,7 @@
     <div class="rlogs-header">
       <div class="rlogs-title">
         <span class="title-indicator"></span>
-        请求记录
+        外部请求日志
       </div>
       <div class="header-actions">
         <span class="dim" style="font-size: 12px; margin-right: 12px">

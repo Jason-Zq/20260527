@@ -721,7 +721,7 @@ export async function listEventCategories() {
 
 
 /**
- * 请求记录列表查询。
+ * 外部请求日志列表查询。
  * @param {Object} params - { method, path, since, until, limit, offset }
  * @returns {Promise<{items: Array, total: number}>}
  */

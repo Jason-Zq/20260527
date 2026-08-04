@@ -64,7 +64,7 @@
 │   │   ├── field_router.py          # OCR 字段名 → 表/列 路由表
 │   │   └── *_crud.py                # 其他业务 CRUD
 │   ├── middleware/
-│   │   └── request_log_middleware.py # 纯 ASGI 请求记录中间件
+│   │   └── request_log_middleware.py # 纯 ASGI 外部请求日志中间件
 │   └── requirements.txt             # Python 依赖清单
 ├── frontend/                        # Vue 3 前端
 │   ├── package.json                 # npm 脚本与依赖

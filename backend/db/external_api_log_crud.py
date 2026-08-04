@@ -1,4 +1,4 @@
-"""external_api_logs CRUD:出站外部接口调用记录(URL 刷新 / LLM)。"""
+"""external_api_logs CRUD:出站调用外部接口记录(URL 刷新 / LLM)。"""
 
 import json
 from datetime import datetime, timedelta

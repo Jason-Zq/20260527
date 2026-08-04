@@ -71,51 +71,6 @@
           </div>
         </section>
 
-        <!-- 客户预览 -->
-        <section class="card">
-          <div class="table-head">
-            <span>客户预览</span>
-            <span class="dim">点击数字查看对应批次</span>
-          </div>
-          <el-table :data="report.clients" stripe empty-text="暂无客户批次">
-            <el-table-column label="客户" min-width="150">
-              <template #default="{ row }">
-                <div class="client-name">{{ row.name }}</div>
-                <div class="dim mono">{{ row.client_code || '-' }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="批次" width="70" align="center" prop="batches" sortable />
-            <el-table-column label="文件" width="70" align="center" prop="files" />
-            <el-table-column v-for="k in KPI_CARDS" :key="k.key" :label="k.label" width="90" align="center">
-              <template #default="{ row }">
-                <el-button
-                  v-if="row[k.key] > 0 && row.client_id != null"
-                  type="primary" link size="small"
-                  class="num-link" :style="{ color: k.color }"
-                  @click="openDrill(k, row)"
-                >{{ row[k.key] }}</el-button>
-                <span v-else-if="row[k.key] > 0" :style="{ color: k.color }">{{ row[k.key] }}</span>
-                <span v-else class="dim">-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="平均分" width="90" align="center">
-              <template #default="{ row }">
-                <strong :style="{ color: scoreColor(row.avg_score) }">{{ row.avg_score ?? '-' }}</strong>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="100" align="center">
-              <template #default="{ row }">
-                <el-button
-                  v-if="row.client_id != null"
-                  type="primary" link size="small"
-                  @click="openDrill(ALL_CARD, row)"
-                >全部批次</el-button>
-                <span v-else class="dim">-</span>
-              </template>
-            </el-table-column>
-          </el-table>
-        </section>
-
         <!-- 钻取明细 -->
         <section v-if="drill" class="card drill-card">
           <div class="table-head">
@@ -194,7 +149,6 @@ const KPI_CARDS = [
   { key: 'in_progress', label: '进行中', color: '#2563eb', kind: 'status', value: 'running' },
   { key: 'error', label: '失败', color: '#64748b', kind: 'status', value: 'error' },
 ]
-const ALL_CARD = { key: 'all', label: '全部', kind: 'all', value: '' }
 
 function todayStr() {
   const d = new Date()
@@ -206,7 +160,7 @@ const date = ref(todayStr())
 const loading = ref(false)
 const report = ref(null)
 
-// 钻取状态:{kind: verdict|status|all, value, label, client} (client=null 表示全部客户)
+// 钻取状态:{kind: verdict|status, value, label}
 const drill = ref(null)
 const drillBatches = ref([])
 const drillLoading = ref(false)
@@ -253,22 +207,21 @@ function scoreColor(s) {
 }
 
 function isDrill(k) {
-  return drill.value && drill.value.kind === k.kind && drill.value.value === k.value && !drill.value.client
+  return drill.value && drill.value.kind === k.kind && drill.value.value === k.value
 }
 
-async function openDrill(k, client = null) {
-  // 再点一次已选中的全量 KPI 卡 = 收起
-  if (isDrill(k) && !client) {
+async function openDrill(k) {
+  // 再点一次已选中的 KPI 卡 = 收起
+  if (isDrill(k)) {
     drill.value = null
     drillBatches.value = []
     return
   }
-  drill.value = { kind: k.kind, value: k.value, label: k.label, client }
+  drill.value = { kind: k.kind, value: k.value, label: k.label }
   drillLoading.value = true
   drillBatches.value = []
   try {
     const params = { date_from: date.value, date_to: date.value, limit: 100 }
-    if (client) params.client_code = client.client_code
     if (k.kind === 'verdict') params.overall_verdict = k.value
     if (k.kind === 'status') params.status = k.value
     const resp = await listArchiveAdminBatches(params)
@@ -282,9 +235,7 @@ async function openDrill(k, client = null) {
 
 const drillTitle = computed(() => {
   if (!drill.value) return ''
-  const who = drill.value.client ? `${drill.value.client.name} · ` : ''
-  const what = drill.value.kind === 'all' ? '全部' : drill.value.label
-  return `${who}${what}批次（${drillBatches.value.length}）`
+  return `${drill.value.label}批次（${drillBatches.value.length}）`
 })
 
 function selectBatch(row) {
@@ -330,10 +281,6 @@ onMounted(loadReport)
 .dist-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; font-size: 12px; color: #475569; }
 .legend-item { display: inline-flex; align-items: center; gap: 6px; }
 .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-
-/* 客户预览 */
-.client-name { font-weight: 600; color: #1e293b; }
-.num-link { font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums; }
 
 /* 钻取明细 */
 .drill-card { border-color: #fed7aa; }

@@ -168,16 +168,16 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 - 员工前端：`POST /api/auth/login` 校验 `admin_user`/`admin_password`，通过返回 biz_api_key 当会话 token；前端存 localStorage，axios 自动带 `Authorization: Bearer`，401 清 token 跳 `/login`。业务方直接拿 biz_api_key 走 Bearer。
 - 白名单（免鉴权）：`POST /api/auth/login`、`GET /api/healthz`、文档（`/docs /redoc /openapi* /swagger*`）、**业务方集成接口前缀 `/api/archive-detect/business/batch`**（提交+轮询，业务方不带 token，与历史行为一致）。除此之外的所有 `/api/*` 都要 Bearer。
 - 未配置 `biz_api_key` 时全部放行（本地开发）；`main.py` startup 调 `reset_auth_cache()` 让配置改动即时生效。
-- 中间件顺序：Auth 比 RequestLog 后注册 = 先执行（Starlette 后注册先执行），被 401 挡掉的请求不进请求记录。
+- 中间件顺序：Auth 比 RequestLog 后注册 = 先执行（Starlette 后注册先执行），被 401 挡掉的请求不进外部请求日志。
 
 ## 架构总览
 
 ```text
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
-  frontend/src/router.js                 路由: /login, /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /file-info, /profile, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads;全局守卫:无 token 一律跳 /login
+  frontend/src/router.js                 路由: /login, /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /archive-daily-report, /file-info, /profile, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads;全局守卫:无 token 一律跳 /login
   frontend/src/api.js                    axios API 封装(token 存 localStorage,请求拦截器自动带 Bearer,401 清 token 跳登录)
   frontend/src/menu.js                   侧边栏菜单配置(与路由分离;App.vue 渲染左侧分组 el-sub-menu,点击展开/收缩,可折叠;新增页面=router.js 加路由+这里加项)
-  frontend/src/tabs.js + components/TagsView.vue   多页签(tags-view):keep-alive 保活已访问页面,右键菜单(刷新/关闭其他/关闭全部);**新增页面还需:路由 meta 加 title/cache + 页面组件 defineOptions name**(异步组件拿不到 name,keep-alive include 走 meta.cache)
+  frontend/src/tabs.js + components/TagsView.vue   多页签(tags-view):keep-alive 保活已访问页面,右键菜单 + 右侧固定下拉(同一 teleported 浮层,刷新/关闭其他/关闭全部);**新增页面还需:路由 meta 加 title/cache + 页面组件 defineOptions name**(异步组件拿不到 name,keep-alive include 走 meta.cache)
   frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ExternalApiLogsPage / ChildAgeLeadsPage)
 
 后端: FastAPI + SQLAlchemy 2 async + Alembic
@@ -234,8 +234,8 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - `archive_detect_folder_summaries`：进展包维度滚动总报告（多版本，后续阶段使用）。
 - `client_profile_generation_tasks`：客户档案结构化生成任务；记录源文件、抽取结果、写入统计、状态。
 - `system_events`：业务事件流(severity/category/message/context),前端 `/events` 页查看,GC 保留 30 天。
-- `api_request_logs`：API 请求记录,中间件只记 `POST /api/archive-detect/business/batch` 的请求体,前端 `/request-logs` 页查看,GC 保留 30 天。
-- `external_api_logs`：出站外部接口调用记录(`service=refresh_url`),记地址/请求参数/返回全文/耗时/成败,前端 `/external-api-logs` 页,GC 保留 30 天。URL 刷新在 `file_fetcher.refresh_download_url` 埋点(async create_task)。
+- `api_request_logs`：API 外部请求日志,中间件只记 `POST /api/archive-detect/business/batch` 的请求体,前端 `/request-logs` 页查看,GC 保留 30 天。
+- `external_api_logs`：出站调用外部接口记录(`service=refresh_url`),记地址/请求参数/返回全文/耗时/成败,前端 `/external-api-logs` 页,GC 保留 30 天。URL 刷新在 `file_fetcher.refresh_download_url` 埋点(async create_task)。
 - `ai_api_calls`：AI/LLM API 调用记录,记 operation/model/prompt/response/耗时/成败/业务上下文(batch_id/file_id/client_code/task_id),前端 `/ai-api-calls` 页,GC 保留 30 天。LLM 在 `llm_service._call_llm` 埋点--**注意用同步 `insert_ai_api_call_sync`**,因为它跑在 worker 线程(asyncio.to_thread)里,async 引擎连接池绑主 loop 不能跨线程用。**LLM 的 prompt/response 原文直存未脱敏**(业务决策,含脱敏前 OCR)。**入库前在 CRUD 层统一清洗**:去 NUL/控制字符(PG text 列不接受 ``,OCR 文本易混入,此前被 `except` 静默吞掉丢日志)、prompt/response 截断 50KB、error_msg 截断 2KB;列表接口只回 500 字预览,详情走单独的 `GET /api/admin/ai-api-calls/{row_id}` 拉全文。引擎层(asyncpg/psycopg2)已显式 `client_encoding=utf8`。
 - `profile_import_tasks`：客户画像导入任务；一次接口导入一户一行,记录进度与各类计数(4 类证件各筛出数/提取数/失败数/current_file/needs_review_count/household_id)。
 - `customer_files`：客户文件库,`file_code` 全局唯一(重复导入只 re-link 不重复下载/OCR);存全量 OCR——**fresh=未脱敏原文**(与 ai_api_calls 存原文的既定决策一致)、reused=archive_detect 脱敏文本,`ocr_source` 区分;分类结果 `doc_type`(12 类:id_card/hukou/degree_cert/birth_cert/passport/kyc_form/marriage_cert/property_cert/no_crime/approval/submission/receipt + other) + `classify_by(keyword/llm/none)`;`local_path` 原件落盘 output/customer_files/(30 天 GC,DB/OCR 永留);`review_status/review_reason/quality_score` 复核与质量评级;`person_id` 手动归属人(migration 021,文件↔人关联权威载体,与 write_stats 归因并集使用);`affter_entryoid` 售后项目OID + `project_name` 项目显示名(migration 022,项目案件路由键/反范式展示列,来自接口嵌套 list[] 项目外壳);`content_sha256` 原件内容 hash(migration 025,同家庭跨项目同内容文件去重键,下载后计算,命中兄弟行复用 OCR/分类)。`profile_households` 另有 `customer_code/crm_oid`(接口属性,只补空)。
@@ -312,7 +312,8 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 
 - 路由 `/api/archive-detect/admin/*`，前端 `ArchiveAdminPage.vue`（`/archive-admin`）。
 - 筛选:状态/来源/批次ID/客户/进展/日期范围 + **总体判断多选(match/partial/mismatch)** + **仅看有失败文件**(EXISTS 子查询)。
-- 详情弹窗展示批次全量信息(批次/客户/进展/办理人/项目/判定标准/总体/识别完成时间等),文件表含「文件编码(file_id)」列;数据源 `pollBusinessBatch`(business)或 `pollArchiveDetect`(历史 quick 批次)兜底。
+- 详情弹窗展示批次全量信息(批次/客户/进展/办理人/项目/判定标准/总体/识别完成时间等),文件表含「文件编码(file_id)」列;数据源 `pollBusinessBatch`(business)或 `pollArchiveDetect`(历史 quick 批次)兜底。**弹窗已抽为共享组件 `BatchDetailDialog.vue`**(2026-08-03,审核任务管理与每日报告页共用)。
+- **每日留底检测报告**(2026-08-03):`GET /api/archive-detect/admin/daily-report?date=` → `archive_detect_crud.admin_daily_report`——按批次 created_at 取当日全部批次按客户分组统计:done 按 overall_verdict 分桶 match/partial/mismatch/other、status=error 记 error、其余记 in_progress,avg_score 仅统计 done 且有分;无客户批次(历史 quick)归入合成桶。前端 `ArchiveDailyReportPage.vue`(`/archive-daily-report`,菜单「文件留底」组),点客户可看当日批次明细并弹 BatchDetailDialog。
 - 写操作:单批重审(`rerun/{batch_id}`)、按新规则批量重判(`admin/rejudge-overall`)、批量重审(`admin/rerun-files-batch`)—— 见上文「重审/重跑/批量操作」。
 
 ### 文件信息（文件维度查询）
@@ -320,11 +321,11 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - 前端 `FileInfoPage.vue`（`/file-info`）→ `GET /api/admin/file-infos`（Swagger tag「文件信息」）→ `archive_detect_crud.admin_list_files`。
 - 以**单文件为维度**跨批次查询，每行带批次/客户/进展上下文；支持批次号、文件编码、文件名、状态、判定、客户编码/姓名、进展名、办理人模糊筛选 + limit/offset 分页。
 
-### 可观测性：事件流 + 请求记录 + 外部接口记录
+### 可观测性：事件流 + 外部请求日志 + 调用外部接口记录
 
 - **事件流**：`event_service.log_event(severity, category, message, context)` fire-and-forget 写 `system_events`,前端 `/events`(EventsPage.vue)。category 常量在 event_service.py(batch.*/file.*/worker.crash/llm.timeout 等)。
-- **请求记录**：纯 ASGI 中间件 `request_log_middleware`(在 main.py 用 `app.add_middleware` 注册,不能用 `BaseHTTPMiddleware`——它读 body 会噎死下游 Pydantic)。只记 `POST /api/archive-detect/business/batch` 的 JSON 请求体,前端 `/request-logs`(RequestLogsPage.vue)。
-- **外部接口记录**：URL 刷新等非 AI 出站调用记 `external_api_logs`,前端 `/external-api-logs`(ExternalApiLogsPage.vue)。
+- **外部请求日志**：纯 ASGI 中间件 `request_log_middleware`(在 main.py 用 `app.add_middleware` 注册,不能用 `BaseHTTPMiddleware`——它读 body 会噎死下游 Pydantic)。只记 `POST /api/archive-detect/business/batch` 的 JSON 请求体,前端 `/request-logs`(RequestLogsPage.vue)。
+- **调用外部接口记录**：URL 刷新等非 AI 出站调用记 `external_api_logs`,前端 `/external-api-logs`(ExternalApiLogsPage.vue)。
 - **AI/LLM 调用记录**：所有 LLM 调用记 `ai_api_calls`,前端 `/ai-api-calls`(AiApiCallsPage.vue),支持按 operation/model/batch_id/file_id/client_code/task_id 筛选。见「数据库重点」里的埋点说明。
 - 四张表(system_events / api_request_logs / external_api_logs / ai_api_calls)都在 `_split_cleanup_loop` 里 GC 30 天。
 
@@ -364,7 +365,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - **前端交互(画像弹窗)**：人员卡片字段按 4 大组分段(基础个人信息/护照信息/公司收入/其他证件)+分割线,组内字段横向 3 列(`utils/labels.js` 的 `groupPersonFields`);人员卡 **inline 编辑**(编辑→字段变 input→保存/取消,`POST /api/profile/persons/{id}/field` 走 `correct_person_field`;**前端 diff 只提交真正改动的字段**——后端该端点语义是"永远覆盖并标 corrected",整包提交会把未改动字段误标「已修正」;全无改动不发请求直接退出编辑态,可信度抽屉保存同理;**修正「姓名」字段会同事务同步 `person.name`/`name_folded`,撞家庭内他人折叠键报 ValueError 提示走合并**);「查看文件」按钮开 `FileListDrawer`(通用文件清单抽屉,纯展示:文件名称/文件类型/操作三列表格,数据父组件注入;人员= `listPersonFiles`、家庭资产区块级「查看文件」= `listHouseholdAssetFiles` 取全部资产 source_file_id 去重),点行内「查看」弹 `FilePreviewDialog`(append-to-body 最外层,宽 70%、上下拉满,整窗只显示原件 img/iframe PDF,Office 文件走 preview-pdf 转 PDF 预览,其他类型提示不支持预览);字段**可信度徽标**(高/中/低)点击开**字段来源与可信度抽屉**(上字段编辑+确定,中可信度构成,下来源文件列表带一致/不一致标点「查看」弹同一 `FilePreviewDialog` 大预览,保存同 `correct_person_field`)。
 - **文件清单 tab**：上方文件表格(含「提取」列=`latest_extract_status`,`list_task_files` 用 DISTINCT ON 取最新提取状态)+点行/查看详情弹三栏弹窗(左原件 iframe/中 OCR/右提取结果详情,`profile.extractions` 按 customer_file_id 前端过滤);三栏详情已从 inline 改弹窗。
 - **抽屉并排模式**：字段来源与可信度/查看文件抽屉 `:modal=false` + `modal-class=side-drawer-overlay`(CSS pointer-events none 穿透 + 抽屉 auto),客户画像 el-dialog 用 `profileShift` 动态让出右侧(`:width=profileDialogWidth` + marginRight),两者并排同时操作;抽屉左边缘可拖拽调宽;关闭客户画像 watch 联动关右侧抽屉。
-- **任务列表**：状态+客户名+**客户编码**查询（`list_import_tasks` 按家庭 customer_code 子查询筛选，行返回 `customer_code`）+ 分页(默认 10 条,10/25/50/100)；表格含「客户编码」列；画像弹窗头部客户编码与姓名同款大粗样式（`.profile-dialog-title`），旁挂 CRM OID；客户画像菜单页样式对齐请求记录页(白色顶栏+灰背景+filter-card 查询区+表格 card)。
+- **任务列表**：状态+客户名+**客户编码**查询（`list_import_tasks` 按家庭 customer_code 子查询筛选，行返回 `customer_code`）+ 分页(默认 10 条,10/25/50/100)；表格含「客户编码」列；画像弹窗头部客户编码与姓名同款大粗样式（`.profile-dialog-title`），旁挂 CRM OID；客户画像菜单页样式对齐外部请求日志页(白色顶栏+灰背景+filter-card 查询区+表格 card)。
 - **文件预览**：画像内原件用 `img`(图片)/`iframe`(PDF)预览;**Office 原件(doc/docx/xls/xlsx/ppt/pptx)走 `GET /api/profile/files/{id}/preview-pdf`**(soffice 按需转 PDF,缓存 `output/customer_files/previews/{file_id}.pdf`,无 LibreOffice 返回 501 前端回落"不支持在线预览");其他类型提示"不支持在线预览",避免 iframe 触发浏览器下载。
 - 单文件异常只标 error 不杀任务；任务级事件 `profile.import.done/error`、提取事件 `extract.done/error/skip` 进 `system_events`。
 - **任务删除（删除画像，2026-07-28 语义反转）**：`DELETE /api/profile/tasks/{task_id}`（前端任务列表「删除」）→ `customer_file_crud.delete_import_task`：**任务有 household 时 = 删除画像**（委托 `delete_household_profile`）——只 DELETE household 行，DB CASCADE 删 persons/person_fields/assets/cases，`profile_import_tasks.household_id` 被 FK(SET NULL) 自动置空，**任务/文件/OCR/提取结果/磁盘原件全部保留**（删前清 `customer_files.person_id` 裸列防悬挂）；重新导入按 file_code re-link 即可复用 OCR 重建画像。无 household 时维持原行为：任务级删，`customer_files`/`doc_extract_results` CASCADE + 磁盘原件连带删。`run_import` 在每个文件边界查任务是否还在，被删则协作停止。事件 `profile.import.deleted`。

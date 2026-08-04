@@ -1,4 +1,4 @@
-"""API 请求记录中间件。只记录业务批次提交接口,fire-and-forget 写 DB。
+"""API 外部请求日志中间件。只记录业务批次提交接口,fire-and-forget 写 DB。
 
 实现细节:
 - 使用纯 ASGI middleware(不用 starlette.BaseHTTPMiddleware)
