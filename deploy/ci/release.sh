@@ -56,11 +56,12 @@ start_services(){
   mkdir -p "$LOG_DIR"
   cd "$APP_DIR/backend"
   local ENV="PATH=/usr/local/bin:/usr/bin HOME=/root PYTHONIOENCODING=utf-8 PYTHONUTF8=1"
+  # 注意 9>&-:必须显式关掉继承来的 flock fd,否则守护进程会让发布锁永远被占(flock 随 open file description 继承)
   env -i $ENV setsid nohup venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8765 \
-    >> "$LOG_DIR/uvicorn.log" 2>&1 </dev/null &
+    9>&- >> "$LOG_DIR/uvicorn.log" 2>&1 </dev/null &
   for i in $(seq 1 "$WORKERS"); do
     env -i $ENV setsid nohup venv/bin/python -m worker_runner --worker-id "worker-$i" \
-      >> "$LOG_DIR/worker-$i.log" 2>&1 </dev/null &
+      9>&- >> "$LOG_DIR/worker-$i.log" 2>&1 </dev/null &
   done
 }
 
