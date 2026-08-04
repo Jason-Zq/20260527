@@ -2162,16 +2162,16 @@ async def _split_cleanup_loop():
                 )
         except Exception as e:
             print(f"[request_log_gc] 异常(忽略): {e}")
-        # 调用外部接口记录 GC:30 天
+        # 调用外部接口 GC:30 天
         try:
             from db import external_api_log_crud as _ealc
             deleted_ext = await _ealc.delete_external_api_logs_older_than(days=30)
             if deleted_ext:
-                print(f"[external_api_log_gc] 清理 {deleted_ext} 条 >30 天的调用外部接口记录")
+                print(f"[external_api_log_gc] 清理 {deleted_ext} 条 >30 天的调用外部接口")
                 event_service.log_event(
                     severity="info",
                     category="gc.cleanup",
-                    message=f"清理 {deleted_ext} 条 >30 天的调用外部接口记录",
+                    message=f"清理 {deleted_ext} 条 >30 天的调用外部接口",
                     context={"table": "external_api_logs", "deleted": deleted_ext, "days": 30},
                 )
         except Exception as e:
@@ -2871,7 +2871,7 @@ async def admin_list_request_logs(
 @app.get(
     "/api/admin/external-api-logs",
     tags=["运维"],
-    summary="调用外部接口记录查询",
+    summary="调用外部接口查询",
 )
 async def admin_list_external_api_logs(
     service: Optional[str] = Query(None, description="refresh_url | llm"),

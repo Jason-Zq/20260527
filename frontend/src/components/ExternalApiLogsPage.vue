@@ -3,7 +3,7 @@
     <div class="ealog-header">
       <div class="ealog-title">
         <span class="title-indicator"></span>
-        调用外部接口记录
+        调用外部接口
       </div>
       <div class="header-actions">
         <span class="dim" style="font-size: 12px; margin-right: 12px">

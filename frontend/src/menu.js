@@ -41,7 +41,7 @@ export const menuGroups = [
     items: [
       { path: '/ai-api-calls', title: 'AI 调用记录', icon: Cpu },
       { path: '/request-logs', title: '外部请求日志', icon: List },
-      { path: '/external-api-logs', title: '调用外部接口记录', icon: Connection },
+      { path: '/external-api-logs', title: '调用外部接口', icon: Connection },
       { path: '/events', title: '系统事件', icon: Bell },
     ],
   },

@@ -636,7 +636,7 @@ class ApiRequestLog(Base):
 
 
 class ExternalApiLog(Base):
-    """出站调用外部接口记录:URL 刷新(getFileDownloadUrl)/ LLM。保留 30 天。"""
+    """出站调用外部接口:URL 刷新(getFileDownloadUrl)/ LLM。保留 30 天。"""
     __tablename__ = "external_api_logs"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)

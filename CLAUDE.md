@@ -235,7 +235,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - `client_profile_generation_tasks`：客户档案结构化生成任务；记录源文件、抽取结果、写入统计、状态。
 - `system_events`：业务事件流(severity/category/message/context),前端 `/events` 页查看,GC 保留 30 天。
 - `api_request_logs`：API 外部请求日志,中间件只记 `POST /api/archive-detect/business/batch` 的请求体,前端 `/request-logs` 页查看,GC 保留 30 天。
-- `external_api_logs`：出站调用外部接口记录(`service=refresh_url`),记地址/请求参数/返回全文/耗时/成败,前端 `/external-api-logs` 页,GC 保留 30 天。URL 刷新在 `file_fetcher.refresh_download_url` 埋点(async create_task)。
+- `external_api_logs`：出站调用外部接口(`service=refresh_url`),记地址/请求参数/返回全文/耗时/成败,前端 `/external-api-logs` 页,GC 保留 30 天。URL 刷新在 `file_fetcher.refresh_download_url` 埋点(async create_task)。
 - `ai_api_calls`：AI/LLM API 调用记录,记 operation/model/prompt/response/耗时/成败/业务上下文(batch_id/file_id/client_code/task_id),前端 `/ai-api-calls` 页,GC 保留 30 天。LLM 在 `llm_service._call_llm` 埋点--**注意用同步 `insert_ai_api_call_sync`**,因为它跑在 worker 线程(asyncio.to_thread)里,async 引擎连接池绑主 loop 不能跨线程用。**LLM 的 prompt/response 原文直存未脱敏**(业务决策,含脱敏前 OCR)。**入库前在 CRUD 层统一清洗**:去 NUL/控制字符(PG text 列不接受 ``,OCR 文本易混入,此前被 `except` 静默吞掉丢日志)、prompt/response 截断 50KB、error_msg 截断 2KB;列表接口只回 500 字预览,详情走单独的 `GET /api/admin/ai-api-calls/{row_id}` 拉全文。引擎层(asyncpg/psycopg2)已显式 `client_encoding=utf8`。
 - `profile_import_tasks`：客户画像导入任务；一次接口导入一户一行,记录进度与各类计数(4 类证件各筛出数/提取数/失败数/current_file/needs_review_count/household_id)。
 - `customer_files`：客户文件库,`file_code` 全局唯一(重复导入只 re-link 不重复下载/OCR);存全量 OCR——**fresh=未脱敏原文**(与 ai_api_calls 存原文的既定决策一致)、reused=archive_detect 脱敏文本,`ocr_source` 区分;分类结果 `doc_type`(12 类:id_card/hukou/degree_cert/birth_cert/passport/kyc_form/marriage_cert/property_cert/no_crime/approval/submission/receipt + other) + `classify_by(keyword/llm/none)`;`local_path` 原件落盘 output/customer_files/(30 天 GC,DB/OCR 永留);`review_status/review_reason/quality_score` 复核与质量评级;`person_id` 手动归属人(migration 021,文件↔人关联权威载体,与 write_stats 归因并集使用);`affter_entryoid` 售后项目OID + `project_name` 项目显示名(migration 022,项目案件路由键/反范式展示列,来自接口嵌套 list[] 项目外壳);`content_sha256` 原件内容 hash(migration 025,同家庭跨项目同内容文件去重键,下载后计算,命中兄弟行复用 OCR/分类)。`profile_households` 另有 `customer_code/crm_oid`(接口属性,只补空)。
@@ -321,11 +321,11 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - 前端 `FileInfoPage.vue`（`/file-info`）→ `GET /api/admin/file-infos`（Swagger tag「文件信息」）→ `archive_detect_crud.admin_list_files`。
 - 以**单文件为维度**跨批次查询，每行带批次/客户/进展上下文；支持批次号、文件编码、文件名、状态、判定、客户编码/姓名、进展名、办理人模糊筛选 + limit/offset 分页。
 
-### 可观测性：事件流 + 外部请求日志 + 调用外部接口记录
+### 可观测性：事件流 + 外部请求日志 + 调用外部接口
 
 - **事件流**：`event_service.log_event(severity, category, message, context)` fire-and-forget 写 `system_events`,前端 `/events`(EventsPage.vue)。category 常量在 event_service.py(batch.*/file.*/worker.crash/llm.timeout 等)。
 - **外部请求日志**：纯 ASGI 中间件 `request_log_middleware`(在 main.py 用 `app.add_middleware` 注册,不能用 `BaseHTTPMiddleware`——它读 body 会噎死下游 Pydantic)。只记 `POST /api/archive-detect/business/batch` 的 JSON 请求体,前端 `/request-logs`(RequestLogsPage.vue)。
-- **调用外部接口记录**：URL 刷新等非 AI 出站调用记 `external_api_logs`,前端 `/external-api-logs`(ExternalApiLogsPage.vue)。
+- **调用外部接口**：URL 刷新等非 AI 出站调用记 `external_api_logs`,前端 `/external-api-logs`(ExternalApiLogsPage.vue)。
 - **AI/LLM 调用记录**：所有 LLM 调用记 `ai_api_calls`,前端 `/ai-api-calls`(AiApiCallsPage.vue),支持按 operation/model/batch_id/file_id/client_code/task_id 筛选。见「数据库重点」里的埋点说明。
 - 四张表(system_events / api_request_logs / external_api_logs / ai_api_calls)都在 `_split_cleanup_loop` 里 GC 30 天。
 
