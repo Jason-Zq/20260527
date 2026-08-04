@@ -14,13 +14,17 @@ if [ ! -x "$VENV/bin/python" ]; then
   python3 -m venv "$VENV"
 fi
 PIP="$VENV/bin/pip"
-# 阿里云 ECS 走镜像站,几秒装完;本地开发走默认 PyPI 也可
-$PIP install -q --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null || $PIP install -q --upgrade pip
-$PIP install -q -r backend/requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null \
-  || $PIP install -q -r backend/requirements.txt
+# 镜像选择(2026-08-04 实测):公网 mirrors.aliyun.com 当晚对 pip 23.x 全挂;
+# 阿里云内网 mirrors.cloud.aliyuncs.com 最稳最快,清华 TUNA 兜底。
+# 不做 pip 自升级:捆绑 pip 23.3.1 足够装全部依赖,避免 pypi.org 不可达导致的随机失败。
+PIP_OPTS="-q --disable-pip-version-check --retries 5 --timeout 60"
+PIP_MIRROR="https://mirrors.cloud.aliyuncs.com/pypi/simple/"
+PIP_MIRROR_FALLBACK="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
+$PIP install $PIP_OPTS -r backend/requirements.txt -i "$PIP_MIRROR" 2>/dev/null \
+  || $PIP install $PIP_OPTS -r backend/requirements.txt -i "$PIP_MIRROR_FALLBACK"
 # CI 额外依赖(ocrapi 契约测试用,不在 backend/requirements.txt)
-$PIP install -q PyJWT bcrypt -i https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null \
-  || $PIP install -q PyJWT bcrypt
+$PIP install $PIP_OPTS PyJWT bcrypt -i "$PIP_MIRROR" 2>/dev/null \
+  || $PIP install $PIP_OPTS PyJWT bcrypt -i "$PIP_MIRROR_FALLBACK"
 
 PY="$VENV/bin/python"
 export PYTHONIOENCODING=utf-8 PYTHONUTF8=1

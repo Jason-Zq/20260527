@@ -34,7 +34,7 @@ BACKUP_DIR=/opt/backups
 LOG_DIR=$APP_DIR/logs
 TS=$(date +%Y%m%d_%H%M%S)
 PY=$APP_DIR/backend/venv/bin/python
-PIP_INDEX="https://mirrors.aliyun.com/pypi/simple/"
+PIP_INDEX="https://mirrors.cloud.aliyuncs.com/pypi/simple/"   # 阿里云内网镜像(公网 mirrors.aliyun.com 实测会抽风)
 
 # 防并发发布
 exec 9>"$APP_DIR/.release.lock"
