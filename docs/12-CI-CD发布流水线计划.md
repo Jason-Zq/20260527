@@ -1,6 +1,6 @@
 # 12 - CI/CD 发布流水线计划（Jenkins)
 
-> 状态：计划已确认，待实施。2026-08-04 定稿。
+> 状态：**已上线试运行**(2026-08-04 同日实施完毕，build #6 全链路绿：push main → Poll SCM 2 分钟内自动测试+部署测试服）。实施记录见文末 §10。
 > 相关文档：[06-前端与部署.md](06-前端与部署.md)、[deploy/linux/README.md](../deploy/linux/README.md)
 
 ## 1. 背景与目标
@@ -172,3 +172,21 @@ pipeline {
 | 6 | 更新 CLAUDE.md/AGENTS.md 部署章节，标注"手工 tar 上传已退役" | 文档一致 |
 
 **首期不做**：PR 流程、Docker 化、多 runner、制品仓库（Nexus 等）、灰度发布。
+
+## 10. 实施记录（2026-08-04，已上线）
+
+当天完成：Jenkins 2.568.1 LTS 装于测试服（`127.0.0.1:8080`,SSH 隧道访问；admin 密码在服务器 `/root/.jenkins-admin-credentials`);`doc-review-ci` job(Poll SCM `H/2`）创建；build #6 全链路绿（push main → 自动测试 → 前端构建 → 打制品 → 部署测试服 → 健康检查通过）。测试白名单 27 项（13 纯函数 + 14 DB）在服务器实测全过。
+
+实施中踩掉的坑（都已固化进脚本/配置，勿回退）:
+
+| 坑 | 对策 |
+|---|---|
+| Jenkins 2.568 要求 Java 21;yum GPG 密钥 2023 版已过期 | 用 `jenkins.io-2026.key`;`java-21-alibaba-dragonwell-headless`（与 17 有文件冲突，17 已卸） |
+| 公网 `mirrors.aliyun.com` 对 pip 23.x 全挂；崩溃后 jenkins 用户 pip 缓存被污染，后续安装必炸 | 镜像固定为内网 `mirrors.cloud.aliyuncs.com` + TUNA 兜底（`run_ci.sh`/`release.sh`)；不做 pip 自升级；出事 `pip cache purge` |
+| PG 集群 template1 是 SQL_ASCII，默认建库继承后 psycopg2 编中文 SQL 必炸 | `doc_review_ci` 显式 `ENCODING 'UTF8' TEMPLATE template0` + `PGCLIENTENCODING=UTF8`（业务库 doc_review 本来就是 UTF8) |
+| **flock fd 被守护进程继承**:release.sh 的发布锁经 fork 传给 uvicorn/worker,open file description 不释放 → 后续发布永远"已有发布在进行" | `start_services` 启动行加 `9>&-` 显式关 fd；已中招的要杀一次旧守护进程释放 |
+| 服务器老 `/opt/fastapi/restart.sh`（无括号无 setsid 自杀版） | 已被 `deploy/ci/release.sh` 取代，勿再用 |
+| 部分"纯函数"测试 import 链读 config.json | `run_ci.sh` 自动生成 CI 专用 config.json（不进制品） |
+| Jenkins 凭据 XML 内联私钥易被转义搞坏 | 用 scriptText groovy 重建凭据（见 memory:jenkins-ci-setup) |
+
+待办（按 §8 优先级）：IOD 生产发布（`Jenkinsfile.release` + `iod-ssh-key` 凭据）、失败通知、JENKINS_HOME 每日备份。
