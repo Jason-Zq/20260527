@@ -108,6 +108,9 @@ plans/
 
 # 部署打包产物（zip 文件）
 release/
+dist-out/
+release-*.tar.gz
+.ci-venv/
 
 *.zip
 *.tar

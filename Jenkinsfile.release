@@ -1,0 +1,70 @@
+// doc-review-release: 手动触发,按 tag 发布 IOD 生产(120.26.67.160),带人工批准卡点
+// 前置: GitHub 上已 push 该 tag; Jenkins 凭据 iod-ssh-key(root@120.26.67.160 的私钥)已配置
+pipeline {
+  agent any
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+  environment {
+    NPM_CONFIG_REGISTRY = 'https://registry.npmmirror.com'
+    NODE_OPTIONS = '--max-old-space-size=1024'
+    PYTHONIOENCODING = 'utf-8'
+    PYTHONUTF8 = '1'
+    IOD_HOST = '120.26.67.160'
+  }
+  parameters {
+    string(name: 'TAG', defaultValue: '', description: '要发布的 git tag,如 v2026.08.05(必须已 push 到 GitHub)', trim: true)
+  }
+  stages {
+    stage('Checkout Tag') {
+      steps {
+        checkout scm: [$class: 'GitSCM',
+          branches: [[name: "refs/tags/${params.TAG}"]],
+          extensions: [[$class: 'CloneOption', shallow: true, depth: 1, noTags: false]],
+          userRemoteConfigs: [[url: 'git@github.com:Jason-Zq/20260527.git', credentialsId: 'github-deploy-key']]]
+      }
+    }
+    stage('Test') {
+      steps { sh 'bash tests/run_ci.sh' }
+    }
+    stage('Build') {
+      steps { sh 'cd frontend && npm ci && npm run build' }
+    }
+    stage('Package') {
+      steps {
+        sh 'rm -rf dist-out && mkdir -p dist-out && bash deploy/ci/package.sh . dist-out'
+        archiveArtifacts artifacts: 'dist-out/release-*.tar.gz', fingerprint: true, onlyIfSuccessful: true
+      }
+    }
+    stage('Approve') {
+      steps {
+        input message: "确认发布 ${params.TAG} 到 IOD 生产(${IOD_HOST})?", ok: '发布'
+      }
+    }
+    stage('Deploy IOD') {
+      steps {
+        sshagent(credentials: ['iod-ssh-key']) {
+          sh '''
+            set -e
+            PKG=$(ls dist-out/release-*.tar.gz | head -1)
+            STAGE=/tmp/release-stage-$BUILD_NUMBER
+            echo "上传制品: $PKG"
+            scp -o StrictHostKeyChecking=accept-new "$PKG" root@$IOD_HOST:/tmp/
+            ssh root@$IOD_HOST "
+              set -e
+              rm -rf $STAGE && mkdir -p $STAGE
+              tar xzf /tmp/$(basename $PKG) -C $STAGE
+              bash $STAGE/deploy/ci/release.sh --target iod --package /tmp/$(basename $PKG)
+              rm -rf $STAGE /tmp/$(basename $PKG)
+            "
+          '''
+        }
+      }
+    }
+  }
+  post {
+    failure { echo '发布失败 - 查看阶段定位;IOD 上 release.sh 失败时已自动回滚代码(DB 不回滚)。' }
+  }
+}
