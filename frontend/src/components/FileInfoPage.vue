@@ -106,7 +106,8 @@
       </section>
     </div>
 
-    <el-dialog v-model="detailVisible" title="文件详情" width="75%" top="5vh">
+    <!-- 文件详情:上下拉满 100%、宽 70% 居中;底部 OCR 文本(左)与文件预览(右)等高分栏 -->
+    <el-dialog v-model="detailVisible" title="文件详情" width="70%" top="0" class="file-detail-dialog">
       <div v-if="selected" v-loading="detailLoading" class="detail-body">
         <div class="detail-meta">
           <div><b>文件编码：</b><span class="mono">{{ selected.file_id || '-' }}</span></div>
@@ -133,8 +134,21 @@
             <b>判定依据：</b><span>{{ selected.reason }}</span>
           </div>
         </div>
-        <el-divider content-position="left">OCR 文本（已脱敏）</el-divider>
-        <pre class="ocr-text">{{ selected.ocr_text || '(空)' }}</pre>
+        <div class="detail-split">
+          <div class="split-col">
+            <div class="split-title">OCR 文本（已脱敏）</div>
+            <pre class="ocr-text">{{ selected.ocr_text || '(空)' }}</pre>
+          </div>
+          <div class="split-col">
+            <div class="split-title">文件预览</div>
+            <FilePreviewPane
+              class="split-preview"
+              :file="previewFile"
+              :fetch-raw="fetchArchiveDetectFileRawUrl"
+              :fetch-preview-pdf="fetchArchiveDetectFilePreviewPdfUrl"
+            />
+          </div>
+        </div>
       </div>
       <template #footer>
         <el-button
@@ -145,14 +159,6 @@
         <el-button @click="detailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
-
-    <!-- 原件预览:首次按记录 id 重下原件(过期自动刷新),服务端本地缓存 20 天 -->
-    <FilePreviewDialog
-      v-model:visible="previewVisible"
-      :file="previewFile"
-      :fetch-raw="fetchArchiveDetectFileRawUrl"
-      :fetch-preview-pdf="fetchArchiveDetectFilePreviewPdfUrl"
-    />
   </div>
 </template>
 
@@ -162,7 +168,7 @@ import { ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { listFileInfos, getArchiveAdminFileDetail, fetchArchiveDetectFileRawUrl, fetchArchiveDetectFilePreviewPdfUrl } from '../api.js'
-import FilePreviewDialog from './FilePreviewDialog.vue'
+import FilePreviewPane from './FilePreviewPane.vue'
 
 const loading = ref(false)
 const items = ref([])
@@ -172,13 +178,11 @@ const pageSize = ref(10)
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const selected = ref(null)
-// 原件预览(FilePreviewDialog):file 只需 id + filename
-const previewVisible = ref(false)
+// 详情弹窗右栏预览(FilePreviewPane)的数据源:null=未加载,点「展示文件」才填
 const previewFile = ref(null)
 
 function openPreview() {
   previewFile.value = { id: selected.value?.id, filename: selected.value?.filename }
-  previewVisible.value = true
 }
 
 function _defaultFilters() {
@@ -228,6 +232,7 @@ function onPageSizeChange() { currentPage.value = 1; loadList() }
 
 async function openDetail(row) {
   selected.value = { ...row }
+  previewFile.value = null
   detailVisible.value = true
   detailLoading.value = true
   try {
@@ -300,7 +305,26 @@ onMounted(() => { loadList() })
 .pagination-row { display: flex; justify-content: flex-end; margin-top: 12px; }
 .dim { color: #94a3b8; font-weight: 400; }
 .mono { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 12px; }
-.detail-body { padding: 4px; }
-.detail-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; font-size: 13px; color: #334155; }
-.ocr-text { max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6; margin: 0; }
+.detail-body { height: 100%; display: flex; flex-direction: column; padding: 4px; }
+.detail-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; font-size: 13px; color: #334155; max-height: 45%; overflow: auto; }
+.detail-split { flex: 1; min-height: 0; display: flex; gap: 12px; margin-top: 12px; }
+.split-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.split-title { font-size: 13px; font-weight: 600; color: #64748b; }
+.split-preview { flex: 1; min-height: 0; }
+.ocr-text { flex: 1; min-height: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6; margin: 0; }
+</style>
+
+<style>
+/* 文件详情上下拉满:el-dialog 渲染在 body 下,需非 scoped 才能命中 */
+.file-detail-dialog {
+  height: 100vh;
+  margin-top: 0;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+}
+.file-detail-dialog .el-dialog__body {
+  flex: 1;
+  min-height: 0;
+}
 </style>
