@@ -35,6 +35,9 @@ function isOfficeFile(filename) {
 const props = defineProps({
   visible: { type: Boolean, default: false },
   file: { type: Object, default: null },
+  // 取数函数可注入:默认客户画像原件接口;文件留底检测等场景传自己的 wrapper
+  fetchRaw: { type: Function, default: fetchCustomerFileRawUrl },
+  fetchPreviewPdf: { type: Function, default: fetchCustomerFilePreviewPdfUrl },
 })
 const emit = defineEmits(['update:visible'])
 
@@ -53,17 +56,17 @@ async function loadRaw(fileId) {
   // Office 原件:优先走 soffice 转 PDF 预览;501/失败回落「不支持在线预览」
   if (isOfficeFile(props.file?.filename)) {
     try {
-      const raw = await fetchCustomerFilePreviewPdfUrl(fileId)
+      const raw = await props.fetchPreviewPdf(fileId)
       rawState.value = { url: raw.blobUrl, isImage: false, isPdf: true, hint: '', _revoke: raw.revoke }
     } catch (err) {
-      rawState.value = { url: '', isImage: false, isPdf: false, hint: '该文件类型不支持在线预览', _revoke: null }
+      rawState.value = { url: '', isImage: false, isPdf: false, hint: err?.message || '该文件类型不支持在线预览', _revoke: null }
     } finally {
       loading.value = false
     }
     return
   }
   try {
-    const raw = await fetchCustomerFileRawUrl(fileId)
+    const raw = await props.fetchRaw(fileId)
     rawState.value = {
       url: raw.blobUrl,
       isImage: (raw.mime || '').startsWith('image/'),
@@ -72,7 +75,7 @@ async function loadRaw(fileId) {
       _revoke: raw.revoke,
     }
   } catch (err) {
-    rawState.value = { url: '', isImage: false, isPdf: false, hint: '原件不可用(可能已清理且无法重下)', _revoke: null }
+    rawState.value = { url: '', isImage: false, isPdf: false, hint: err?.message || '原件不可用(可能已清理且无法重下)', _revoke: null }
   } finally {
     loading.value = false
   }

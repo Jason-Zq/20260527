@@ -67,13 +67,13 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe -m alembic upg
 
 **永久部署平台：Alibaba Cloud Linux 3 / CentOS 8+ ECS。** Windows 仅作开发环境。
 
-> **CI/CD(2026-08-04 上线，测试服先行)**：测试服 8.138.111.12 上跑 Jenkins(绑 127.0.0.1:8080,SSH 隧道访问,admin 密码在服务器 `/root/.jenkins-admin-credentials`)。**push main → Poll SCM 2 分钟内自动：测试(27 项白名单,`tests/run_ci.sh`)→ 前端构建 → 打制品 → `deploy/ci/release.sh` 部署测试服**(快照/pg_dump/迁移校验/健康检查/失败回滚)。部署唯一入口是入库的 `deploy/ci/release.sh`,**服务器上老的 `/opt/fastapi/restart.sh` 已废弃勿用**。job 名 `doc-review-ci` 与 sudoers 路径绑定勿改名。IOD 生产发布走 `Jenkinsfile.release`(tag + 人工批准,待配 `iod-ssh-key` 凭据)。方案与实施记录见 [docs/12-CI-CD发布流水线计划.md](docs/12-CI-CD发布流水线计划.md)。
+> **CI/CD(2026-08-04 上线，测试服先行)**：测试服 8.138.111.12 上跑 Jenkins(**公网入口 http://8.138.111.12/jenkins/**,nginx 反代本机 8080,匿名禁访;admin 密码在服务器 `/root/.jenkins-admin-credentials`)。**push main → Poll SCM 2 分钟内自动：测试(27 项白名单,`tests/run_ci.sh`)→ 前端构建 → 打制品 → `deploy/ci/release.sh` 部署测试服**(快照/pg_dump/迁移校验/健康检查/失败回滚)。部署唯一入口是入库的 `deploy/ci/release.sh`,**服务器上老的 `/opt/fastapi/restart.sh` 已废弃勿用**。job 名 `doc-review-ci` 与 sudoers 路径绑定勿改名。IOD 生产发布走 `Jenkinsfile.release`(tag + 人工批准,待配 `iod-ssh-key` 凭据)。方案与实施记录(含 pip 镜像/flock 继承/SQL_ASCII 等坑)见 [docs/12-CI-CD发布流水线计划.md](docs/12-CI-CD发布流水线计划.md)。
 
 > **当前实际服务器（2026-07-24 实录，与下文标准方案有出入，以此为准）**：`root@8.138.111.12`，SSH 用密钥 `C:\Users\zq\Downloads\doc.pem`（本机无 rsync，用 `tar czf - ... | ssh "tar xzf -"` 上传）。代码 `/opt/fastapi/`（backend + backend/venv，**后端 nohup 直跑 :8765 + worker nohup 直跑，无 systemd**）；前端 dist 在 **`/opt/vue3/dist`**（nginx default.conf,80 端口反代 `/api` → 8765）；DB 在本机 localhost:5432/doc_review。`config.json` 在 `/opt/fastapi/`（服务器自有配置，**上传时切勿覆盖**；auth 段 2026-07-24 已补齐，与本地一致）。迁移踩过的坑：服务器 alembic_version 曾停在 014 但 015/017 对象已手工建过——用 `alembic stamp` 对齐后再 upgrade（016 external_api_logs 是真缺的，正常执行）。重启注意：**远程命令行里 `pkill -f 'uvicorn main:app'` 会匹配到 bash -c 自身导致自杀**，用 `pkill -f '[u]vicorn main:app'` 或按 PID 杀。备份在 `/opt/backups/`。2026-07-28 补充：重启统一用 **`/opt/fastapi/restart.sh`**（pkill+拉起 uvicorn:8765/worker-1，日志接 `/opt/fastapi/logs/`，用 `setsid bash restart.sh </dev/null >/dev/null 2>&1 &` 脱离会话执行——ssh 远程命令中途掉线(exit 255)曾导致只杀掉没拉起）；前端 dist 用 `dist.new` + `mv` 交换（旧目录留 `dist.old.*` 回滚）；**在服务器上 `curl localhost` 验证前端会命中 nginx 默认欢迎页**（站点 server block `server_name 8.138.111.12` 只 listen IPv4 80，localhost 解析到 IPv6 落默认块），正确姿势 `curl -H 'Host: 8.138.111.12' http://127.0.0.1/`。**2026-08-03 补充（用户口中「测试服务器」= 这台）**：已发布当前工作区全量改动（RapidOCR 3.9.2 替换 rapidocr-onnxruntime 1.4.4、image_preprocess 前处理、field_validators、RULES_VERSION=4 英文建人/sponsor/到期提醒、asyncpg 段错误修复），迁移 022→023（回填零重复组）→024→025 head。注意 `/opt/fastapi/venv` 是游离旧 venv，live 的是 `backend/venv`（restart.sh 从 backend/ 起 `venv/bin/python`）；worker stdout 写日志文件是全缓冲，重启后 log 里暂时看不到新 worker 启动行属正常（进程活着=引擎初始化已过）。
 
 > **IOD 服务器（2026-07-28 部署实录，第二台生产机）**：`root@120.26.67.160`，SSH 已配本机免密公钥 **`~/.ssh/iod_deploy`**（服务器原来只开密码登录，用 SSH_ASKPASS 技巧装的 key；两个老 pem 都不匹配）。结构与 8.138.111.12 几乎一致但有出入：代码 `/opt/fastapi/`（backend + backend/venv(py3.11) + **migrations + alembic.ini 也已上传放这里**，`config.json` 同位置、切勿覆盖）；**uvicorn :8765 + 2 个 worker（worker-1/2）nohup 直跑，无 systemd、无 restart.sh**，日志在 backend/ 下 app.log/worker-N.log，重启用 `setsid nohup ./venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765 >> app.log 2>&1 </dev/null &`（worker 同理，`pkill -f '[w]orker_runner'` 括号技巧防自杀；worker 收 SIGTERM 是优雅退出，部署等不住就 kill -9）。**前端在 `/opt/front/dist`**，宝塔 nginx 站点配置 `/www/server/panel/vhost/nginx/120.26.67.160.conf`（/api → 8765）；本机 curl 验证同样要带 `-H 'Host: 120.26.67.160'`。DB 本机 localhost:5432/doc_review；**alembic 坑与另一台相同**（停 014、015/017 手工建过、016 真缺），已按 stamp 015 → upgrade 016 → stamp 4617b534a2d2(=017，注意该文件 revision id 是 hash 不是 "017") → upgrade head 对齐到 **022 head，以后直接 `cd /opt/fastapi && backend/venv/bin/python -m alembic upgrade head`**。2026-07-28 第二次发布：023/024 同名折叠键迁移一次过（144 人回填、零重复组，未跑 merge-duplicates-all 直接升 024）。第三次发布：025 customer_files.content_sha256（**教训：025 是本地工作区里未提交的新迁移，部署时只看了 git status 里已跟踪文件差点漏掉，任务全报 UndefinedColumn 后才补上；以后部署前 `ls migrations/versions/ | tail` 与服务器 `alembic current` 对齐**）。机器 14G 内存，曾残留两代 4 个 worker 进程（部署时已清理，重启前先 `ps aux | grep [w]orker_runner` 确认无旧代残留）。
 
-完整方案在 [deploy/linux/](deploy/linux/)，**首次部署看 [deploy/linux/README.md](deploy/linux/README.md)**。日常流程：
+完整方案在 [deploy/linux/](deploy/linux/)，**首次部署看 [deploy/linux/README.md](deploy/linux/README.md)**。~~日常流程~~(**已被 Jenkins CI/CD 取代，仅首次装新机参考**；测试服日常发布 = push main，勿再手工 05-upload):
 
 ```bash
 # 本地：构建前端 + rsync 上传整个项目
@@ -105,6 +105,11 @@ sudo systemctl reload nginx                    # 前端 dist 变化
 测试为简单 `assert` 脚本风格，不依赖 pytest：
 
 ```bash
+# 全量 CI 套件(27 项白名单:纯函数档 + DB 档;即 Jenkins 跑的同一份)
+# DB 档需要:doc_review_ci 库 + CI_DB_PASSWORD 环境变量(脚本会自动重建该库,绝不碰 doc_review)
+cd e:/qoderproject/20260527
+bash tests/run_ci.sh
+
 # 单个单元测试（assert 脚本风格，不依赖 pytest）
 cd e:/qoderproject/20260527
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_split_service.py
@@ -317,6 +322,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - 详情弹窗展示批次全量信息(批次/客户/进展/办理人/项目/判定标准/总体/识别完成时间等),文件表含「文件编码(file_id)」列;数据源 `pollBusinessBatch`(business)或 `pollArchiveDetect`(历史 quick 批次)兜底。**弹窗已抽为共享组件 `BatchDetailDialog.vue`**(2026-08-03,审核任务管理与每日报告页共用)。
 - **每日留底检测报告**(2026-08-03):`GET /api/archive-detect/admin/daily-report?date=` → `archive_detect_crud.admin_daily_report`——按批次 created_at 取当日全部批次按客户分组统计:done 按 overall_verdict 分桶 match/partial/mismatch/other、status=error 记 error、其余记 in_progress,avg_score 仅统计 done 且有分;无客户批次(历史 quick)归入合成桶。前端 `ArchiveDailyReportPage.vue`(`/archive-daily-report`,菜单「文件留底」组),点客户可看当日批次明细并弹 BatchDetailDialog。
 - 写操作:单批重审(`rerun/{batch_id}`)、按新规则批量重判(`admin/rejudge-overall`)、批量重审(`admin/rerun-files-batch`)—— 见上文「重审/重跑/批量操作」。
+- **原件预览「展示文件」(2026-08-06)**:`GET /api/archive-detect/admin/file/{record_id}/raw` + `/preview-pdf`(Office)——首次按 `source_url` 重下原件(`fetch_url_to_temp_with_refresh` 过期按 file_id 自动刷新)后**落本地缓存 `temp/archive_preview_cache/{record_id}{ext}`(含 `{record_id}.preview.pdf` 转换缓存),之后直接开缓存;按 mtime 20 天 GC**(`_split_cleanup_loop` 内 `file_fetcher.sweep_preview_cache`)。**缓存刻意不放 output/**:output/ 经 `/uploads` 静态挂载无鉴权,record_id 自增可遍历会裸奔;temp/ 无静态挂载只经鉴权端点流出。历史 quick 批次无 source_url → 404。前端 `BatchDetailDialog.vue` 文件表操作列 + `FileInfoPage.vue` 详情弹窗 footer 挂「展示文件」按钮,复用泛化后的 `FilePreviewDialog.vue`(新增 `fetchRaw`/`fetchPreviewPdf` props 注入取数函数,默认仍走客户画像接口;api.js 新增 `fetchArchiveDetectFileRawUrl`/`fetchArchiveDetectFilePreviewPdfUrl`,blob 错误体统一解 `{detail}` 文案)。
 
 ### 文件信息（文件维度查询）
 
@@ -395,6 +401,23 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
    - 之后每 60 秒处理一次延迟队列，能删则删，删不动重新排队。
 
 这是**业务无影响的收尾清理**，HTTP 仍返回 200。日志里看到「已加入延迟清理队列」是正常的，不需要告警。
+
+### 全项目保留期一览（2026-08-06 梳理）
+
+周期入口：主进程 `_split_cleanup_loop`（小时级唤醒 + 24h 日级门）、`archive_detect_service.gc_loop`（30min）、`file_fetcher.periodic_cleanup_task`（60s）。**不做定时任务管理框架**——固定基础设施级 GC，无调度需求。
+
+| 对象 | 保留期 | 触发 |
+|---|---|---|
+| `temp/fetched/` 下载临时文件 | 用完即删；失败进 60s 延迟队列；>1h 残留日级扫 | 60s 循环 + 日级门 |
+| 拆分任务 `output/{task_id}/` | 7 天（DB 保留 + `files_cleaned`） | 日级门 |
+| 留底原件预览缓存 `temp/archive_preview_cache/` | 20 天（按 mtime） | 小时级循环内 |
+| `output/` 解析任务目录（YYMMDDHHmmss_ 前缀） | 30 天 | 启动 + 日级门 |
+| `temp/templates/` + `output/templates/_parse/` | 60 分钟 | 启动 + 日级门 |
+| 画像原件 `output/customer_files/` | 30 天（`file_keep_until`，DB/OCR 永留） | 小时级循环内 |
+| 4 张日志表（system_events / api_request_logs / external_api_logs / ai_api_calls） | 30 天 | 小时级循环内 |
+| 内存态 `_task_status` 等 / `_batch_status` | 1h / 6h | 小时级 / 30min |
+
+注意：worker 进程不跑 `periodic_cleanup_task`，其 `_pending_cleanup` 残留靠主进程日级扫描 `temp/fetched/` 兜底（两进程共享该目录）。
 
 ## 已知遗留/注意事项
 

@@ -382,6 +382,30 @@ def _cleanup_stale_files(max_age_sec: int = _STALE_FILE_MAX_AGE_SEC) -> int:
     return deleted
 
 
+def sweep_preview_cache(cache_dir: str, max_age_sec: float, now: float = None) -> int:
+    """删除 cache_dir 中 mtime 早于 max_age_sec 的文件(只扫第一层),返回删除数。
+
+    用于留底检测原件预览缓存(20 天)等按 mtime 过期的目录。
+    OSError(文件占用等)忽略,下个周期重试;目录不存在返回 0。
+    """
+    if now is None:
+        now = time.time()
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return 0
+    deleted = 0
+    for name in names:
+        p = os.path.join(cache_dir, name)
+        try:
+            if os.path.isfile(p) and now - os.path.getmtime(p) > max_age_sec:
+                os.remove(p)
+                deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+
 async def periodic_cleanup_task() -> None:
     """后台周期任务：启动时扫一次旧文件 + 之后每 60s 处理延迟队列。
 

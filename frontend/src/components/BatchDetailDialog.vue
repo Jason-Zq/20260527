@@ -66,9 +66,10 @@
         <el-table-column label="复用" width="70" align="center">
           <template #default="{ row }"><el-tag v-if="row.is_reused" size="small" type="info">复用</el-tag><span v-else>-</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="110" align="center">
+        <el-table-column label="操作" width="170" align="center">
           <template #default="{ row }">
             <el-button size="small" type="primary" link :disabled="!row.id" @click.stop="openFileDetail(row)">详情</el-button>
+            <el-button size="small" type="primary" link :disabled="!canPreview(row)" @click.stop="openFilePreview(row)">展示文件</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -94,14 +95,23 @@
       </template>
     </div>
   </el-dialog>
+
+  <!-- 原件预览:首次按记录 id 重下原件(过期自动刷新),服务端本地缓存 20 天 -->
+  <FilePreviewDialog
+    v-model:visible="previewVisible"
+    :file="previewFile"
+    :fetch-raw="fetchArchiveDetectFileRawUrl"
+    :fetch-preview-pdf="fetchArchiveDetectFilePreviewPdfUrl"
+  />
 </template>
 
 <script setup>
 defineOptions({ name: 'BatchDetailDialog' })
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getArchiveAdminFileDetail, pollBusinessBatch, pollArchiveDetect } from '../api.js'
+import { getArchiveAdminFileDetail, pollBusinessBatch, pollArchiveDetect, fetchArchiveDetectFileRawUrl, fetchArchiveDetectFilePreviewPdfUrl } from '../api.js'
 import { verdictLabel, verdictTag, batchStatusLabel, batchStatusTag, sourceKindLabel } from '../utils/labels.js'
+import FilePreviewDialog from './FilePreviewDialog.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -117,6 +127,20 @@ const curProgress = computed(() => detail.value?.progress || props.batch?.progre
 const fileDialogVisible = ref(false)
 const fileLoading = ref(false)
 const fileDetail = ref(null)
+
+// 原件预览(FilePreviewDialog):file 只需 id + filename
+const previewVisible = ref(false)
+const previewFile = ref(null)
+
+// 历史 quick 批次无 file_id/source_url,原件不可获取,禁用按钮
+function canPreview(row) {
+  return !!row?.id && !!(row.file_id || row.source_url)
+}
+
+function openFilePreview(row) {
+  previewFile.value = { id: row.id, filename: row.filename }
+  previewVisible.value = true
+}
 
 watch(
   () => [props.modelValue, props.batch?.batch_id],

@@ -136,7 +136,23 @@
         <el-divider content-position="left">OCR 文本（已脱敏）</el-divider>
         <pre class="ocr-text">{{ selected.ocr_text || '(空)' }}</pre>
       </div>
+      <template #footer>
+        <el-button
+          type="primary"
+          :disabled="!selected?.id || (!selected?.file_id && !selected?.source_url)"
+          @click="openPreview"
+        >展示文件</el-button>
+        <el-button @click="detailVisible = false">关闭</el-button>
+      </template>
     </el-dialog>
+
+    <!-- 原件预览:首次按记录 id 重下原件(过期自动刷新),服务端本地缓存 20 天 -->
+    <FilePreviewDialog
+      v-model:visible="previewVisible"
+      :file="previewFile"
+      :fetch-raw="fetchArchiveDetectFileRawUrl"
+      :fetch-preview-pdf="fetchArchiveDetectFilePreviewPdfUrl"
+    />
   </div>
 </template>
 
@@ -145,7 +161,8 @@ defineOptions({ name: 'FileInfoPage' })
 import { ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { listFileInfos, getArchiveAdminFileDetail } from '../api.js'
+import { listFileInfos, getArchiveAdminFileDetail, fetchArchiveDetectFileRawUrl, fetchArchiveDetectFilePreviewPdfUrl } from '../api.js'
+import FilePreviewDialog from './FilePreviewDialog.vue'
 
 const loading = ref(false)
 const items = ref([])
@@ -155,6 +172,14 @@ const pageSize = ref(10)
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const selected = ref(null)
+// 原件预览(FilePreviewDialog):file 只需 id + filename
+const previewVisible = ref(false)
+const previewFile = ref(null)
+
+function openPreview() {
+  previewFile.value = { id: selected.value?.id, filename: selected.value?.filename }
+  previewVisible.value = true
+}
 
 function _defaultFilters() {
   return {

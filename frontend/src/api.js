@@ -895,6 +895,47 @@ export async function fetchCustomerFilePreviewPdfUrl(fileId) {
   }
 }
 
+// blob 响应的错误体也是 Blob,响应拦截器解不出 FastAPI 的 {detail};解码后换成带文案的 Error
+async function _blobGet(url, timeout) {
+  try {
+    return await axios.get(url, { responseType: 'blob', timeout })
+  } catch (err) {
+    const data = err?.response?.data
+    if (data instanceof Blob) {
+      let detail = null
+      try { detail = JSON.parse(await data.text())?.detail } catch { /* 非 JSON 错误体 */ }
+      if (detail) throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    }
+    throw err
+  }
+}
+
+/**
+ * 文件留底检测:后台原件预览(带 Bearer 鉴权),返回 { blobUrl, mime, revoke }
+ * 服务端本地缓存 20 天:首次按 source_url 重下(URL 过期按 file_id 自动刷新),之后直接开缓存。
+ */
+export async function fetchArchiveDetectFileRawUrl(recordId) {
+  const r = await _blobGet(`${API_BASE}/archive-detect/admin/file/${recordId}/raw`, 120000)
+  const mime = r.headers['content-type'] || 'application/octet-stream'
+  const blobUrl = URL.createObjectURL(r.data)
+  return {
+    blobUrl,
+    mime,
+    revoke: () => URL.revokeObjectURL(blobUrl),
+  }
+}
+
+// Office 原件转 PDF 预览(转换结果同样缓存 20 天);501=服务器无 LibreOffice,404=历史批次无原件地址
+export async function fetchArchiveDetectFilePreviewPdfUrl(recordId) {
+  const r = await _blobGet(`${API_BASE}/archive-detect/admin/file/${recordId}/preview-pdf`, 180000)
+  const blobUrl = URL.createObjectURL(r.data)
+  return {
+    blobUrl,
+    mime: r.headers['content-type'] || 'application/pdf',
+    revoke: () => URL.revokeObjectURL(blobUrl),
+  }
+}
+
 export async function correctPersonField(personId, fields, reviewedBy, relation) {
   const payload = { fields, reviewed_by: reviewedBy }
   if (relation !== undefined) payload.relation = relation

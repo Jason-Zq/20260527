@@ -1038,6 +1038,23 @@ async def admin_get_file_detail(record_id: int) -> Optional[dict]:
         return d
 
 
+async def admin_get_file_source(record_id: int) -> Optional[dict]:
+    """后台原件预览用轻量查询:只取下载所需字段,不拉 ocr_text 大字段。"""
+    async with async_session_maker() as session:
+        f = (await session.execute(
+            select(ArchiveDetectFile).where(ArchiveDetectFile.id == record_id)
+        )).scalar_one_or_none()
+        if not f:
+            return None
+        return {
+            "id": f.id,
+            "file_id": f.file_id,
+            "filename": f.filename,
+            "source_url": f.source_url,
+            "mime_type": f.mime_type,
+        }
+
+
 async def admin_list_files(
     *,
     batch_id: Optional[str] = None,

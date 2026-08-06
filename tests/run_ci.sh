@@ -59,6 +59,7 @@ test_archive_detect_crud_clean test_ai_api_call_clean
 test_doc_type_matcher test_profile_api_manifest test_extract_rules
 test_review_scoring test_extract_multi test_image_preprocess test_field_validators
 test_page_big_image test_text_extractor_docx_ocr
+test_archive_preview_cache
 "
 DB_TESTS="
 test_worker_runner_claim test_event_service test_daily_report

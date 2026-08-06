@@ -4,6 +4,7 @@ FastAPI 后端入口
 """
 
 import os
+import mimetypes
 
 # 进程级 OpenMP/MKL 线程上限,务必在 import paddlepaddle/numpy/opencv 之前设置
 # 默认会拉满所有核心,每线程一份临时 buffer,在小内存机器上反而拖垮内存。
@@ -2131,6 +2132,10 @@ async def _split_cleanup_loop():
         try:
             if now - last_split_cleanup >= SPLIT_CLEANUP_INTERVAL_HOURS * 3600:
                 await _split_cleanup_once()
+                # 原仅启动时跑的三项清理,并入日级周期:长期不重启也会执行(startup 调用保留,双保险)
+                await asyncio.to_thread(_cleanup_expired_output, 30)        # output/ 解析任务目录 >30 天
+                await asyncio.to_thread(_cleanup_stale_template_temp, 60)   # 模板 temp >60 分钟
+                await asyncio.to_thread(file_fetcher._cleanup_stale_files)  # temp/fetched >1h 残留(含 worker 进程遗留)
                 last_split_cleanup = now
         except Exception as e:
             print(f"[split_cleanup] 异常(忽略,下个周期重试): {e}")
@@ -2215,6 +2220,20 @@ async def _split_cleanup_loop():
                 )
         except Exception as e:
             print(f"[customer_file_gc] 异常(忽略): {e}")
+        # 留底检测原件预览缓存 GC:20 天保留(按 mtime)
+        try:
+            removed_preview = file_fetcher.sweep_preview_cache(
+                ARCHIVE_PREVIEW_CACHE_DIR, ARCHIVE_PREVIEW_CACHE_MAX_AGE_SEC)
+            if removed_preview:
+                print(f"[archive_preview_gc] 清理 {removed_preview} 份 >20 天的原件预览缓存")
+                event_service.log_event(
+                    severity="info",
+                    category="gc.cleanup",
+                    message=f"清理 {removed_preview} 份 >20 天的留底原件预览缓存",
+                    context={"dir": "temp/archive_preview_cache", "deleted": removed_preview, "days": 20},
+                )
+        except Exception as e:
+            print(f"[archive_preview_gc] 异常(忽略): {e}")
         await asyncio.sleep(inmem_gc_every)
 
 
@@ -4095,6 +4114,100 @@ async def archive_detect_admin_file_detail(
     if not data:
         raise HTTPException(status_code=404, detail=f"文件记录 {record_id} 不存在")
     return data
+
+
+# ---- 原件预览缓存:首次点击下载落 temp/archive_preview_cache/,20 天 GC(_split_cleanup_loop)----
+# 不放 output/ 的原因:output/ 经 /uploads 静态挂载无鉴权,record_id 自增可遍历,原件会裸奔。
+ARCHIVE_PREVIEW_CACHE_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "temp", "archive_preview_cache"))
+ARCHIVE_PREVIEW_CACHE_MAX_AGE_SEC = 20 * 24 * 3600   # 原件预览缓存保留 20 天
+
+
+def _archive_preview_cache_path(row: dict) -> str:
+    """缓存键 = record_id(每行内容唯一;file_id 跨 version 内容可能不同,不能当键)。"""
+    ext = os.path.splitext(row.get("filename") or "")[1].lower()
+    return os.path.join(ARCHIVE_PREVIEW_CACHE_DIR, f"{row['id']}{ext or '.bin'}")
+
+
+async def _ensure_archive_preview_cache(row: dict) -> str:
+    """原件缓存:命中直接返回路径;未命中按 source_url 下载(过期自动刷新)后移入缓存。"""
+    cache_path = _archive_preview_cache_path(row)
+    if os.path.exists(cache_path):
+        return cache_path
+    try:
+        local_path, _fname, _mime, _refresh = await file_fetcher.fetch_url_to_temp_with_refresh(
+            row["source_url"], file_id=row.get("file_id"),
+        )
+    except file_fetcher.FileTooLargeError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"原件下载失败: {e}")
+    os.makedirs(ARCHIVE_PREVIEW_CACHE_DIR, exist_ok=True)
+    try:
+        os.replace(local_path, cache_path)
+    except OSError as e:
+        file_fetcher.cleanup_temp_file(local_path)
+        raise HTTPException(status_code=500, detail=f"原件缓存写入失败: {e}")
+    return cache_path
+
+
+@app.get(
+    "/api/archive-detect/admin/file/{record_id}/raw",
+    tags=["文件留底检测"],
+    summary="后台管理 - 原件预览/下载(本地缓存 20 天;首次按 source_url 重下,过期按 file_id 自动刷新)",
+)
+async def archive_detect_admin_file_raw(
+    record_id: int = Path(..., description="文件记录 ID(archive_detect_files.id)"),
+):
+    """后台查看原件:首次下载落本地缓存(temp/archive_preview_cache/,20 天 GC),之后直接开缓存。"""
+    from fastapi.responses import FileResponse
+
+    row = await archive_detect_crud.admin_get_file_source(record_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"文件记录 {record_id} 不存在")
+    if not row.get("source_url"):
+        raise HTTPException(status_code=404, detail="该文件无原件地址(历史批次未留存)")
+    cache_path = await _ensure_archive_preview_cache(row)
+    mime = (row.get("mime_type")
+            or mimetypes.guess_type(row.get("filename") or "")[0]
+            or "application/octet-stream")
+    return FileResponse(cache_path, media_type=mime, filename=row.get("filename") or None)
+
+
+@app.get(
+    "/api/archive-detect/admin/file/{record_id}/preview-pdf",
+    tags=["文件留底检测"],
+    summary="后台管理 - Office 原件转 PDF 预览(soffice 转换并缓存 20 天;无 LibreOffice 返回 501)",
+)
+async def archive_detect_admin_file_preview_pdf(
+    record_id: int = Path(..., description="文件记录 ID(archive_detect_files.id)"),
+):
+    """Office 原件预览:原件缓存 + soffice 转 PDF 缓存({record_id}.preview.pdf),20 天 GC。"""
+    from fastapi.responses import FileResponse
+
+    row = await archive_detect_crud.admin_get_file_source(record_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"文件记录 {record_id} 不存在")
+    ext = os.path.splitext(row.get("filename") or "")[1].lower()
+    if ext not in _OFFICE_PREVIEW_EXTS:
+        raise HTTPException(status_code=400, detail=f"非 Office 文件,不支持转换预览: {ext or '无扩展名'}")
+    if not row.get("source_url"):
+        raise HTTPException(status_code=404, detail="该文件无原件地址(历史批次未留存)")
+
+    pdf_cache = os.path.join(ARCHIVE_PREVIEW_CACHE_DIR, f"{record_id}.preview.pdf")
+    if not os.path.exists(pdf_cache):
+        raw_path = await _ensure_archive_preview_cache(row)
+        try:
+            produced = await asyncio.to_thread(
+                text_extractor.office_to_pdf, raw_path, ARCHIVE_PREVIEW_CACHE_DIR)
+            # office_to_pdf 输出名 = {record_id}.pdf,改名为 {record_id}.preview.pdf
+            os.replace(produced, pdf_cache)
+        except Exception as e:
+            msg = str(e)
+            if "未安装 LibreOffice" in msg:
+                raise HTTPException(status_code=501, detail=msg)
+            raise HTTPException(status_code=502, detail=msg)
+    return FileResponse(pdf_cache, media_type="application/pdf")
 
 
 # ==================== 业务接口(阶段三):增量复用 + 业务字段透传 ====================
