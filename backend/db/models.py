@@ -427,6 +427,9 @@ class ArchiveDetectBatch(Base):
     overall_verdict = Column(String(20), nullable=True, comment="当次总体判断 match|partial|mismatch")
     overall_score = Column(Integer, nullable=True, comment="当次总体匹配度 0-100")
     overall_reason = Column(Text, nullable=True, comment="当次总体判断依据（脱敏后）")
+    overall_verdict2 = Column(String(20), nullable=True, comment="总体判定2(提示词库项目标准) match|partial|mismatch")
+    overall_score2 = Column(Integer, nullable=True, comment="总体判定2 符合程度 0-100")
+    overall_reason2 = Column(Text, nullable=True, comment="总体判定2 判断依据（脱敏后）")
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
@@ -903,3 +906,35 @@ class ProfileCase(Base):
         Index("ux_profile_cases_household_default", "household_id",
               unique=True, postgresql_where=affter_entryoid.is_(None)),
     )
+
+
+class ArchiveDetectPrompt(Base):
+    """文件留底检测：提示词库（按项目五元组沉淀判定提示词）。
+
+    业务键 = (project_name, project_code, project_detail_name, project_detail_code, progress_name)
+    五元组（与 archive_detect_progress 的项目字段对应，空值归一化为 ''）。
+    prompt1 = 批次总体判定模板（默认=代码内置 DEFAULT_JUDGE_OVERALL_TEMPLATE，可编辑生效）；
+    prompt2 = AI 按五元组生成的项目专属留底标准（首次批次 finalize 时自动生成，可手改/重生）。
+    """
+    __tablename__ = "archive_detect_prompts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_name = Column(String(200), nullable=False, default="", comment="项目名称")
+    project_code = Column(String(100), nullable=False, default="", comment="项目编码")
+    project_detail_name = Column(String(200), nullable=False, default="", comment="项目详情名称")
+    project_detail_code = Column(String(100), nullable=False, default="", comment="项目详情编码")
+    progress_name = Column(String(200), nullable=False, default="", comment="进展名称")
+    prompt1 = Column(Text, nullable=True, comment="提示词1：批次总体判定模板（含 {user_prompt}/{files_detail} 等占位 token）")
+    prompt2 = Column(Text, nullable=True, comment="提示词2：项目专属留底标准（AI 生成，可手改）")
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        Index("ux_archive_detect_prompts_key", "project_name", "project_code",
+              "project_detail_name", "project_detail_code", "progress_name", unique=True),
+        Index("ix_archive_detect_prompts_project_name", "project_name"),
+        Index("ix_archive_detect_prompts_progress_name", "progress_name"),
+    )
+
+    def __repr__(self):
+        return f"<ArchiveDetectPrompt(id={self.id}, project='{self.project_name}', progress='{self.progress_name}')>"

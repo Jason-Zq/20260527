@@ -10,6 +10,7 @@ import {
   UserFilled, FolderOpened, AlarmClock,
   Cpu, List, Connection, Bell,
   MagicStick, EditPen, Scissor, Link,
+  Collection,
 } from '@element-plus/icons-vue'
 
 export const menuGroups = [
@@ -22,6 +23,7 @@ export const menuGroups = [
       { path: '/archive-admin', title: '检测批次管理', icon: Tickets },
       { path: '/file-info', title: '文件信息查询', icon: Document },
       { path: '/archive-detect', title: '文件留底检测', icon: DocumentChecked },
+      { path: '/archive-prompts', title: '提示词库', icon: Collection },
     ],
   },
   {

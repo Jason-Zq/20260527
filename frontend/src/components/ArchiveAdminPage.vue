@@ -57,6 +57,19 @@
             <el-option label="部分符合" value="partial" />
             <el-option label="不符合" value="mismatch" />
           </el-select>
+          <el-select
+            v-model="filters.overall_verdict2"
+            class="w-verdict"
+            multiple
+            collapse-tags
+            clearable
+            placeholder="总体2"
+            size="small"
+          >
+            <el-option label="符合" value="match" />
+            <el-option label="部分符合" value="partial" />
+            <el-option label="不符合" value="mismatch" />
+          </el-select>
           <el-checkbox v-model="filters.has_error_file" size="small" border>仅看有失败文件</el-checkbox>
           <el-select v-model="filters.status" class="w-narrow" clearable placeholder="状态" size="small">
             <el-option label="进行中" value="running" />
@@ -132,6 +145,14 @@
             <template #default="{ row }">
               <el-tag v-if="row.overall_verdict" :type="verdictTag(row.overall_verdict)" size="small">
                 {{ verdictLabel(row.overall_verdict) }} {{ row.overall_score ?? '' }}
+              </el-tag>
+              <span v-else class="dim">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="总体2" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.overall_verdict2" :type="verdictTag(row.overall_verdict2)" size="small">
+                {{ verdictLabel(row.overall_verdict2) }}
               </el-tag>
               <span v-else class="dim">-</span>
             </template>
@@ -299,6 +320,7 @@ function _defaultFilters() {
     source_kind: '',
     batch_id: '',
     overall_verdict: [],
+    overall_verdict2: [],
     has_error_file: false,
     client_name: '',
     client_code: '',
@@ -316,12 +338,16 @@ const filters = ref(_defaultFilters())
 function buildParams() {
   const out = {}
   for (const [k, v] of Object.entries(filters.value)) {
-    if (['limit', 'offset', 'date_range', 'overall_verdict', 'has_error_file'].includes(k)) continue
+    if (['limit', 'offset', 'date_range', 'overall_verdict', 'overall_verdict2', 'has_error_file'].includes(k)) continue
     if (v !== '' && v != null) out[k] = v
   }
   // 多选总体判断:非空时逗号拼接
   if (filters.value.overall_verdict?.length) {
     out.overall_verdict = filters.value.overall_verdict.join(',')
+  }
+  // 多选总体判定2:非空时逗号拼接
+  if (filters.value.overall_verdict2?.length) {
+    out.overall_verdict2 = filters.value.overall_verdict2.join(',')
   }
   // 含失败文件:仅勾选时传 true
   if (filters.value.has_error_file) {

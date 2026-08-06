@@ -67,7 +67,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe -m alembic upg
 
 **永久部署平台：Alibaba Cloud Linux 3 / CentOS 8+ ECS。** Windows 仅作开发环境。
 
-> **CI/CD(2026-08-04 上线，测试服先行)**：测试服 8.138.111.12 上跑 Jenkins(**公网入口 http://8.138.111.12/jenkins/**,nginx 反代本机 8080,匿名禁访;admin 密码在服务器 `/root/.jenkins-admin-credentials`)。**push main → Poll SCM 2 分钟内自动：测试(27 项白名单,`tests/run_ci.sh`)→ 前端构建 → 打制品 → `deploy/ci/release.sh` 部署测试服**(快照/pg_dump/迁移校验/健康检查/失败回滚)。部署唯一入口是入库的 `deploy/ci/release.sh`,**服务器上老的 `/opt/fastapi/restart.sh` 已废弃勿用**。job 名 `doc-review-ci` 与 sudoers 路径绑定勿改名。IOD 生产发布走 `Jenkinsfile.release`(tag + 人工批准,待配 `iod-ssh-key` 凭据)。方案与实施记录(含 pip 镜像/flock 继承/SQL_ASCII 等坑)见 [docs/12-CI-CD发布流水线计划.md](docs/12-CI-CD发布流水线计划.md)。
+> **CI/CD(2026-08-04 上线，测试服先行)**：测试服 8.138.111.12 上跑 Jenkins(**公网入口 http://8.138.111.12/jenkins/**,nginx 反代本机 8080,匿名禁访;admin 密码在服务器 `/root/.jenkins-admin-credentials`)。**push main → Poll SCM 2 分钟内自动：测试(白名单 `tests/run_ci.sh`)→ 前端构建 → 打制品 → `deploy/ci/release.sh` 部署测试服**(快照/pg_dump/迁移校验/健康检查/失败回滚)。部署唯一入口是入库的 `deploy/ci/release.sh`,**服务器上老的 `/opt/fastapi/restart.sh` 已废弃勿用**。job 名 `doc-review-ci` 与 sudoers 路径绑定勿改名。IOD 生产发布走 `Jenkinsfile.release`(tag + 人工批准,待配 `iod-ssh-key` 凭据)。方案与实施记录(含 pip 镜像/flock 继承/SQL_ASCII 等坑)见 [docs/12-CI-CD发布流水线计划.md](docs/12-CI-CD发布流水线计划.md)。
 
 > **当前实际服务器（2026-07-24 实录，与下文标准方案有出入，以此为准）**：`root@8.138.111.12`，SSH 用密钥 `C:\Users\zq\Downloads\doc.pem`（本机无 rsync，用 `tar czf - ... | ssh "tar xzf -"` 上传）。代码 `/opt/fastapi/`（backend + backend/venv，**后端 nohup 直跑 :8765 + worker nohup 直跑，无 systemd**）；前端 dist 在 **`/opt/vue3/dist`**（nginx default.conf,80 端口反代 `/api` → 8765）；DB 在本机 localhost:5432/doc_review。`config.json` 在 `/opt/fastapi/`（服务器自有配置，**上传时切勿覆盖**；auth 段 2026-07-24 已补齐，与本地一致）。迁移踩过的坑：服务器 alembic_version 曾停在 014 但 015/017 对象已手工建过——用 `alembic stamp` 对齐后再 upgrade（016 external_api_logs 是真缺的，正常执行）。重启注意：**远程命令行里 `pkill -f 'uvicorn main:app'` 会匹配到 bash -c 自身导致自杀**，用 `pkill -f '[u]vicorn main:app'` 或按 PID 杀。备份在 `/opt/backups/`。2026-07-28 补充：重启统一用 **`/opt/fastapi/restart.sh`**（pkill+拉起 uvicorn:8765/worker-1，日志接 `/opt/fastapi/logs/`，用 `setsid bash restart.sh </dev/null >/dev/null 2>&1 &` 脱离会话执行——ssh 远程命令中途掉线(exit 255)曾导致只杀掉没拉起）；前端 dist 用 `dist.new` + `mv` 交换（旧目录留 `dist.old.*` 回滚）；**在服务器上 `curl localhost` 验证前端会命中 nginx 默认欢迎页**（站点 server block `server_name 8.138.111.12` 只 listen IPv4 80，localhost 解析到 IPv6 落默认块），正确姿势 `curl -H 'Host: 8.138.111.12' http://127.0.0.1/`。**2026-08-03 补充（用户口中「测试服务器」= 这台）**：已发布当前工作区全量改动（RapidOCR 3.9.2 替换 rapidocr-onnxruntime 1.4.4、image_preprocess 前处理、field_validators、RULES_VERSION=4 英文建人/sponsor/到期提醒、asyncpg 段错误修复），迁移 022→023（回填零重复组）→024→025 head。注意 `/opt/fastapi/venv` 是游离旧 venv，live 的是 `backend/venv`（restart.sh 从 backend/ 起 `venv/bin/python`）；worker stdout 写日志文件是全缓冲，重启后 log 里暂时看不到新 worker 启动行属正常（进程活着=引擎初始化已过）。
 
@@ -105,7 +105,7 @@ sudo systemctl reload nginx                    # 前端 dist 变化
 测试为简单 `assert` 脚本风格，不依赖 pytest：
 
 ```bash
-# 全量 CI 套件(27 项白名单:纯函数档 + DB 档;即 Jenkins 跑的同一份)
+# 全量 CI 套件(白名单唯一维护点 tests/run_ci.sh:纯函数档 + DB 档;即 Jenkins 跑的同一份)
 # DB 档需要:doc_review_ci 库 + CI_DB_PASSWORD 环境变量(脚本会自动重建该库,绝不碰 doc_review)
 cd e:/qoderproject/20260527
 bash tests/run_ci.sh
@@ -181,7 +181,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 
 ```text
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
-  frontend/src/router.js                 路由: /login, /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /archive-daily-report, /file-info, /profile, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads;全局守卫:无 token 一律跳 /login
+  frontend/src/router.js                 路由: /login, /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /archive-daily-report, /archive-prompts, /file-info, /profile, /expiry-reminders, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads;全局守卫:无 token 一律跳 /login
   frontend/src/api.js                    axios API 封装(token 存 localStorage,请求拦截器自动带 Bearer,401 清 token 跳登录)
   frontend/src/menu.js                   侧边栏菜单配置(与路由分离;App.vue 渲染左侧分组 el-sub-menu,点击展开/收缩,可折叠;新增页面=router.js 加路由+这里加项)
   frontend/src/tabs.js + components/TagsView.vue   多页签(tags-view):keep-alive 保活已访问页面,右键菜单 + 右侧固定下拉(同一 teleported 浮层,刷新/关闭其他/关闭全部);**新增页面还需:路由 meta 加 title/cache + 页面组件 defineOptions name**(异步组件拿不到 name,keep-alive include 走 meta.cache)
@@ -214,7 +214,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 config.json                              DB + LLM + OCR/文档类型配置
 output/                                  静态挂载为 /uploads/，保存 PNG/PDF/DOCX 等产物
 temp/                                    上传/下载/模板解析临时文件
-migrations/versions/                     Alembic 迁移(当前到 025_customer_files_sha256;023/024 同名折叠键,生产须 023→合并存量→024 分步执行)
+migrations/versions/                     Alembic 迁移(当前到 026_archive_detect_prompts;023/024 同名折叠键,生产须 023→合并存量→024 分步执行)
 docs/                                    重构参考开发文档(01-系统概览 ~ 07-重构规划 + 客户数据库-PRD)
 frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后端不是前端,见下节)
 ```
@@ -235,7 +235,8 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - `templates` / `template_fills`：Word 模板和填充历史。
 - `split_tasks`：PDF 拆分任务，持久化状态和 ranges；7 天后清理磁盘文件但保留 DB 记录。
 - `summaries`：URL 文件摘要历史。
-- `archive_detect_batches`：文件留底检测批次；包含 `overall_verdict/overall_score/overall_reason` 当次总体判断、`stage(pre_submit/post_submit)`。
+- `archive_detect_batches`：文件留底检测批次；包含 `overall_verdict/overall_score/overall_reason` 当次总体判断、`stage(pre_submit/post_submit)`;另有 `overall_verdict2/overall_score2/overall_reason2` 总体判定2(提示词库项目标准驱动,best-effort,失败留 NULL)。
+- `archive_detect_prompts`：提示词库(migration 026)。业务键=(project_name+project_code+project_detail_name+project_detail_code+progress_name)五元组(全 NOT NULL DEFAULT '',归一化 None→''+strip,唯一索引 ux_archive_detect_prompts_key);`prompt1`=批次总判模板(占位 token `{name_header}/{user_prompt}/{stage_hint}/{files_detail}/{n_files}`,改即生效)、`prompt2`=AI 按五元组生成的项目留底标准(空=缺失,批次 finalize 时自动生成补齐)。CRUD 在 `db/prompt_library_crud.py`,页面「文件留底→提示词库」。
 - `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`；DB 队列字段 `status(pending/leased/fetching/ocr/llm/done/error)`、`worker_lease_until`、`retry_count`、`local_path`(upload 模式残留,现已停用)、`reuse_ocr_text`(重审入队预填的源 OCR 文本,非空则 worker 跳过下载+OCR)。`verdict` 除 match/partial/mismatch 外还有 **`no_text`**(OCR/抽取后无有效文字,标 done 不算失败、不参与总体判定)。
 - `archive_detect_progress`：业务审核的进展包实体，`(client_id, progress_oid)` 唯一；存办理人、项目、项目详情、进展名称等。
 - `archive_detect_folder_summaries`：进展包维度滚动总报告（多版本，后续阶段使用）。
@@ -274,6 +275,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
   - 「批量重审」-> `POST /admin/rerun-files-batch` -> 对目标批次逐个 `rerun_batch_inplace(force_all)`,**重跑每个单文件**(复用 ocr_text,成本高、worker 串行),各批沿用自身 criteria;进度 `GET /admin/rerun-files-batch/progress`。生产别一次刷太多,会压垮 LLM。
 - 批次总报告：所有文件完成后，优先调用 `llm_service.judge_batch_overall`（把全部文件明细 + criteria + stage 交给 LLM），让其综合判定 `overall_verdict/overall_score/overall_reason`。**判定核心口径遵循 PSD 业务标准(适用于所有进展)**:留底的本质是证明该进展对应的服务确已启动或发生,不是必须有官方回执类关键件。证据可以是官方文件(批复函/受理回执/递交确认),也可以是软证据组合(服务合同 + 聊天记录/邮件/确认截图,如客户确认转卖房产即视为该项服务已启动)。只要存在能证明服务已启动的证据(官方件或软证据组合任一即可)整批即 match;只有辅助性附件、无任何服务启动证据才 partial;完全无服务痕迹才 mismatch。该原则及衍生业务规则(转款凭证以金额币种为准不强制客户姓名、银行开户类项目账户核心材料属隐私有账户/开户/转款凭证任一即符合且银行通用材料属正常附带件、阶段错配最多 partial 不硬性否决、单份文件检测失败/加密只影响该文件不拖垮整批)已固化在单文件 prompt(`_build_archive_detect_prompt`)和总判 prompt(`_build_judge_batch_overall_prompt`)的判定指南中。LLM 调用失败时回退旧的**规则平均分**（avg≥80->match / ≥50->partial / <50->mismatch）+ `summarize_batch` 文本兜底。finalize 统一由主进程 `_batch_finalize_poll` 轮询触发 `_generate_batch_overall`（快速检测路径的 `_orchestrate` 已随快速检测一并删除）。
 - 公司售后留底分类体系硬编码在 `llm_service.py` 的 `ARCHIVE_CATEGORIES_FULL/SIMPLE`，业务模式会传 `stage=pre_submit|post_submit` 让 LLM 感知递交前/后分类。
+- **总体判定2(2026-08-06)**：批次 finalize(`_generate_batch_overall`)在 overall1 落库后追加 best-effort `_generate_batch_overall_v2`——按进展五元组(项目名称/编码/项目详情/详情编码/进展名称)查提示词库行(没有则 get-or-create 建行,prompt1=`DEFAULT_JUDGE_OVERALL_TEMPLATE` 默认模板);prompt2 为空先调 `generate_archive_prompt_standard`(operation=`generate_archive_prompt2`)生成项目留底标准入库;再用 `judge_batch_overall_v2`(operation=`judge_batch_overall_2`,prompt=行.prompt1 渲染+prompt2 当判定标准+文件明细)判定,写 `overall_verdict2/score2/reason2`(reason2 过 redactor)。**全 try/except 隔离,失败只留 NULL + WARN 事件(batch.overall2),不触碰 overall1/批次状态**;历史 quick 批次(无进展或五字段全空)跳过不判。模板渲染走 `render_judge_overall_template`(单遍正则替换 5 token,**禁用 .format**——模板含 JSON 花括号字面量;缺 `{user_prompt}`/`{files_detail}` 兜底追加);`_parse_overall_json` 为判定1/2 共用的 verdict 白名单+score 档位归一解析。提示词库页面可「重新生成提示词2」(`POST /admin/prompts/{id}/regenerate-prompt2`)。
 
 ## 客户档案结构化生成
 
@@ -318,11 +320,12 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 ### 检测批次管理后台
 
 - 路由 `/api/archive-detect/admin/*`，前端 `ArchiveAdminPage.vue`（`/archive-admin`）。
-- 筛选:状态/来源/批次ID/客户/进展/日期范围 + **总体判断多选(match/partial/mismatch)** + **仅看有失败文件**(EXISTS 子查询)。
-- 详情弹窗展示批次全量信息(批次/客户/进展/办理人/项目/判定标准/总体/识别完成时间等),文件表含「文件编码(file_id)」列;数据源 `pollBusinessBatch`(business)或 `pollArchiveDetect`(历史 quick 批次)兜底。**弹窗已抽为共享组件 `BatchDetailDialog.vue`**(2026-08-03,审核任务管理与每日报告页共用)。
+- 筛选:状态/来源/批次ID/客户/进展/日期范围 + **总体判断多选(match/partial/mismatch)** + **总体2 多选(overall_verdict2)** + **仅看有失败文件**(EXISTS 子查询)。表格「总体」列后有「总体2」列(只显 verdict2 tag)。
+- 详情弹窗展示批次全量信息(批次/客户/进展/办理人/项目/判定标准/总体/识别完成时间等),有 overall_verdict2 时追加蓝色「总体判定2 · 标签 · 符合程度2/100 + 理由2」块;文件表含「文件编码(file_id)」列;数据源 `pollBusinessBatch`(business)或 `pollArchiveDetect`(历史 quick 批次)兜底。**弹窗已抽为共享组件 `BatchDetailDialog.vue`**(2026-08-03,审核任务管理与每日报告页共用)。
+- **提示词库**(2026-08-06):前端 `/archive-prompts`(ArchivePromptsPage.vue,菜单「文件留底」组)→ `/api/archive-detect/admin/prompts` CRUD + `POST .../{id}/regenerate-prompt2` + `GET .../prompts/default-template`(提示词1 重置用);五元组冲突 409。
 - **每日留底检测报告**(2026-08-03):`GET /api/archive-detect/admin/daily-report?date=` → `archive_detect_crud.admin_daily_report`——按批次 created_at 取当日全部批次按客户分组统计:done 按 overall_verdict 分桶 match/partial/mismatch/other、status=error 记 error、其余记 in_progress,avg_score 仅统计 done 且有分;无客户批次(历史 quick)归入合成桶。前端 `ArchiveDailyReportPage.vue`(`/archive-daily-report`,菜单「文件留底」组),点客户可看当日批次明细并弹 BatchDetailDialog。
 - 写操作:单批重审(`rerun/{batch_id}`)、按新规则批量重判(`admin/rejudge-overall`)、批量重审(`admin/rerun-files-batch`)—— 见上文「重审/重跑/批量操作」。
-- **原件预览「展示文件」(2026-08-06)**:`GET /api/archive-detect/admin/file/{record_id}/raw` + `/preview-pdf`(Office)——首次按 `source_url` 重下原件(`fetch_url_to_temp_with_refresh` 过期按 file_id 自动刷新)后**落本地缓存 `temp/archive_preview_cache/{record_id}{ext}`(含 `{record_id}.preview.pdf` 转换缓存),之后直接开缓存;按 mtime 20 天 GC**(`_split_cleanup_loop` 内 `file_fetcher.sweep_preview_cache`)。**缓存刻意不放 output/**:output/ 经 `/uploads` 静态挂载无鉴权,record_id 自增可遍历会裸奔;temp/ 无静态挂载只经鉴权端点流出。历史 quick 批次无 source_url → 404。前端 `BatchDetailDialog.vue` 文件表操作列 + `FileInfoPage.vue` 详情弹窗 footer 挂「展示文件」按钮,复用泛化后的 `FilePreviewDialog.vue`(新增 `fetchRaw`/`fetchPreviewPdf` props 注入取数函数,默认仍走客户画像接口;api.js 新增 `fetchArchiveDetectFileRawUrl`/`fetchArchiveDetectFilePreviewPdfUrl`,blob 错误体统一解 `{detail}` 文案)。
+- **原件预览「展示文件」(2026-08-06)**:`GET /api/archive-detect/admin/file/{record_id}/raw` + `/preview-pdf`(Office)——首次按 `source_url` 重下原件(`fetch_url_to_temp_with_refresh` 过期按 file_id 自动刷新)后**落本地缓存 `temp/archive_preview_cache/{record_id}{ext}`(含 `{record_id}.preview.pdf` 转换缓存),之后直接开缓存;按 mtime 20 天 GC**(`_split_cleanup_loop` 内 `file_fetcher.sweep_preview_cache`)。**缓存刻意不放 output/**:output/ 经 `/uploads` 静态挂载无鉴权,record_id 自增可遍历会裸奔;temp/ 无静态挂载只经鉴权端点流出。历史 quick 批次无 source_url → 404。前端两处「文件详情」弹窗(`BatchDetailDialog.vue` 嵌套弹窗 + `FileInfoPage.vue` 详情弹窗)**footer 挂「展示文件」按钮,点击在弹窗内右栏内嵌加载**(弹窗全高 100vh/宽 70% 居中,OCR 文本左/文件预览右等高分栏,打开详情不自动下载)。预览本体抽为共享组件 `FilePreviewPane.vue`(`fetchRaw`/`fetchPreviewPdf` props 注入取数函数,默认客户画像接口;按 file 对象引用监听,同 id 重复点击可重试),`FilePreviewDialog.vue` 改为包一层 Pane(画像页独立大预览行为不变);api.js 有 `fetchArchiveDetectFileRawUrl`/`fetchArchiveDetectFilePreviewPdfUrl`,blob 错误体统一解 `{detail}` 文案)。
 
 ### 文件信息（文件维度查询）
 

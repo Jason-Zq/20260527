@@ -27,6 +27,7 @@ from typing import Optional
 import llm_service
 import redactor
 from db import archive_detect_crud as crud
+from db import prompt_library_crud as prompt_lib
 import event_service
 
 
@@ -455,8 +456,76 @@ async def _generate_batch_overall(batch_id: str) -> None:
     except Exception:
         pass
 
+    # 总体判定2(提示词库项目标准,best-effort):批次终态已提交,任何失败只留 NULL+日志,不影响主流程
+    try:
+        await _generate_batch_overall_v2(batch_id, ctx, files_brief)
+    except Exception as e:
+        print(f"[finalize:{batch_id}] 总体判定2失败(忽略,不影响主流程): {e}")
+        try:
+            event_service.log_event(
+                event_service.WARN,
+                event_service.CATEGORY_BATCH_OVERALL2,
+                f"批次 {batch_id} 总体判定2失败: {e}",
+                context={"batch_id": batch_id, "error": str(e)[:500]},
+            )
+        except Exception:
+            pass
 
-def get_rejudge_progress() -> dict:
+
+# 提示词库五元组 per-key 锁:finalize 只在主进程跑,防同键并发双建行/重复生成 prompt2;
+# DB 唯一索引兜底(并发胜者重查),锁只是优化。字典规模受项目×进展组合数约束,不清理也可接受。
+_PROMPT_KEY_LOCKS: dict[tuple, asyncio.Lock] = {}
+
+
+async def _generate_batch_overall_v2(batch_id: str, ctx: dict, files_brief: list) -> None:
+    """批次总体判定2(提示词库驱动,best-effort)。
+
+    流程:按项目五元组查提示词库 → 无行则建行(prompt1=代码默认模板) → prompt2 为空则调 LLM
+    生成项目专属留底标准并入库 → prompt1(可编辑模板)+prompt2(标准)+文件明细 渲染判定
+    → overall_verdict2/score2/reason2 落库。失败不回退规则分,overall_*2 留 NULL。
+    """
+    key = prompt_lib.normalize_prompt_key(
+        ctx.get("project_name"), ctx.get("project_code"), ctx.get("project_detail_name"),
+        ctx.get("project_detail_code"), ctx.get("progress_name"),
+    )
+    if not ctx.get("progress_id") or not any(key):
+        print(f"[finalize:{batch_id}] 判定2跳过:无进展包/项目五元组全空(历史 quick 批次)")
+        return
+
+    lock = _PROMPT_KEY_LOCKS.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            row, _created = await prompt_lib.get_or_create_prompt(
+                key, default_prompt1=llm_service.DEFAULT_JUDGE_OVERALL_TEMPLATE)
+            standard = (row.get("prompt2") or "").strip()
+            if not standard:
+                async with _LLM_SEMAPHORE:
+                    standard = await asyncio.to_thread(
+                        llm_service.generate_archive_prompt_standard,
+                        *key, batch_id=batch_id, client_code=ctx.get("client_code"))
+                await prompt_lib.set_prompt2(row["id"], standard)
+            async with _LLM_SEMAPHORE:
+                result = await asyncio.to_thread(
+                    llm_service.judge_batch_overall_v2,
+                    files_brief, standard,
+                    judge_template=row.get("prompt1"),
+                    stage=ctx.get("stage"),
+                    client_name=ctx.get("client_name"),
+                    handler=ctx.get("handler"),
+                    batch_id=batch_id, client_code=ctx.get("client_code"))
+        reason2 = redactor.redact(result.get("reason") or "")
+        await crud.update_batch_overall2(batch_id, result["verdict"], result["score"], reason2)
+        event_service.log_event(
+            event_service.INFO,
+            event_service.CATEGORY_BATCH_OVERALL2,
+            f"批次 {batch_id} 总体判定2完成({result['verdict']} {result['score']}/100)",
+            context={"batch_id": batch_id, "overall_verdict2": result["verdict"],
+                     "overall_score2": result["score"]},
+        )
+    finally:
+        # 锁不再被持有时摘除,防长生命周期进程缓慢堆积(DB 唯一索引兜底极小窗口的并发)
+        if not lock.locked():
+            _PROMPT_KEY_LOCKS.pop(key, None)
     """返回批量重判进度快照(前端轮询)。"""
     return dict(_rejudge_progress)
 

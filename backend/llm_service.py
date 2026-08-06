@@ -993,14 +993,58 @@ def summarize_batch(
     return out
 
 
-def _build_judge_batch_overall_prompt(
-    files_brief: list,
+# 批次总体判定默认模板(提示词库 prompt1 的默认值)。
+# 占位 token: {name_header}/{user_prompt}/{stage_hint}/{files_detail}/{n_files}。
+# 渲染走单遍正则替换(render_judge_overall_template),禁止 .format——模板内含 JSON 示例花括号字面量。
+DEFAULT_JUDGE_OVERALL_TEMPLATE = (
+    "你是文档留底审核的总体判定助手。请综合一个批次内所有文件的检测结果,"
+    "对**整个批次是否满足该进展的留底要求**给出总体判断。\n\n"
+    "{name_header}"
+    "用户判定标准(该进展要求):\n{user_prompt}\n"
+    "{stage_hint}\n"
+    "各文件检测明细(共 {n_files} 条):\n{files_detail}\n\n"
+    "判定原则(重要):\n"
+    "0. **本次总体判定只关注批次内文件是否与公司留底分类体系相关,不核对具体项目名称、投资金额、转账金额等细节。**"
+    "留底的核心是证明相关服务确已启动或发生,而不是必须有官方回执类关键件。"
+    "证据既可以是官方文件(批复函/受理回执/递交确认),**也可以是软证据的组合**:"
+    "如服务合同 + 聊天记录/邮件/确认截图(客户确认凭证)。"
+    "合同 + 聊天记录/确认截图**不是无关附件**,它们组合起来即可构成证明服务已启动的关键证据链。\n"
+    "1. 一个批次通常包含**关键证据**(能证明服务成立,含上述官方件或软证据组合)"
+    "和**附带文件**(身份证、护照等辅助材料)。\n"
+    "2. **只要存在能证明服务已启动/已发生的证据(官方件或软证据组合任一即可),整批即判为 match**,"
+    "不因附带文件与进展不完全相关而降级——附带文件的低分不应拉低整体结论。\n"
+    "3. 若只有辅助性附件、既无官方关键件、也无任何能证明服务已启动的软证据组合,"
+    "则判 partial(材料不齐)。\n"
+    "4. 完全没有任何文件能体现服务已启动或发生 → mismatch。\n"
+    "5. **阶段错配不作硬性否决**:文件更适用于其他阶段(如递交前材料出现在递交后批次)不影响整体符合性,"
+    "只要文件本身可归入分类体系且与客户/办理人相关即可。\n"
+    "6. **单份文件检测失败/加密无法读取,只影响该文件,不影响其他文件的整体判断**;"
+    "不要因个别文件读取异常就把整批判为 mismatch。\n\n"
+    "请输出严格 JSON(不要 markdown、不要多余文字):\n"
+    '{"verdict":"match|partial|mismatch","score":0-100整数,"reason":"80-200字中文总体说明"}\n'
+    "score 与 verdict 需一致:match≥80,partial 50-79,mismatch<50。\n"
+    "reason 需说明:整体结论依据、关键文件命中情况、缺失或问题点。\n"
+    "**脱敏**:不要泄露金额/电话/身份证号/银行卡号,用 [金额]/[手机号]/[身份证]/[银行卡] 占位。\n"
+)
+
+_JUDGE_TEMPLATE_TOKEN_RE = re.compile(r"\{(name_header|user_prompt|stage_hint|files_detail|n_files)\}")
+
+
+def render_judge_overall_template(
+    template: Optional[str],
+    *,
     user_prompt: str,
+    files_brief: list,
     stage: Optional[str] = None,
     client_name: Optional[str] = None,
     handler: Optional[str] = None,
 ) -> str:
-    """批次总体判定 prompt:让 LLM 综合所有文件,理解关键件 vs 附件,输出 verdict/score/reason。"""
+    """渲染批次总判模板(提示词库 prompt1)。
+
+    单遍正则替换 5 个占位 token——注入值不会被二次扫描(值里恰好含 token 文本也不会被误替换);
+    不能用 .format:模板内含 JSON 示例花括号字面量。
+    自定义模板缺 {user_prompt}/{files_detail} 时兜底追加到末尾,保证判定输入完整;模板为空回退默认模板。
+    """
     lines = []
     for i, f in enumerate(files_brief, 1):
         kp = " | ".join(f.get("key_points") or [])
@@ -1026,55 +1070,48 @@ def _build_judge_batch_overall_prompt(
         name_parts.append(f"办理人：{handler}")
     name_header = ("本进展" + "；".join(name_parts) + "。\n") if name_parts else ""
 
-    return (
-        "你是文档留底审核的总体判定助手。请综合一个批次内所有文件的检测结果,"
-        "对**整个批次是否满足该进展的留底要求**给出总体判断。\n\n"
-        f"{name_header}"
-        f"用户判定标准(该进展要求):\n{user_prompt}\n"
-        f"{stage_hint}\n"
-        f"各文件检测明细(共 {len(files_brief)} 条):\n{detail}\n\n"
-        "判定原则(重要):\n"
-        "0. **本次总体判定只关注批次内文件是否与公司留底分类体系相关,不核对具体项目名称、投资金额、转账金额等细节。**"
-        "留底的核心是证明相关服务确已启动或发生,而不是必须有官方回执类关键件。"
-        "证据既可以是官方文件(批复函/受理回执/递交确认),**也可以是软证据的组合**:"
-        "如服务合同 + 聊天记录/邮件/确认截图(客户确认凭证)。"
-        "合同 + 聊天记录/确认截图**不是无关附件**,它们组合起来即可构成证明服务已启动的关键证据链。\n"
-        "1. 一个批次通常包含**关键证据**(能证明服务成立,含上述官方件或软证据组合)"
-        "和**附带文件**(身份证、护照等辅助材料)。\n"
-        "2. **只要存在能证明服务已启动/已发生的证据(官方件或软证据组合任一即可),整批即判为 match**,"
-        "不因附带文件与进展不完全相关而降级——附带文件的低分不应拉低整体结论。\n"
-        "3. 若只有辅助性附件、既无官方关键件、也无任何能证明服务已启动的软证据组合,"
-        "则判 partial(材料不齐)。\n"
-        "4. 完全没有任何文件能体现服务已启动或发生 → mismatch。\n"
-        "5. **阶段错配不作硬性否决**:文件更适用于其他阶段(如递交前材料出现在递交后批次)不影响整体符合性,"
-        "只要文件本身可归入分类体系且与客户/办理人相关即可。\n"
-        "6. **单份文件检测失败/加密无法读取,只影响该文件,不影响其他文件的整体判断**;"
-        "不要因个别文件读取异常就把整批判为 mismatch。\n\n"
-        "请输出严格 JSON(不要 markdown、不要多余文字):\n"
-        '{"verdict":"match|partial|mismatch","score":0-100整数,"reason":"80-200字中文总体说明"}\n'
-        "score 与 verdict 需一致:match≥80,partial 50-79,mismatch<50。\n"
-        "reason 需说明:整体结论依据、关键文件命中情况、缺失或问题点。\n"
-        "**脱敏**:不要泄露金额/电话/身份证号/银行卡号,用 [金额]/[手机号]/[身份证]/[银行卡] 占位。\n"
-    )
+    if not template or not template.strip():
+        template = DEFAULT_JUDGE_OVERALL_TEMPLATE
+    has_prompt_token = "{user_prompt}" in template
+    has_detail_token = "{files_detail}" in template
+    values = {
+        "name_header": name_header,
+        "user_prompt": user_prompt,
+        "stage_hint": stage_hint,
+        "files_detail": detail,
+        "n_files": str(len(files_brief)),
+    }
+    out = _JUDGE_TEMPLATE_TOKEN_RE.sub(lambda m: values[m.group(1)], template)
+    if not has_prompt_token:
+        out += f"\n\n用户判定标准(该进展要求):\n{user_prompt}\n"
+    if not has_detail_token:
+        out += f"\n\n各文件检测明细(共 {len(files_brief)} 条):\n{detail}\n"
+    return out
 
 
-def judge_batch_overall(
+def _build_judge_batch_overall_prompt(
     files_brief: list,
     user_prompt: str,
     stage: Optional[str] = None,
     client_name: Optional[str] = None,
     handler: Optional[str] = None,
-    **context,
-) -> dict:
-    """LLM 综合判定批次总体结论。返回 {verdict, score, reason}。
-
-    理解关键件 vs 附件:有关键文件命中即整批 match,不被附带文件拉低。
-    解析失败或字段非法时抛 ValueError,由调用方回退规则平均分。
-    """
-    prompt = _build_judge_batch_overall_prompt(
-        files_brief, user_prompt, stage=stage, client_name=client_name, handler=handler
+) -> str:
+    """批次总体判定 prompt:让 LLM 综合所有文件,理解关键件 vs 附件,输出 verdict/score/reason。"""
+    return render_judge_overall_template(
+        DEFAULT_JUDGE_OVERALL_TEMPLATE,
+        user_prompt=user_prompt,
+        files_brief=files_brief,
+        stage=stage,
+        client_name=client_name,
+        handler=handler,
     )
-    raw = _call_llm(prompt, operation="judge_batch_overall", **context)
+
+
+def _parse_overall_json(raw: str) -> dict:
+    """解析批次总判 LLM 输出:JSON 容错 + verdict 白名单 + score 钳位/档位归一。
+
+    judge_batch_overall 与 judge_batch_overall_v2 共用;解析失败抛 ValueError 由调用方兜底。
+    """
     try:
         start = raw.find("{")
         end = raw.rfind("}")
@@ -1102,6 +1139,100 @@ def judge_batch_overall(
 
     reason = str(data.get("reason", "")).strip()
     return {"verdict": verdict, "score": score, "reason": reason}
+
+
+def judge_batch_overall(
+    files_brief: list,
+    user_prompt: str,
+    stage: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
+    **context,
+) -> dict:
+    """LLM 综合判定批次总体结论。返回 {verdict, score, reason}。
+
+    理解关键件 vs 附件:有关键文件命中即整批 match,不被附带文件拉低。
+    解析失败或字段非法时抛 ValueError,由调用方回退规则平均分。
+    """
+    prompt = _build_judge_batch_overall_prompt(
+        files_brief, user_prompt, stage=stage, client_name=client_name, handler=handler
+    )
+    raw = _call_llm(prompt, operation="judge_batch_overall", **context)
+    return _parse_overall_json(raw)
+
+
+def build_retention_standard_prompt(
+    project_name: Optional[str] = None,
+    project_code: Optional[str] = None,
+    project_detail_name: Optional[str] = None,
+    project_detail_code: Optional[str] = None,
+    progress_name: Optional[str] = None,
+) -> str:
+    """提示词2 生成 prompt:按项目五元组问 LLM 该项目该进展的留底标准。纯函数便于测试。"""
+    fields = [
+        ("项目名称", project_name),
+        ("项目编码", project_code),
+        ("项目详情", project_detail_name),
+        ("项目详情编码", project_detail_code),
+        ("进展名称", progress_name),
+    ]
+    block = "\n".join(f"{label}：{value}" for label, value in fields if value)
+    return (
+        "你是移民/售后服务行业的文件留底审核专家。以下是公司业务系统中的一个服务进展节点信息：\n\n"
+        f"{block}\n\n"
+        "请根据以上项目与进展信息,给出该进展节点的**文件留底判定标准**,"
+        "供后续审核该进展下客户提交的文件批次时使用。要求：\n"
+        "1. 说明该进展节点留底的核心目的(要证明什么事实,如服务已启动/材料已递交/申请已获批)；\n"
+        "2. 列出可作为关键证据的文件类型(官方件如批复函/受理回执/递交确认,以及可接受的软证据组合"
+        "如服务合同+客户确认聊天记录/邮件/截图)；\n"
+        "3. 列出仅作辅助的附带材料类型；\n"
+        "4. 给出 match / partial / mismatch 三档的判定口径(什么情况算符合、部分符合、不符合)；\n"
+        "5. 输出为可直接使用的判定标准条文(中文,分条列示,300-600字),不要寒暄、不要解释思路。\n"
+    )
+
+
+def generate_archive_prompt_standard(
+    project_name: Optional[str] = None,
+    project_code: Optional[str] = None,
+    project_detail_name: Optional[str] = None,
+    project_detail_code: Optional[str] = None,
+    progress_name: Optional[str] = None,
+    **context,
+) -> str:
+    """调 LLM 生成项目专属留底标准(提示词库 prompt2)。返回条文文本;空响应抛 ValueError。"""
+    prompt = build_retention_standard_prompt(
+        project_name, project_code, project_detail_name, project_detail_code, progress_name
+    )
+    raw = _call_llm(prompt, operation="generate_archive_prompt2", **context)
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("留底标准生成返回空")
+    return text
+
+
+def judge_batch_overall_v2(
+    files_brief: list,
+    standard: str,
+    judge_template: Optional[str] = None,
+    stage: Optional[str] = None,
+    client_name: Optional[str] = None,
+    handler: Optional[str] = None,
+    **context,
+) -> dict:
+    """总体判定2:提示词库 prompt1(判定模板,可编辑生效) + prompt2(项目专属留底标准) 驱动。
+
+    返回 {verdict, score, reason};解析失败抛 ValueError,由调用方(best-effort)兜底。
+    """
+    prompt = render_judge_overall_template(
+        judge_template,
+        user_prompt=standard,
+        files_brief=files_brief,
+        stage=stage,
+        client_name=client_name,
+        handler=handler,
+    )
+    raw = _call_llm(prompt, operation="judge_batch_overall_2", **context)
+    return _parse_overall_json(raw)
 
 
 # ==================== 客户资料结构化抽取 ====================

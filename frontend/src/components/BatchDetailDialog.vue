@@ -32,6 +32,11 @@
         <p>{{ detail.overall_reason }}</p>
       </div>
 
+      <div v-if="detail?.overall_verdict2" class="overall-box overall-box-2">
+        <div class="overall-title">总体判定2 · {{ verdictLabel(detail.overall_verdict2) }} · {{ detail.overall_score2 }}/100</div>
+        <p v-if="detail.overall_reason2">{{ detail.overall_reason2 }}</p>
+      </div>
+
       <el-table :data="detail?.files || []" stripe empty-text="暂无文件" max-height="420">
         <el-table-column label="文件" min-width="220">
           <template #default="{ row }">
@@ -66,18 +71,18 @@
         <el-table-column label="复用" width="70" align="center">
           <template #default="{ row }"><el-tag v-if="row.is_reused" size="small" type="info">复用</el-tag><span v-else>-</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="170" align="center">
+        <el-table-column label="操作" width="110" align="center">
           <template #default="{ row }">
             <el-button size="small" type="primary" link :disabled="!row.id" @click.stop="openFileDetail(row)">详情</el-button>
-            <el-button size="small" type="primary" link :disabled="!canPreview(row)" @click.stop="openFilePreview(row)">展示文件</el-button>
           </template>
         </el-table-column>
       </el-table>
     </div>
   </el-dialog>
 
-  <el-dialog v-model="fileDialogVisible" title="文件详情" width="70%" append-to-body>
-    <div v-loading="fileLoading">
+  <!-- 文件详情:上下拉满 100%、宽 70% 居中;底部 OCR 文本(左)与文件预览(右)等高分栏,footer 挂「展示文件」 -->
+  <el-dialog v-model="fileDialogVisible" title="文件详情" width="70%" top="0" append-to-body class="file-detail-dialog">
+    <div v-loading="fileLoading" class="file-detail-body">
       <template v-if="fileDetail">
         <div class="detail-meta">
           <div><b>文件名：</b>{{ fileDetail.filename || '-' }}</div>
@@ -90,19 +95,28 @@
         </template>
         <el-divider content-position="left">判断依据</el-divider>
         <p class="reason-text">{{ fileDetail.reason || '-' }}</p>
-        <el-divider content-position="left">OCR 文本（已脱敏）</el-divider>
-        <pre class="ocr-text">{{ fileDetail.ocr_text || '无 OCR 文本' }}</pre>
+        <div class="detail-split">
+          <div class="split-col">
+            <div class="split-title">OCR 文本（已脱敏）</div>
+            <pre class="ocr-text">{{ fileDetail.ocr_text || '无 OCR 文本' }}</pre>
+          </div>
+          <div class="split-col">
+            <div class="split-title">文件预览</div>
+            <FilePreviewPane
+              class="split-preview"
+              :file="previewFile"
+              :fetch-raw="fetchArchiveDetectFileRawUrl"
+              :fetch-preview-pdf="fetchArchiveDetectFilePreviewPdfUrl"
+            />
+          </div>
+        </div>
       </template>
     </div>
+    <template #footer>
+      <el-button type="primary" :disabled="!canPreview(fileDetail)" @click="showPreview">展示文件</el-button>
+      <el-button @click="fileDialogVisible = false">关闭</el-button>
+    </template>
   </el-dialog>
-
-  <!-- 原件预览:首次按记录 id 重下原件(过期自动刷新),服务端本地缓存 20 天 -->
-  <FilePreviewDialog
-    v-model:visible="previewVisible"
-    :file="previewFile"
-    :fetch-raw="fetchArchiveDetectFileRawUrl"
-    :fetch-preview-pdf="fetchArchiveDetectFilePreviewPdfUrl"
-  />
 </template>
 
 <script setup>
@@ -111,7 +125,7 @@ import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getArchiveAdminFileDetail, pollBusinessBatch, pollArchiveDetect, fetchArchiveDetectFileRawUrl, fetchArchiveDetectFilePreviewPdfUrl } from '../api.js'
 import { verdictLabel, verdictTag, batchStatusLabel, batchStatusTag, sourceKindLabel } from '../utils/labels.js'
-import FilePreviewDialog from './FilePreviewDialog.vue'
+import FilePreviewPane from './FilePreviewPane.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -128,8 +142,7 @@ const fileDialogVisible = ref(false)
 const fileLoading = ref(false)
 const fileDetail = ref(null)
 
-// 原件预览(FilePreviewDialog):file 只需 id + filename
-const previewVisible = ref(false)
+// 文件详情弹窗右栏预览(FilePreviewPane)的数据源:null=未加载,点「展示文件」才填
 const previewFile = ref(null)
 
 // 历史 quick 批次无 file_id/source_url,原件不可获取,禁用按钮
@@ -137,9 +150,9 @@ function canPreview(row) {
   return !!row?.id && !!(row.file_id || row.source_url)
 }
 
-function openFilePreview(row) {
-  previewFile.value = { id: row.id, filename: row.filename }
-  previewVisible.value = true
+// 每次点击传新对象:同 id 也会触发 pane 重新加载(失败可重试)
+function showPreview() {
+  previewFile.value = { id: fileDetail.value?.id, filename: fileDetail.value?.filename }
 }
 
 watch(
@@ -175,6 +188,7 @@ async function openFileDetail(row) {
   fileDialogVisible.value = true
   fileLoading.value = true
   fileDetail.value = null
+  previewFile.value = null
   try {
     fileDetail.value = await getArchiveAdminFileDetail(row.id)
   } catch (err) {
@@ -200,11 +214,33 @@ async function openFileDetail(row) {
 .overall-box { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
 .overall-title { font-weight: 700; color: #c2410c; margin-bottom: 6px; }
 .overall-box p { margin: 0; color: #475569; line-height: 1.7; }
+.overall-box-2 { background: #eff6ff; border-color: #bfdbfe; }
+.overall-box-2 .overall-title { color: #1d4ed8; }
 .detail-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px; color: #334155; }
-.reason-text { line-height: 1.7; color: #334155; background: #f8fafc; padding: 10px 12px; border-radius: 8px; }
+.reason-text { line-height: 1.7; color: #334155; background: #f8fafc; padding: 10px 12px; border-radius: 8px; max-height: 140px; overflow: auto; }
 .reason-text.error-text { color: #b42318; background: #fef3f2; }
-.ocr-text { max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6; }
+.file-detail-body { height: 100%; display: flex; flex-direction: column; }
+.detail-split { flex: 1; min-height: 0; display: flex; gap: 12px; }
+.split-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.split-title { font-size: 13px; font-weight: 600; color: #64748b; }
+.split-preview { flex: 1; min-height: 0; }
+.ocr-text { flex: 1; min-height: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6; margin: 0; }
 .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-error-msg { margin-top: 2px; font-size: 12px; color: #b42318; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 1200px) { .summary-row { grid-template-columns: repeat(2, 1fr); } }
+</style>
+
+<style>
+/* 文件详情上下拉满:el-dialog append-to-body 渲染在 body 下,需非 scoped 才能命中 */
+.file-detail-dialog {
+  height: 100vh;
+  margin-top: 0;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+}
+.file-detail-dialog .el-dialog__body {
+  flex: 1;
+  min-height: 0;
+}
 </style>

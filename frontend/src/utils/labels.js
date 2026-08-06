@@ -50,6 +50,8 @@ export const REVIEW_REASON_OPTIONS = Object.entries(_REVIEW_REASONS).map(([value
 const _AI_OPERATIONS = {
   detect_archival: ['文件留底检测', '单文件留底判定'],
   judge_batch_overall: ['文件留底检测', '批次总体判定'],
+  judge_batch_overall_2: ['文件留底检测', '批次总体判定2'],
+  generate_archive_prompt2: ['文件留底检测', '留底标准生成(提示词2)'],
   summarize_batch: ['文件留底检测', '批次摘要(兜底)'],
   detect_large_table_doc: ['文件留底检测', '大表格检测'],
   recognize_doc_type: ['客户画像', '证件类型识别'],

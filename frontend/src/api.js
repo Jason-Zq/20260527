@@ -441,6 +441,38 @@ export async function getArchiveDailyReport(date) {
   return r.data
 }
 
+// ==================== 提示词库(文件留底检测) ====================
+
+export async function listArchivePrompts(params = {}) {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/prompts`, { params })
+  return r.data
+}
+
+export async function createArchivePrompt(payload) {
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/prompts`, payload)
+  return r.data
+}
+
+export async function updateArchivePrompt(rowId, payload) {
+  const r = await axios.put(`${API_BASE}/archive-detect/admin/prompts/${rowId}`, payload)
+  return r.data
+}
+
+export async function deleteArchivePrompt(rowId) {
+  const r = await axios.delete(`${API_BASE}/archive-detect/admin/prompts/${rowId}`)
+  return r.data
+}
+
+export async function regenerateArchivePrompt2(rowId) {
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/prompts/${rowId}/regenerate-prompt2`)
+  return r.data
+}
+
+export async function getArchivePromptDefaultTemplate() {
+  const r = await axios.get(`${API_BASE}/archive-detect/admin/prompts/default-template`)
+  return r.data
+}
+
 // ==================== Word 模板 相关接口 (v2: anchor-based) ====================
 
 /**

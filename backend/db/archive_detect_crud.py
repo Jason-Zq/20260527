@@ -420,6 +420,27 @@ async def update_batch_overall(
         await session.commit()
 
 
+async def update_batch_overall2(
+    batch_id: str,
+    overall_verdict2: Optional[str],
+    overall_score2: Optional[int],
+    overall_reason2: Optional[str],
+) -> None:
+    """写入批次总体判定2(overall_*2,提示词库项目标准驱动)。best-effort,由 finalize 末尾调用。"""
+    async with async_session_maker() as session:
+        stmt = (
+            sa_update(ArchiveDetectBatch)
+            .where(ArchiveDetectBatch.batch_id == batch_id)
+            .values(
+                overall_verdict2=_clean_text(overall_verdict2, _SMALL_TEXT_LIMIT),
+                overall_score2=overall_score2,
+                overall_reason2=_clean_text(overall_reason2, _REASON_LIMIT),
+            )
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+
 # ==================== 业务接口专用 CRUD ====================
 
 
@@ -697,6 +718,9 @@ async def get_business_batch(batch_id: str) -> Optional[dict]:
             "overall_verdict": b.overall_verdict,
             "overall_score": b.overall_score,
             "overall_reason": b.overall_reason,
+            "overall_verdict2": b.overall_verdict2,
+            "overall_score2": b.overall_score2,
+            "overall_reason2": b.overall_reason2,
             "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else "",
             "updated_at": b.updated_at.strftime("%Y-%m-%d %H:%M:%S") if b.updated_at else "",
             "files": [_file_to_dict(f) for f in (b.files or [])],
@@ -818,6 +842,7 @@ async def admin_list_batches(
     source_kind: Optional[str] = None,
     batch_id: Optional[str] = None,
     overall_verdict: Optional[list[str]] = None,
+    overall_verdict2: Optional[list[str]] = None,
     has_error_file: Optional[bool] = None,
     client_code: Optional[str] = None,
     client_name: Optional[str] = None,
@@ -852,6 +877,8 @@ async def admin_list_batches(
             conditions.append(ArchiveDetectBatch.batch_id.ilike(f"%{batch_id}%"))
         if overall_verdict:
             conditions.append(ArchiveDetectBatch.overall_verdict.in_(overall_verdict))
+        if overall_verdict2:
+            conditions.append(ArchiveDetectBatch.overall_verdict2.in_(overall_verdict2))
         if has_error_file:
             conditions.append(
                 exists().where(
@@ -895,6 +922,9 @@ async def admin_list_batches(
                 "overall_verdict": b.overall_verdict,
                 "overall_score": b.overall_score,
                 "overall_reason": b.overall_reason,
+                "overall_verdict2": b.overall_verdict2,
+                "overall_score2": b.overall_score2,
+                "overall_reason2": b.overall_reason2,
                 "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else "",
                 "updated_at": b.updated_at.strftime("%Y-%m-%d %H:%M:%S") if b.updated_at else "",
                 "client": _client_to_brief_dict(c) if c else None,
@@ -1355,6 +1385,11 @@ async def get_batch_context(batch_id: str) -> Optional[dict]:
                 Client.name.label("client_name"),
                 Client.client_code.label("client_code"),
                 ArchiveDetectProgress.handler.label("handler"),
+                ArchiveDetectProgress.project_name.label("project_name"),
+                ArchiveDetectProgress.project_code.label("project_code"),
+                ArchiveDetectProgress.project_detail_name.label("project_detail_name"),
+                ArchiveDetectProgress.project_detail_code.label("project_detail_code"),
+                ArchiveDetectProgress.progress_name.label("progress_name"),
             )
             .outerjoin(
                 ArchiveDetectProgress,

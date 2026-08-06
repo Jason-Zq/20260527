@@ -24,6 +24,7 @@ const routes = [
   { path: '/archive-detect', component: () => import('./components/ArchiveDetectEntryPage.vue'), meta: { title: '文件留底检测', cache: 'ArchiveDetectEntryPage' } },
   { path: '/archive-admin', component: () => import('./components/ArchiveAdminPage.vue'), meta: { title: '检测批次管理', cache: 'ArchiveAdminPage' } },
   { path: '/archive-daily-report', component: () => import('./components/ArchiveDailyReportPage.vue'), meta: { title: '每日留底检测报告', cache: 'ArchiveDailyReportPage' } },
+  { path: '/archive-prompts', component: () => import('./components/ArchivePromptsPage.vue'), meta: { title: '提示词库', cache: 'ArchivePromptsPage' } },
   { path: '/file-info', component: () => import('./components/FileInfoPage.vue'), meta: { title: '文件信息查询', cache: 'FileInfoPage' } },
   { path: '/profile', component: () => import('./components/ProfilePage.vue'), meta: { title: '画像任务', cache: 'ProfilePage' } },
   { path: '/expiry-reminders', component: () => import('./components/ExpiryRemindersPage.vue'), meta: { title: '到期提醒', cache: 'ExpiryRemindersPage' } },

@@ -43,6 +43,8 @@ import text_extractor
 import archive_detect_service
 import event_service
 from db import archive_detect_crud
+from db import prompt_library_crud
+from sqlalchemy.exc import IntegrityError
 
 # Bearer Token 鉴权声明(仅用于 OpenAPI 文档显示 Authorize 按钮 + docs 调用时带头)。
 # auto_error=False:不在此真正校验,真正拦截由 AuthMiddleware(ASGI)统一做,避免两套逻辑。
@@ -2490,6 +2492,9 @@ class ArchiveDetectBatchResponse(BaseModel):
     overall_verdict: Optional[str] = Field(None, description="批次总体判断:match/partial/mismatch(全部 done 后生成)")
     overall_score: Optional[int] = Field(None, description="批次总体匹配度 0-100(所有 done 文件的平均 match_score)")
     overall_reason: Optional[str] = Field(None, description="批次总体说明 80-200 字(LLM 生成,失败兜底规则文本)")
+    overall_verdict2: Optional[str] = Field(None, description="总体判定2(提示词库项目标准驱动):match/partial/mismatch;历史 quick 批次为 null")
+    overall_score2: Optional[int] = Field(None, description="总体判定2 符合程度 0-100")
+    overall_reason2: Optional[str] = Field(None, description="总体判定2 判断依据(脱敏后)")
     client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息(仅业务模式)")
     progress: Optional[ArchiveDetectProgressInfo] = Field(None, description="进展包信息(仅业务模式)")
     reused_count: Optional[int] = Field(None, description="本批次复用历史结果的文件数(仅业务模式)")
@@ -2564,6 +2569,9 @@ class ArchiveDetectAdminBatchItem(BaseModel):
     overall_verdict: Optional[str] = Field(None, description="批次总体判断")
     overall_score: Optional[int] = Field(None, description="批次总体匹配度")
     overall_reason: Optional[str] = Field(None, description="批次总体说明")
+    overall_verdict2: Optional[str] = Field(None, description="总体判定2(提示词库项目标准驱动)")
+    overall_score2: Optional[int] = Field(None, description="总体判定2 符合程度 0-100")
+    overall_reason2: Optional[str] = Field(None, description="总体判定2 判断依据")
     created_at: str = Field(..., description="创建时间")
     updated_at: str = Field(..., description="更新时间")
     client: Optional[ArchiveDetectClientInfo] = Field(None, description="客户信息(业务批次才有)")
@@ -2574,6 +2582,37 @@ class ArchiveDetectAdminBatchListResponse(BaseModel):
     """后台管理批次列表返回。"""
     items: list[ArchiveDetectAdminBatchItem] = Field(..., description="批次列表")
     total: int = Field(..., description="符合筛选条件的总条数")
+
+
+class ArchiveDetectPromptItem(BaseModel):
+    """提示词库条目(按项目五元组沉淀)。"""
+    id: int = Field(..., description="主键 ID")
+    project_name: str = Field("", description="项目名称")
+    project_code: str = Field("", description="项目编码")
+    project_detail_name: str = Field("", description="项目详情名称")
+    project_detail_code: str = Field("", description="项目详情编码")
+    progress_name: str = Field("", description="进展名称")
+    prompt1: Optional[str] = Field(None, description="提示词1:批次总体判定模板(可编辑,判定2 实时生效)")
+    prompt2: Optional[str] = Field(None, description="提示词2:项目专属留底标准(AI 生成,可手改)")
+    created_at: str = Field("", description="创建时间")
+    updated_at: str = Field("", description="更新时间")
+
+
+class ArchiveDetectPromptListResponse(BaseModel):
+    """提示词库列表返回。"""
+    items: list[ArchiveDetectPromptItem] = Field(..., description="提示词库条目数组")
+    total: int = Field(..., description="符合筛选条件的总条数")
+
+
+class ArchiveDetectPromptUpsertPayload(BaseModel):
+    """提示词库新增/编辑请求体。五元组可空串(归一化),prompt1 空则注入代码默认模板。"""
+    project_name: Optional[str] = Field(None, description="项目名称")
+    project_code: Optional[str] = Field(None, description="项目编码")
+    project_detail_name: Optional[str] = Field(None, description="项目详情名称")
+    project_detail_code: Optional[str] = Field(None, description="项目详情编码")
+    progress_name: Optional[str] = Field(None, description="进展名称")
+    prompt1: Optional[str] = Field(None, description="提示词1:批次总体判定模板;空=用代码默认模板")
+    prompt2: Optional[str] = Field(None, description="提示词2:项目专属留底标准;空=首次批次判定时自动生成")
 
 
 class ArchiveDetectDailyReportBucket(BaseModel):
@@ -3887,6 +3926,7 @@ async def archive_detect_admin_batches(
     source_kind: Optional[str] = Query(None, description="来源筛选:upload/url/batch/recheck"),
     batch_id: Optional[str] = Query(None, description="批次 ID 模糊查询"),
     overall_verdict: Optional[str] = Query(None, description="总体判断筛选,多值用逗号分隔:match,partial,mismatch"),
+    overall_verdict2: Optional[str] = Query(None, description="总体判定2筛选(提示词库项目标准),多值用逗号分隔:match,partial,mismatch"),
     has_error_file: Optional[bool] = Query(None, description="是否只看含识别失败文件的批次"),
     client_code: Optional[str] = Query(None, description="客户编码模糊查询"),
     client_name: Optional[str] = Query(None, description="客户姓名模糊查询"),
@@ -3912,11 +3952,19 @@ async def archive_detect_admin_batches(
         bad = [v for v in verdict_list if v not in allowed]
         if bad:
             raise HTTPException(status_code=400, detail=f"非法 overall_verdict: {bad}")
+    verdict2_list = None
+    if overall_verdict2:
+        verdict2_list = [v.strip() for v in overall_verdict2.split(",") if v.strip()]
+        allowed = {"match", "partial", "mismatch"}
+        bad = [v for v in verdict2_list if v not in allowed]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"非法 overall_verdict2: {bad}")
     return await archive_detect_crud.admin_list_batches(
         status=status,
         source_kind=source_kind,
         batch_id=batch_id,
         overall_verdict=verdict_list,
+        overall_verdict2=verdict2_list,
         has_error_file=has_error_file,
         client_code=client_code,
         client_name=client_name,
@@ -3928,6 +3976,108 @@ async def archive_detect_admin_batches(
         limit=limit,
         offset=offset,
     )
+
+
+@app.get(
+    "/api/archive-detect/admin/prompts/default-template",
+    tags=["文件留底检测"],
+    summary="提示词库 - 批次总判默认模板(提示词1 重置用)",
+)
+async def archive_detect_admin_prompt_default_template():
+    """返回代码内置的批次总体判定默认模板全文(含占位 token)。"""
+    return {"template": llm_service.DEFAULT_JUDGE_OVERALL_TEMPLATE}
+
+
+@app.get(
+    "/api/archive-detect/admin/prompts",
+    tags=["文件留底检测"],
+    summary="提示词库 - 列表(项目名/项目详情/进展名模糊+分页)",
+    response_model=ArchiveDetectPromptListResponse,
+)
+async def archive_detect_admin_prompts_list(
+    project_name: Optional[str] = Query(None, description="项目名称模糊查询"),
+    project_detail_name: Optional[str] = Query(None, description="项目详情名称模糊查询"),
+    progress_name: Optional[str] = Query(None, description="进展名称模糊查询"),
+    limit: int = Query(20, ge=1, le=200, description="返回条数,1-200"),
+    offset: int = Query(0, ge=0, description="分页偏移量"),
+):
+    return await prompt_library_crud.list_prompts(
+        project_name=project_name,
+        project_detail_name=project_detail_name,
+        progress_name=progress_name,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.post(
+    "/api/archive-detect/admin/prompts",
+    tags=["文件留底检测"],
+    summary="提示词库 - 新增(prompt1 空则注入默认模板;五元组冲突 409)",
+    response_model=ArchiveDetectPromptItem,
+)
+async def archive_detect_admin_prompts_create(payload: ArchiveDetectPromptUpsertPayload):
+    key = prompt_library_crud.normalize_prompt_key(
+        payload.project_name, payload.project_code, payload.project_detail_name,
+        payload.project_detail_code, payload.progress_name,
+    )
+    prompt1 = (payload.prompt1 or "").strip() or llm_service.DEFAULT_JUDGE_OVERALL_TEMPLATE
+    try:
+        return await prompt_library_crud.create_prompt(
+            key, prompt1=prompt1, prompt2=payload.prompt2)
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="该项目五元组(项目名称+编码+详情+详情编码+进展名称)已存在提示词库记录")
+
+
+@app.put(
+    "/api/archive-detect/admin/prompts/{row_id}",
+    tags=["文件留底检测"],
+    summary="提示词库 - 编辑(五元组+prompt1/prompt2 全量更新)",
+    response_model=ArchiveDetectPromptItem,
+)
+async def archive_detect_admin_prompts_update(row_id: int, payload: ArchiveDetectPromptUpsertPayload):
+    key = prompt_library_crud.normalize_prompt_key(
+        payload.project_name, payload.project_code, payload.project_detail_name,
+        payload.project_detail_code, payload.progress_name,
+    )
+    try:
+        row = await prompt_library_crud.update_prompt(
+            row_id, key, prompt1=payload.prompt1, prompt2=payload.prompt2)
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="该项目五元组与其他提示词库记录冲突")
+    if not row:
+        raise HTTPException(status_code=404, detail="提示词库记录不存在")
+    return row
+
+
+@app.delete(
+    "/api/archive-detect/admin/prompts/{row_id}",
+    tags=["文件留底检测"],
+    summary="提示词库 - 删除(下次同五元组批次判定时自动重建)",
+)
+async def archive_detect_admin_prompts_delete(row_id: int):
+    deleted = await prompt_library_crud.delete_prompt(row_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="提示词库记录不存在")
+    return {"deleted": True}
+
+
+@app.post(
+    "/api/archive-detect/admin/prompts/{row_id}/regenerate-prompt2",
+    tags=["文件留底检测"],
+    summary="提示词库 - 重新生成提示词2(按五元组调 LLM 生成项目留底标准)",
+)
+async def archive_detect_admin_prompts_regenerate_prompt2(row_id: int):
+    row = await prompt_library_crud.get_prompt_by_id(row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="提示词库记录不存在")
+    standard = await asyncio.to_thread(
+        llm_service.generate_archive_prompt_standard,
+        row["project_name"], row["project_code"], row["project_detail_name"],
+        row["project_detail_code"], row["progress_name"],
+    )
+    await prompt_library_crud.set_prompt2(row_id, standard)
+    return {"id": row_id, "prompt2": standard}
 
 
 @app.get(
