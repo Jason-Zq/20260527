@@ -59,13 +59,11 @@ const _AI_OPERATIONS = {
   extract_doc_fields_multi: ['客户画像', '多人字段提取'],
   asset_dedup: ['客户画像', '资产去重判定'],
   asset_merge: ['客户画像', '资产合并建议'],
-  extract_client_profile_facts: ['客户档案', '档案事实抽取'],
-  detect_and_extract: ['材料解析', '类型检测+字段提取'],
   classify_one_page: ['PDF拆分', '单页证件分类'],
   detect_page_ranges: ['PDF拆分', '页边界判定'],
   summarize_text: ['URL摘要', '文件摘要'],
   enrich_anchors_with_llm: ['Word模板', '锚点智能补充'],
-  match_anchors_to_client: ['Word模板', '锚点匹配客户'],
+  match_anchors_to_person: ['Word模板', '锚点匹配人员'],
 }
 
 export function operationLabel(op) {

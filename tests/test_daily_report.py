@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from db import archive_detect_crud
 from db.engine import async_session_maker
-from db.models import ArchiveDetectBatch, ArchiveDetectProgress, Client
+from db.models import ArchiveDetectBatch, ArchiveDetectProgress
 from sqlalchemy import delete as sa_delete
 
 DAY1 = "2099-01-15"
@@ -29,15 +29,14 @@ def _ts(day: str, hour: int = 10) -> datetime:
 
 
 async def _setup(suffix: str):
-    """建 2 客户 + 2 进展包 + 9 个批次(8 个在 DAY1,1 个在 DAY2)。返回 (client_ids, progress_ids)。"""
+    """建 2 个进展包(客户编码/姓名冗余在进展包上,2026-08 起不再有 clients 表) + 9 个批次
+    (8 个在 DAY1,1 个在 DAY2)。返回 progress_ids。"""
     async with async_session_maker() as s:
-        ca = Client(name=f"日报测试甲-{suffix}", client_code=f"DRT-A-{suffix}")
-        cb = Client(name=f"日报测试乙-{suffix}", client_code=f"DRT-B-{suffix}")
-        s.add_all([ca, cb])
-        await s.flush()
-        pa = ArchiveDetectProgress(client_id=ca.id, progress_oid=f"DRT-PA-{suffix}", handler="测试办理人",
+        pa = ArchiveDetectProgress(client_code=f"DRT-A-{suffix}", client_name=f"日报测试甲-{suffix}",
+                                   progress_oid=f"DRT-PA-{suffix}", handler="测试办理人",
                                    project_name="项目A", progress_name="进展A")
-        pb = ArchiveDetectProgress(client_id=cb.id, progress_oid=f"DRT-PB-{suffix}", handler="测试办理人",
+        pb = ArchiveDetectProgress(client_code=f"DRT-B-{suffix}", client_name=f"日报测试乙-{suffix}",
+                                   progress_oid=f"DRT-PB-{suffix}", handler="测试办理人",
                                    project_name="项目B", progress_name="进展B")
         s.add_all([pa, pb])
         await s.flush()
@@ -66,20 +65,19 @@ async def _setup(suffix: str):
             batch(9, DAY2, "done", "mismatch", 10, pa.id),
         ])
         await s.commit()
-        return [ca.id, cb.id], [pa.id, pb.id]
+        return [pa.id, pb.id]
 
 
-async def _cleanup(suffix: str, client_ids, progress_ids):
+async def _cleanup(suffix: str, progress_ids):
     async with async_session_maker() as s:
         await s.execute(sa_delete(ArchiveDetectBatch).where(ArchiveDetectBatch.batch_id.like(f"drtest-{suffix}-%")))
         await s.execute(sa_delete(ArchiveDetectProgress).where(ArchiveDetectProgress.id.in_(progress_ids)))
-        await s.execute(sa_delete(Client).where(Client.id.in_(client_ids)))
         await s.commit()
 
 
 async def main():
     suffix = uuid.uuid4().hex[:8]
-    client_ids, progress_ids = await _setup(suffix)
+    progress_ids = await _setup(suffix)
     try:
         rep = await archive_detect_crud.admin_daily_report(DAY1)
 
@@ -118,7 +116,7 @@ async def main():
         rep3 = await archive_detect_crud.admin_daily_report("2099-02-01")
         assert rep3["totals"]["batches"] == 0 and rep3["clients"] == [], rep3
     finally:
-        await _cleanup(suffix, client_ids, progress_ids)
+        await _cleanup(suffix, progress_ids)
 
 
 if __name__ == "__main__":

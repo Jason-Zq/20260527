@@ -13,11 +13,7 @@ const TOKEN_KEY = 'doc_review_token'
 const routes = [
   { path: '/login', component: () => import('./components/LoginPage.vue'), meta: { public: true } },
   { path: '/', component: () => import('./components/HomePage.vue'), meta: { title: '首页', cache: 'HomePage' } },
-  { path: '/clients', component: () => import('./components/ClientListPage.vue'), meta: { title: '客户档案', cache: 'ClientListPage' } },
-  // 客户详情是多实例路由(/clients/1、/clients/2 同名组件),keep-alive 按组件名匹配对它
-  // 会"刷新一个误杀其他缓存 + 关闭后实例残留",故不设 meta.cache 不参与保活(tab 正常用)
-  { path: '/clients/:clientId', component: () => import('./components/ClientDetailPage.vue'), props: route => ({ clientId: Number(route.params.clientId) }), meta: { title: '客户详情' } },
-  { path: '/parse', component: () => import('./components/ParseEntryPage.vue'), meta: { title: 'AI 材料解析', cache: 'ParseEntryPage' } },
+  { path: '/parse', component: () => import('./components/ParseEntryPage.vue'), meta: { title: '材料解析', cache: 'ParseEntryPage' } },
   { path: '/template', component: () => import('./components/FillEntryPage.vue'), meta: { title: 'AI 填写文件', cache: 'FillEntryPage' } },
   { path: '/split', component: () => import('./components/SplitEntryPage.vue'), meta: { title: '处理超长 PDF', cache: 'SplitEntryPage' } },
   { path: '/summary', component: () => import('./components/SummaryEntryPage.vue'), meta: { title: 'URL 文件摘要', cache: 'SummaryEntryPage' } },
@@ -33,7 +29,6 @@ const routes = [
   { path: '/request-logs', component: () => import('./components/RequestLogsPage.vue'), meta: { title: '外部请求日志', cache: 'RequestLogsPage' } },
   { path: '/external-api-logs', component: () => import('./components/ExternalApiLogsPage.vue'), meta: { title: '调用外部接口', cache: 'ExternalApiLogsPage' } },
   { path: '/ai-api-calls', component: () => import('./components/AiApiCallsPage.vue'), meta: { title: 'AI 调用记录', cache: 'AiApiCallsPage' } },
-  { path: '/child-age-leads', component: () => import('./components/ChildAgeLeadsPage.vue'), meta: { title: '子女年龄线索', cache: 'ChildAgeLeadsPage' } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

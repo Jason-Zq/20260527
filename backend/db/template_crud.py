@@ -122,15 +122,15 @@ async def delete_template(template_id: int) -> bool:
 
 async def create_template_fill(
     template_id: int,
-    client_id: Optional[int],
+    person_id: Optional[int],
     placeholder_values: dict,
     output_pdf: Optional[str] = None,
 ) -> int:
-    """记录一次模板填充。"""
+    """记录一次模板填充。person_id 关联画像人员(2026-08 起;旧 client_id 列仅留历史值)。"""
     async with async_session_maker() as session:
         fill = TemplateFill(
             template_id=template_id,
-            client_id=client_id,
+            person_id=person_id,
             placeholder_values=placeholder_values,
             output_pdf=output_pdf,
             created_at=datetime.now(),
@@ -141,14 +141,14 @@ async def create_template_fill(
         return fill.id
 
 
-async def get_cached_fill(template_id: int, client_id: int) -> Optional[dict]:
-    """取最新一条 (template_id, client_id) 填充作为映射缓存。"""
+async def get_cached_fill(template_id: int, person_id: int) -> Optional[dict]:
+    """取最新一条 (template_id, person_id) 填充作为映射缓存。"""
     async with async_session_maker() as session:
         stmt = (
             select(TemplateFill)
             .where(
                 TemplateFill.template_id == template_id,
-                TemplateFill.client_id == client_id,
+                TemplateFill.person_id == person_id,
             )
             .order_by(TemplateFill.created_at.desc())
             .limit(1)
@@ -158,58 +158,3 @@ async def get_cached_fill(template_id: int, client_id: int) -> Optional[dict]:
         if not fill or not fill.placeholder_values:
             return None
         return dict(fill.placeholder_values) if not isinstance(fill.placeholder_values, dict) else fill.placeholder_values
-
-
-async def list_fills_by_client(client_id: int, limit: int = 100) -> list[dict]:
-    """按客户 id 反查模板生成历史，按时间倒序。
-    供客户详情页"已生成文件"tab 使用。
-    JOIN templates 拿模板名称。
-    output_pdf 转为可通过 /uploads/ 访问的相对路径（位于 output/templates/{tid}/fills/ 下）。
-    """
-    import os as _os
-    backend_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))  # backend/
-    output_root = _os.path.normpath(_os.path.join(backend_dir, "..", "output"))
-
-    async with async_session_maker() as session:
-        stmt = (
-            select(TemplateFill, Template.name, Template.filename)
-            .join(Template, Template.id == TemplateFill.template_id)
-            .where(TemplateFill.client_id == client_id)
-            .order_by(TemplateFill.created_at.desc())
-            .limit(limit)
-        )
-        res = await session.execute(stmt)
-        rows = res.all()
-
-        result = []
-        for fill, tpl_name, tpl_filename in rows:
-            placeholder_count = 0
-            if isinstance(fill.placeholder_values, dict):
-                placeholder_count = sum(1 for v in fill.placeholder_values.values() if v)
-
-            # 把绝对路径转为 /uploads/ 相对路径
-            output_url = None
-            output_kind = None
-            if fill.output_pdf:
-                abs_path = fill.output_pdf
-                if _os.path.exists(abs_path):
-                    try:
-                        rel = _os.path.relpath(abs_path, output_root).replace("\\", "/")
-                        if not rel.startswith(".."):
-                            output_url = f"/uploads/{rel}"
-                            output_kind = "pdf" if abs_path.lower().endswith(".pdf") else "docx"
-                    except ValueError:
-                        # Windows 跨盘符 relpath 抛 ValueError，忽略
-                        pass
-
-            result.append({
-                "id": fill.id,
-                "template_id": fill.template_id,
-                "template_name": tpl_name,
-                "template_filename": tpl_filename,
-                "placeholder_count": placeholder_count,
-                "output_url": output_url,
-                "output_kind": output_kind,
-                "created_at": fill.created_at.strftime("%Y-%m-%d %H:%M:%S") if fill.created_at else "",
-            })
-        return result

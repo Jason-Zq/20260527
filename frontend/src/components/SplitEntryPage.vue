@@ -2,10 +2,6 @@
   <div class="split-entry-page">
     <!-- 子页顶栏 -->
     <div class="entry-header">
-      <el-button class="back-btn" @click="emit('back')" size="default">
-        <el-icon style="margin-right: 4px"><ArrowLeft /></el-icon>
-        返回首页
-      </el-button>
       <div class="entry-title">
         <span class="title-indicator"></span>
         处理超长PDF文件
@@ -262,7 +258,7 @@
 <script setup>
 defineOptions({ name: 'SplitEntryPage' })
 import { ref, computed, onUnmounted } from 'vue'
-import { ArrowLeft, Upload, Download, Files, View, Clock, Refresh } from '@element-plus/icons-vue'
+import { Upload, Download, Files, View, Clock, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import {
   uploadSplitPdf,
@@ -272,12 +268,6 @@ import {
   listSplitHistory,
   deleteSplitHistory,
 } from '../api.js'
-import { useRouter } from 'vue-router'
-
-const router = useRouter()
-function emit(evt) {
-  if (evt === 'back') router.push('/')
-}
 
 const processing = ref(false)
 const result = ref(null)
@@ -589,18 +579,6 @@ onUnmounted(() => {
   border-bottom: 1px solid #e8ebf5;
 }
 
-.back-btn {
-  background: #f1f5f9 !important;
-  border: 1px solid #e2e8f0 !important;
-  color: #475569 !important;
-  font-weight: 500 !important;
-  border-radius: 8px !important;
-}
-
-.back-btn:hover {
-  background: #e2e8f0 !important;
-  color: #10b981 !important;
-}
 
 .entry-title {
   font-size: 16px;

@@ -15,10 +15,32 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from db.ai_api_call_crud import _clean_text
-from db.client_profile_crud import _parse_date, _clean_str
 from db.doc_extract_crud import is_masked, valid_id_number
 from db.engine import async_session_maker
 from db.models import CustomerFile, DocExtractResult, ProfileAsset, ProfileCase, ProfileHousehold, ProfileImportTask, ProfilePerson, ProfilePersonField
+
+
+# ==================== 通用取值清洗(原 db/client_profile_crud,2026-08 随旧表删除迁入) ====================
+
+def _parse_date(value) -> Optional[date]:
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _clean_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
 
 
 # ==================== 字段字典(规则 target 的取值范围 + 默认可信度层) ====================
@@ -242,6 +264,38 @@ async def list_household_ids() -> list[int]:
             select(ProfileHousehold.id).order_by(ProfileHousehold.id))).scalars().all())
 
 
+async def list_household_options(keyword: str = "", limit: int = 20) -> list[dict]:
+    """家庭下拉选项:按家庭名/customer_code 模糊,返回 [{id,name,customer_code}]。
+
+    供模板填写等场景做「选家庭→选人」两级选择;无关键词时按 id 倒序给最近家庭。
+    """
+    async with async_session_maker() as session:
+        stmt = select(ProfileHousehold)
+        kw = (keyword or "").strip()
+        if kw:
+            like = f"%{kw}%"
+            stmt = stmt.where(or_(ProfileHousehold.name.ilike(like),
+                                  ProfileHousehold.customer_code.ilike(like)))
+        stmt = stmt.order_by(ProfileHousehold.id.desc()).limit(max(1, min(limit, 100)))
+        rows = (await session.execute(stmt)).scalars().all()
+        return [{"id": h.id, "name": h.name, "customer_code": h.customer_code} for h in rows]
+
+
+async def get_person_field_map(person_id: int) -> Optional[dict]:
+    """单人的 {field: value} 拍平(只含非空值);人员不存在返回 None。
+
+    (person_id, field) 唯一,天然单值;供模板填写按 person 取字段值。
+    """
+    async with async_session_maker() as session:
+        p = await session.get(ProfilePerson, person_id)
+        if not p:
+            return None
+        frows = (await session.execute(
+            select(ProfilePersonField).where(ProfilePersonField.person_id == person_id)
+        )).scalars().all()
+        return {f.field: f.value for f in frows if f.value}
+
+
 async def get_person(person_id: int) -> Optional[dict]:
     """单个人员(不含字段档案),手动合并端点校验用。"""
     async with async_session_maker() as session:
@@ -313,7 +367,7 @@ async def list_expiry_reminders(days: int = PASSPORT_EXPIRY_WARNING_DAYS,
 
     续签/换证 = 移民服务的 recurring revenue 入口。level: expired(<0) / expiring(≤days) / ok;
     默认只回 active(expired+expiring),include_ok=True 带全部。keyword 模糊家庭名/成员名。
-    Python 层过滤(数据量小,与 sales_crud 同模式),total 为过滤后全量。
+    Python 层过滤(数据量小),total 为过滤后全量。
     """
     today = date.today()
     async with async_session_maker() as session:

@@ -1,7 +1,7 @@
 /**
  * 侧边栏菜单配置（与路由分离：路由在 router.js，这里只管展示分组/图标/文案）。
  * 新增页面 = router.js 加路由 + 这里对应分组加一项；
- * 不进菜单的页面（如 /clients、/child-age-leads）只加路由即可。
+ * 不进菜单的页面只加路由即可。
  * 分组 key 是 el-sub-menu 的 index（稳定标识，改 title 不影响展开逻辑）。
  */
 import {
@@ -52,7 +52,7 @@ export const menuGroups = [
     title: '工具箱',
     icon: Tools,
     items: [
-      { path: '/parse', title: 'AI 材料解析', icon: MagicStick },
+      { path: '/parse', title: '材料解析', icon: MagicStick },
       { path: '/template', title: 'AI 填写文件', icon: EditPen },
       { path: '/split', title: '处理超长 PDF', icon: Scissor },
       { path: '/summary', title: 'URL 文件摘要', icon: Link },

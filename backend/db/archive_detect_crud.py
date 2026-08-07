@@ -10,7 +10,7 @@ from sqlalchemy import select, update as sa_update, delete as sa_delete, func, e
 from sqlalchemy.orm import selectinload, defer, undefer
 
 from db.engine import async_session_maker
-from db.models import ArchiveDetectBatch, ArchiveDetectFile, ArchiveDetectProgress, Client
+from db.models import ArchiveDetectBatch, ArchiveDetectFile, ArchiveDetectProgress
 
 
 # C0 控制字符清洗表:PostgreSQL text 列不接受 NUL(0x00),其它 C0 控制符也无存储价值,
@@ -89,7 +89,8 @@ def _file_to_dict(f: ArchiveDetectFile) -> dict:
 def _progress_to_dict(p: ArchiveDetectProgress) -> dict:
     return {
         "id": p.id,
-        "client_id": p.client_id,
+        "client_code": p.client_code,
+        "client_name": p.client_name,
         "handler": p.handler,
         "project_name": p.project_name,
         "project_code": p.project_code,
@@ -100,11 +101,13 @@ def _progress_to_dict(p: ArchiveDetectProgress) -> dict:
     }
 
 
-def _client_to_brief_dict(c: Client) -> dict:
+def _client_brief_from_progress(p: ArchiveDetectProgress) -> dict:
+    """从进展包冗余列组装 client 简要信息(2026-08 起客户编码/姓名存在进展包表,
+    旧 clients 表已删除;id 键保留恒 None 防止消费方按 key 取值报错)。"""
     return {
-        "id": c.id,
-        "client_code": c.client_code,
-        "name": c.name,
+        "id": None,
+        "client_code": p.client_code,
+        "name": p.client_name,
     }
 
 
@@ -444,36 +447,10 @@ async def update_batch_overall2(
 # ==================== 业务接口专用 CRUD ====================
 
 
-async def upsert_client_by_code(client_code: str, name: str) -> int:
-    """按 client_code upsert clients 表,返回 client.id。
-
-    存在则 UPDATE name(若变了),不存在则 INSERT。
-    """
-    async with async_session_maker() as session:
-        stmt = select(Client).where(Client.client_code == client_code)
-        res = await session.execute(stmt)
-        c = res.scalar_one_or_none()
-        if c:
-            if c.name != name:
-                c.name = name
-                c.updated_at = datetime.now()
-                await session.commit()
-            return c.id
-        c = Client(
-            client_code=client_code,
-            name=name,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        )
-        session.add(c)
-        await session.commit()
-        await session.refresh(c)
-        return c.id
-
-
 async def upsert_progress(
     *,
-    client_id: int,
+    client_code: str,
+    client_name: str,
     progress_oid: str,
     handler: Optional[str] = None,
     project_name: Optional[str] = None,
@@ -482,19 +459,21 @@ async def upsert_progress(
     project_detail_code: Optional[str] = None,
     progress_name: Optional[str] = None,
 ) -> dict:
-    """按 (client_id, progress_oid) upsert,返回 progress dict(含 id)。
+    """按 (client_code, progress_oid) upsert,返回 progress dict(含 id)。
 
-    存在则更新所有可选字段(handler/项目/进展名,即便为 None 也覆盖),不存在则 INSERT。
+    存在则更新所有可选字段(handler/项目/进展名,即便为 None 也覆盖);
+    client_name 变了也更新(提交时快照语义)。不存在则 INSERT。
     """
     async with async_session_maker() as session:
         stmt = select(ArchiveDetectProgress).where(
-            ArchiveDetectProgress.client_id == client_id,
+            ArchiveDetectProgress.client_code == client_code,
             ArchiveDetectProgress.progress_oid == progress_oid,
         )
         res = await session.execute(stmt)
         p = res.scalar_one_or_none()
         now = datetime.now()
         if p:
+            p.client_name = client_name
             p.handler = handler
             p.project_name = project_name
             p.project_code = project_code
@@ -506,7 +485,8 @@ async def upsert_progress(
             await session.refresh(p)
             return _progress_to_dict(p)
         p = ArchiveDetectProgress(
-            client_id=client_id,
+            client_code=client_code,
+            client_name=client_name,
             progress_oid=progress_oid,
             handler=handler,
             project_name=project_name,
@@ -726,15 +706,11 @@ async def get_business_batch(batch_id: str) -> Optional[dict]:
             "files": [_file_to_dict(f) for f in (b.files or [])],
         }
 
-        # 进展 + 客户透传
+        # 进展 + 客户透传(客户编码/姓名冗余在 progress 行)
         if b.progress:
             p = b.progress
             out["progress"] = _progress_to_dict(p)
-            # 取 client 简要信息
-            client_stmt = select(Client).where(Client.id == p.client_id)
-            cres = await session.execute(client_stmt)
-            c = cres.scalar_one_or_none()
-            out["client"] = _client_to_brief_dict(c) if c else None
+            out["client"] = _client_brief_from_progress(p)
         else:
             out["progress"] = None
             out["client"] = None
@@ -769,11 +745,7 @@ async def get_batch_files_for_recheck(batch_id: str) -> Optional[dict]:
         out = _batch_to_dict(b, include_files=False)
         out["progress_id"] = b.progress_id
         out["progress"] = _progress_to_dict(b.progress) if b.progress else None
-        out["client"] = None
-        if b.progress:
-            cres = await session.execute(select(Client).where(Client.id == b.progress.client_id))
-            c = cres.scalar_one_or_none()
-            out["client"] = _client_to_brief_dict(c) if c else None
+        out["client"] = _client_brief_from_progress(b.progress) if b.progress else None
 
         files = []
         for f in b.files or []:
@@ -854,18 +826,16 @@ async def admin_list_batches(
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    """后台批次列表:join progress/client,支持基础筛选。"""
+    """后台批次列表:join progress(客户编码/姓名冗余在 progress 行),支持基础筛选。"""
     async with async_session_maker() as session:
         stmt = (
-            select(ArchiveDetectBatch, ArchiveDetectProgress, Client)
+            select(ArchiveDetectBatch, ArchiveDetectProgress)
             .outerjoin(ArchiveDetectProgress, ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id)
-            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
         )
         count_stmt = (
             select(func.count())
             .select_from(ArchiveDetectBatch)
             .outerjoin(ArchiveDetectProgress, ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id)
-            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
         )
 
         conditions = []
@@ -887,9 +857,9 @@ async def admin_list_batches(
                 )
             )
         if client_code:
-            conditions.append(Client.client_code.ilike(f"%{client_code}%"))
+            conditions.append(ArchiveDetectProgress.client_code.ilike(f"%{client_code}%"))
         if client_name:
-            conditions.append(Client.name.ilike(f"%{client_name}%"))
+            conditions.append(ArchiveDetectProgress.client_name.ilike(f"%{client_name}%"))
         if progress_oid:
             conditions.append(ArchiveDetectProgress.progress_oid.ilike(f"%{progress_oid}%"))
         if progress_name:
@@ -911,7 +881,7 @@ async def admin_list_batches(
         total = (await session.execute(count_stmt)).scalar() or 0
 
         items = []
-        for b, p, c in rows:
+        for b, p in rows:
             items.append({
                 "batch_id": b.batch_id,
                 "source_kind": b.source_kind,
@@ -927,7 +897,7 @@ async def admin_list_batches(
                 "overall_reason2": b.overall_reason2,
                 "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else "",
                 "updated_at": b.updated_at.strftime("%Y-%m-%d %H:%M:%S") if b.updated_at else "",
-                "client": _client_to_brief_dict(c) if c else None,
+                "client": _client_brief_from_progress(p) if p else None,
                 "progress": _progress_to_dict(p) if p else None,
             })
         return {"items": items, "total": total}
@@ -938,28 +908,28 @@ async def admin_daily_report(date_str: str) -> dict:
 
     分桶: status=done 按 overall_verdict 分 match/partial/mismatch(NULL 落 other);
     status=error 记 error;其余(running 等)记 in_progress。avg_score 仅统计 done 且有分的批次。
-    无客户的批次(历史 quick 类)归入 client_id=None 的合成桶。
+    无客户的批次(历史 quick 类)归入 client_code 为空的合成桶。
+    (2026-08 起客户编码/姓名直读 progress 冗余列,不再 join clients;响应仍带 client_id 键恒 None 兼容)
     """
     day = datetime.strptime(date_str, "%Y-%m-%d")
     next_day = day + timedelta(days=1)
     async with async_session_maker() as session:
         stmt = (
             select(
-                Client.id, Client.client_code, Client.name,
+                ArchiveDetectProgress.client_code, ArchiveDetectProgress.client_name,
                 ArchiveDetectBatch.status, ArchiveDetectBatch.overall_verdict,
                 ArchiveDetectBatch.overall_score, ArchiveDetectBatch.total_files,
             )
             .outerjoin(ArchiveDetectProgress, ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id)
-            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
             .where(ArchiveDetectBatch.created_at >= day, ArchiveDetectBatch.created_at < next_day)
         )
         rows = (await session.execute(stmt)).all()
 
     buckets = ("match", "partial", "mismatch", "other", "error", "in_progress")
 
-    def _new_bucket(client_id, client_code, client_name):
+    def _new_bucket(client_code, client_name):
         return {
-            "client_id": client_id, "client_code": client_code or "", "name": client_name or "（无客户信息）",
+            "client_id": None, "client_code": client_code or "", "name": client_name or "（无客户信息）",
             "batches": 0, "files": 0,
             **{k: 0 for k in buckets},
             "_scores": [],
@@ -971,11 +941,11 @@ async def admin_daily_report(date_str: str) -> dict:
         return "error" if status == "error" else "in_progress"
 
     clients_map: dict = {}
-    totals = _new_bucket(None, "", "")
-    for client_id, client_code, client_name, status, verdict, score, total_files in rows:
-        key = client_id if client_id is not None else "__no_client__"
+    totals = _new_bucket("", "")
+    for client_code, client_name, status, verdict, score, total_files in rows:
+        key = client_code if client_code else "__no_client__"
         if key not in clients_map:
-            clients_map[key] = _new_bucket(client_id, client_code, client_name)
+            clients_map[key] = _new_bucket(client_code, client_name)
         b = _bucket_of(status, verdict)
         for agg in (clients_map[key], totals):
             agg["batches"] += 1
@@ -1008,15 +978,15 @@ async def admin_list_progress(
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    """后台进展包列表:join client,返回进展基本信息。"""
+    """后台进展包列表:返回进展基本信息(客户编码/姓名冗余在本表)。"""
     async with async_session_maker() as session:
-        stmt = select(ArchiveDetectProgress, Client).join(Client, ArchiveDetectProgress.client_id == Client.id)
-        count_stmt = select(func.count()).select_from(ArchiveDetectProgress).join(Client, ArchiveDetectProgress.client_id == Client.id)
+        stmt = select(ArchiveDetectProgress)
+        count_stmt = select(func.count()).select_from(ArchiveDetectProgress)
         conditions = []
         if client_code:
-            conditions.append(Client.client_code.ilike(f"%{client_code}%"))
+            conditions.append(ArchiveDetectProgress.client_code.ilike(f"%{client_code}%"))
         if client_name:
-            conditions.append(Client.name.ilike(f"%{client_name}%"))
+            conditions.append(ArchiveDetectProgress.client_name.ilike(f"%{client_name}%"))
         if handler:
             conditions.append(ArchiveDetectProgress.handler.ilike(f"%{handler}%"))
         if project_name:
@@ -1030,9 +1000,9 @@ async def admin_list_progress(
         rows = (await session.execute(stmt)).all()
         total = (await session.execute(count_stmt)).scalar() or 0
         items = []
-        for p, c in rows:
+        for (p,) in rows:
             item = _progress_to_dict(p)
-            item["client"] = _client_to_brief_dict(c)
+            item["client"] = _client_brief_from_progress(p)
             item["created_at"] = p.created_at.strftime("%Y-%m-%d %H:%M:%S") if p.created_at else ""
             item["updated_at"] = p.updated_at.strftime("%Y-%m-%d %H:%M:%S") if p.updated_at else ""
             items.append(item)
@@ -1059,9 +1029,7 @@ async def admin_get_file_detail(record_id: int) -> Optional[dict]:
                 select(ArchiveDetectProgress).where(ArchiveDetectProgress.id == f.progress_id)
             )).scalar_one_or_none()
             d["progress"] = _progress_to_dict(p) if p else None
-            if p:
-                c = (await session.execute(select(Client).where(Client.id == p.client_id))).scalar_one_or_none()
-                d["client"] = _client_to_brief_dict(c) if c else None
+            d["client"] = _client_brief_from_progress(p) if p else None
         else:
             d["progress"] = None
             d["client"] = None
@@ -1099,20 +1067,18 @@ async def admin_list_files(
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    """文件信息列表:以文件为维度,join batch/progress/client,支持模糊筛选。"""
+    """文件信息列表:以文件为维度,join batch/progress(客户编码/姓名冗余在 progress 行),支持模糊筛选。"""
     async with async_session_maker() as session:
         stmt = (
-            select(ArchiveDetectFile, ArchiveDetectBatch, ArchiveDetectProgress, Client)
+            select(ArchiveDetectFile, ArchiveDetectBatch, ArchiveDetectProgress)
             .join(ArchiveDetectBatch, ArchiveDetectFile.batch_id == ArchiveDetectBatch.batch_id)
             .outerjoin(ArchiveDetectProgress, ArchiveDetectFile.progress_id == ArchiveDetectProgress.id)
-            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
         )
         count_stmt = (
             select(func.count())
             .select_from(ArchiveDetectFile)
             .join(ArchiveDetectBatch, ArchiveDetectFile.batch_id == ArchiveDetectBatch.batch_id)
             .outerjoin(ArchiveDetectProgress, ArchiveDetectFile.progress_id == ArchiveDetectProgress.id)
-            .outerjoin(Client, ArchiveDetectProgress.client_id == Client.id)
         )
 
         conditions = []
@@ -1127,9 +1093,9 @@ async def admin_list_files(
         if verdict:
             conditions.append(ArchiveDetectFile.verdict == verdict)
         if client_code:
-            conditions.append(Client.client_code.ilike(f"%{client_code}%"))
+            conditions.append(ArchiveDetectProgress.client_code.ilike(f"%{client_code}%"))
         if client_name:
-            conditions.append(Client.name.ilike(f"%{client_name}%"))
+            conditions.append(ArchiveDetectProgress.client_name.ilike(f"%{client_name}%"))
         if progress_name:
             conditions.append(ArchiveDetectProgress.progress_name.ilike(f"%{progress_name}%"))
         if handler:
@@ -1144,12 +1110,12 @@ async def admin_list_files(
         total = (await session.execute(count_stmt)).scalar() or 0
 
         items = []
-        for f, b, p, c in rows:
+        for f, b, p in rows:
             d = _file_to_dict(f)
             d["batch_id"] = f.batch_id
             d["created_at"] = f.created_at.strftime("%Y-%m-%d %H:%M:%S") if f.created_at else ""
             d["updated_at"] = f.updated_at.strftime("%Y-%m-%d %H:%M:%S") if f.updated_at else ""
-            d["client"] = _client_to_brief_dict(c) if c else None
+            d["client"] = _client_brief_from_progress(p) if p else None
             d["progress"] = _progress_to_dict(p) if p else None
             items.append(d)
         return {"items": items, "total": total}
@@ -1372,7 +1338,7 @@ async def get_batch_meta(batch_id: str) -> Optional[dict]:
 
 
 async def get_batch_context(batch_id: str) -> Optional[dict]:
-    """返回 batch 元信息 + progress.handler + client.name,供 LLM prompt 显式注入姓名。"""
+    """返回 batch 元信息 + progress.handler + 客户姓名/编码(冗余在 progress 行),供 LLM prompt 显式注入姓名。"""
     async with async_session_maker() as session:
         stmt = (
             select(
@@ -1382,8 +1348,8 @@ async def get_batch_context(batch_id: str) -> Optional[dict]:
                 ArchiveDetectBatch.stage,
                 ArchiveDetectBatch.progress_id,
                 ArchiveDetectBatch.status,
-                Client.name.label("client_name"),
-                Client.client_code.label("client_code"),
+                ArchiveDetectProgress.client_name.label("client_name"),
+                ArchiveDetectProgress.client_code.label("client_code"),
                 ArchiveDetectProgress.handler.label("handler"),
                 ArchiveDetectProgress.project_name.label("project_name"),
                 ArchiveDetectProgress.project_code.label("project_code"),
@@ -1394,10 +1360,6 @@ async def get_batch_context(batch_id: str) -> Optional[dict]:
             .outerjoin(
                 ArchiveDetectProgress,
                 ArchiveDetectBatch.progress_id == ArchiveDetectProgress.id,
-            )
-            .outerjoin(
-                Client,
-                ArchiveDetectProgress.client_id == Client.id,
             )
             .where(ArchiveDetectBatch.batch_id == batch_id)
         )

@@ -29,15 +29,10 @@ import split_ocr_service
 import split_service
 import template_service
 from db.engine import init_db
-from db import crud
 from db import template_crud
 from db import split_crud
-from db import family_crud
-from db import assets_crud
 from db import summary_crud
-from db import sales_crud
 
-import client_profile_service
 import file_fetcher
 import text_extractor
 import archive_detect_service
@@ -94,24 +89,13 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # 静态文件：提供图片访问（URL 路径保持 /uploads/ 不变，前端无需改动）
 app.mount("/uploads", StaticFiles(directory=OUTPUT_DIR), name="uploads")
 
-# 内存中的任务状态缓存（仅用于轮询进度，不再作为持久存储）
-_task_status = {}   # {task_id: {"status": "ocr|llm|done|error", "progress": "", "error": ""}}
-_task_results = {}
-_task_results_ts: dict[str, float] = {}   # 写入/命中时间戳,用于 TTL GC
-
-# PDF 拆分流水线的独立状态字典(与解析流水线隔离)
+# PDF 拆分流水线的内存状态字典(仅用于轮询进度,持久态在 DB split_tasks)
 # {task_id: {"status": "ocr|llm|splitting|done|error", "progress": "", "error": "", "result": dict|None}}
 _split_task_status = {}
 
 # 终态任务的内存 TTL(达到 done/error 起算),超时由 _inmem_ttl_gc 清理
 # 数据落在 DB,清掉内存条目不影响轮询正确性,仅会让前端少量请求走 DB fallback
 INMEM_TASK_TTL_SECONDS = 6 * 3600
-
-
-def _stamp_result(task_id: str, result_data) -> None:
-    """写入 _task_results 时同步打时间戳,供 _inmem_ttl_gc 用。所有写入位点都应走这里。"""
-    _task_results[task_id] = result_data
-    _task_results_ts[task_id] = time.time()
 
 
 # healthz 中 DB 错误事件的限频时间戳(每 5 分钟最多记一次,避免事件表被探针写爆)
@@ -164,81 +148,6 @@ async def save_upload_stream(
                 )
             out.write(chunk)
     return total
-
-class ReviewPayload(BaseModel):
-    """人工复核提交的数据"""
-    task_id: str
-    fields: dict
-    doc_type: Optional[str] = None
-
-
-class ClientProfileSourceFileItem(BaseModel):
-    """客户档案生成候选文件。"""
-    id: int = Field(..., description="archive_detect_files.id")
-    filename: Optional[str] = Field(None, description="文件名")
-    doc_category: Optional[str] = Field(None, description="文件分类")
-    progress_name: Optional[str] = Field(None, description="进展名称")
-    progress_oid: Optional[str] = Field(None, description="进展 OID")
-    status: str = Field(..., description="文件状态")
-    char_count: Optional[int] = Field(None, description="OCR 字符数")
-    has_ocr_text: bool = Field(..., description="是否有 OCR 文本")
-    selectable: bool = Field(..., description="是否可选择用于生成")
-
-
-class ClientProfileSourceFilesResponse(BaseModel):
-    items: list[ClientProfileSourceFileItem] = Field(..., description="候选文件列表")
-    total: int = Field(..., description="候选文件数量")
-
-
-class ClientProfileGeneratePayload(BaseModel):
-    source_file_ids: list[int] = Field(..., description="用于生成客户档案的 archive_detect_files.id 数组")
-
-
-class ClientProfileGenerateResponse(BaseModel):
-    task_id: int = Field(..., description="生成任务 ID")
-    client_id: int = Field(..., description="客户 ID")
-    source_file_count: int = Field(..., description="本次使用文件数量")
-    status: str = Field(..., description="任务状态")
-
-
-class ClientProfileTaskResponse(BaseModel):
-    task_id: int = Field(..., description="生成任务 ID")
-    id: int = Field(..., description="生成任务 ID")
-    client_id: int = Field(..., description="客户 ID")
-    status: str = Field(..., description="任务状态 running/done/error")
-    source_file_ids: list[int] = Field(default_factory=list, description="本次使用的文件 ID")
-    source_files_snapshot: list[dict] = Field(default_factory=list, description="本次使用文件摘要")
-    source_file_count: int = Field(..., description="使用文件数量")
-    extracted_summary: dict = Field(default_factory=dict, description="AI 抽取汇总")
-    created_count: dict = Field(default_factory=dict, description="写入数量统计")
-    error: Optional[str] = Field(None, description="错误信息")
-    created_at: str = Field(..., description="创建时间")
-    updated_at: str = Field(..., description="更新时间")
-
-
-class ClientProfileTaskListResponse(BaseModel):
-    items: list[ClientProfileTaskResponse] = Field(..., description="生成任务列表")
-
-
-class ChildAgeLeadItem(BaseModel):
-    """子女年龄线索列表项。"""
-    client_id: int = Field(..., description="客户 ID")
-    client_code: Optional[str] = Field(None, description="客户编码")
-    client_name: str = Field(..., description="客户姓名")
-    child_id: int = Field(..., description="子女家庭成员记录 ID")
-    child_name: str = Field(..., description="子女姓名")
-    relation: str = Field(..., description="关系字段,如 child/子女/儿子/女儿")
-    birth_date: Optional[str] = Field(None, description="子女出生日期,YYYY-MM-DD")
-    age_years: Optional[int] = Field(None, description="当前周岁")
-    age_months: Optional[int] = Field(None, description="当前年龄总月数")
-    age_text: str = Field(..., description="年龄展示文本,如 7岁3个月")
-
-
-class ChildAgeLeadListResponse(BaseModel):
-    """子女年龄线索列表返回。"""
-    items: list[ChildAgeLeadItem] = Field(..., description="子女年龄线索数组")
-    total: int = Field(..., description="符合筛选条件的总条数")
-
 
 @app.on_event("startup")
 async def startup():
@@ -340,935 +249,162 @@ def _cleanup_stale_template_temp(max_age_minutes: int = 60) -> None:
 
 
 def _cleanup_expired_output(max_age_days: int = 30) -> None:
-    """删除 output/ 下超过指定天数的任务目录（OCR 图片、拆分 PDF 等）。
+    """output/(= /uploads 公开目录)产物全量定期清扫,默认 30 天。
 
-    数据库中的 ocr_text 和 extracted_fields 不受影响（已独立存储）。
-    仅删除磁盘上的图片和 PDF 文件，释放存储空间。
+    - 顶层:除 templates/customer_files 外的所有条目(YYMMDDHHmmss_ 任务目录、
+      杂散目录/散文件)超期即删;数据库中的 ocr_text 等不受影响(已独立存储)。
+    - templates/{id}/:只删 preview/ 与 fills/ 两个子目录(预览缓存/生成文档,可重建);
+      *.docx 模板原件与 {id}/ 目录本体永远不删(模板库是业务资产)。
+      templates/_parse/ 由 60 分钟 GC(_cleanup_stale_template_temp)管,这里跳过。
+    - customer_files/:原件由 file_keep_until DB 驱动 GC(同 30 天,且要保证
+      「在线查看/按需重下」语义),这里只兜底 previews/ 下的 Office 预览 PDF 缓存。
     """
     import shutil
     import time
-    import re
 
     cutoff = time.time() - max_age_days * 86400
     cleaned = 0
-    # 匹配 YYMMDDHHmmss_ 开头的任务目录
-    task_dir_re = re.compile(r"^\d{12}_")
+
+    def _expired(path: str) -> bool:
+        try:
+            return os.path.getmtime(path) < cutoff
+        except OSError:
+            return False
+
+    def _remove(path: str) -> bool:
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            return True
+        except OSError as e:
+            print(f"[cleanup] 删除 {path} 失败: {e}")
+            return False
 
     if not os.path.isdir(OUTPUT_DIR):
         return
 
+    # 顶层通用规则(templates/customer_files 特例走下面)
     for name in os.listdir(OUTPUT_DIR):
-        # 跳过 templates 目录和非任务目录
-        if name == "templates" or not task_dir_re.match(name):
+        if name in ("templates", "customer_files"):
             continue
         full = os.path.join(OUTPUT_DIR, name)
-        if not os.path.isdir(full):
-            continue
-        try:
-            if os.path.getmtime(full) < cutoff:
-                shutil.rmtree(full, ignore_errors=True)
+        if _expired(full) and _remove(full):
+            cleaned += 1
+
+    # templates/{id}/{preview,fills}/ 缓存与生成文档(docx 原件不碰)
+    tpl_root = os.path.join(OUTPUT_DIR, "templates")
+    if os.path.isdir(tpl_root):
+        for tid in os.listdir(tpl_root):
+            if tid == "_parse":
+                continue
+            for sub in ("preview", "fills"):
+                sub_dir = os.path.join(tpl_root, tid, sub)
+                if os.path.isdir(sub_dir) and _expired(sub_dir) and _remove(sub_dir):
+                    cleaned += 1
+
+    # customer_files/previews/ Office 预览 PDF 缓存
+    prev_dir = os.path.join(OUTPUT_DIR, "customer_files", "previews")
+    if os.path.isdir(prev_dir):
+        for name in os.listdir(prev_dir):
+            full = os.path.join(prev_dir, name)
+            if _expired(full) and _remove(full):
                 cleaned += 1
-        except OSError as e:
-            print(f"[cleanup] 删除 {full} 失败: {e}")
 
     if cleaned:
-        print(f"[cleanup] 清理了 {cleaned} 个过期任务目录（>{max_age_days}天）")
+        print(f"[cleanup] 清理了 {cleaned} 项 output/ 过期产物（>{max_age_days}天）")
 
 
-@app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), client_id: Optional[int] = Form(None)):
-    """
-    上传 PDF/图片文件，立即返回 task_id，后台异步处理。
-    前端通过 GET /api/result/{task_id} 轮询进度和结果。
+# 纯 OCR 工具页(/parse)支持的文件类型——与文件留底检测识别能力一致
+OCR_PARSE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif"}
+OCR_PARSE_OFFICE_EXTS = {".doc", ".docx", ".xls", ".xlsx", ".pptx"}
 
-    可选 client_id：批量队列模式下前端预先选了客户，解析完成后会自动归档到该客户档案，
-    跳过人工复核步骤（A1 优化点）。未传 client_id 时维持原"复核 → 归档"路径。
-    """
-    # 生成 task_id: YYMMDDHHmmss_原文件名（去扩展名、去空格）
+
+@app.post(
+    "/api/ocr/parse",
+    tags=["材料解析"],
+    summary="纯 OCR 识别(材料解析工具页):上传文件,同步返回每页图片+识别文字;不写库、不调 LLM",
+)
+async def ocr_parse(file: UploadFile = File(...)):
+    """左图右文工具页数据源。图片/PDF 逐页出图+文字;Office 文本与留底检测同口径
+    (text_extractor 含嵌图 OCR),预览图经 soffice 转 PDF 渲染(无 LibreOffice 降级仅文本)。
+    产物落 output/{task_id}/ 经 /uploads/ 访问,由既有 30 天 GC 回收。"""
+    filename = file.filename or "unknown"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext != ".pdf" and ext not in OCR_PARSE_IMAGE_EXTS and ext not in OCR_PARSE_OFFICE_EXTS:
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext or '(无扩展名)'}")
+
+    # task_id 复用 /api/upload 同款 YYMMDDHHmmss_ 前缀,确保被 _cleanup_expired_output 回收
     timestamp = datetime.now().strftime("%y%m%d%H%M%S")
-    stem = os.path.splitext(file.filename or "unknown")[0].replace(" ", "")
+    stem = os.path.splitext(filename)[0].replace(" ", "")
     task_id = f"{timestamp}_{stem}"
-
-    # 如果同名已存在，追加序号避免冲突
-    task_dir = os.path.join(OUTPUT_DIR, task_id)
-    if os.path.exists(task_dir):
+    if os.path.exists(os.path.join(OUTPUT_DIR, task_id)):
         n = 2
         while os.path.exists(os.path.join(OUTPUT_DIR, f"{timestamp}_{stem}_{n}")):
             n += 1
         task_id = f"{timestamp}_{stem}_{n}"
 
-    # 保存上传文件到临时位置（流式写入,避免整块进内存）
-    ext = os.path.splitext(file.filename or "")[1] or ".pdf"
     temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "temp")
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, f"{task_id}{ext}")
     await save_upload_stream(file, temp_path)
 
-    # 初始化状态（内存）
-    _task_status[task_id] = {"status": "ocr", "progress": "0页", "error": ""}
-
-    # 写入数据库：创建 document 记录
-    await crud.create_document(task_id=task_id, filename=file.filename or "", status="ocr")
-
-    # 启动后台异步处理（A1：透传 client_id，解析完成后自动归档）
-    asyncio.create_task(_process_file_background(task_id, temp_path, file.filename or "", client_id))
-
-    return {"task_id": task_id, "status": "processing"}
-
-async def _process_file_background(task_id: str, file_path: str, filename: str, client_id: Optional[int] = None):
-    """后台异步处理文件：OCR → LLM → 保存结果到 output/{task_id}/ 和数据库"""
     try:
-        # Step 1: OCR 识别（在线程池中执行，避免阻塞事件循环）
-        _task_status[task_id] = {"status": "ocr", "progress": "识别中...", "error": ""}
-        print(f"[{task_id}] 开始 OCR 识别: {filename}")
-        max_ocr_pages = llm_service.CONFIG.get("max_ocr_pages", 0)
-        ocr_results = await asyncio.to_thread(ocr_service.process_file, file_path, task_id, max_ocr_pages)
-
-        ocr_texts = [page["text"] for page in ocr_results]
-
-        # 收集图片和OCR详情
-        images = []
-        all_ocr_details = []
-        for page in ocr_results:
-            if page.get("image"):
-                images.append(page["image"])
-            all_ocr_details.extend(page.get("ocr_details", []))
-
-        # Step 2: LLM 合并调用（类型检测+结构化提取，支持多证件）
-        _task_status[task_id] = {"status": "llm", "progress": "分析中...", "error": ""}
-        print(f"[{task_id}] 调用大模型分析...")
-        llm_result = await asyncio.to_thread(llm_service.detect_and_extract, ocr_texts, task_id=task_id)
-
-        # 处理多证件 items
-        items = llm_result.get("items", [])
-        for item in items:
-            # Step 3: 匹配坐标框
-            item["fields"] = llm_service.match_bboxes_to_fields(item.get("fields", {}), all_ocr_details)
-            # Step 4: 计算统计
-            item["stats"] = _calc_stats(item.get("fields", {}))
-
-        # 保存结果（文件系统）
-        result_data = {
-            "task_id": task_id,
-            "filename": filename,
-            "items": items,
-            "images": images,
-            "ocr_texts": ocr_texts
-        }
-
-        # 写入数据库：更新 document 记录（OCR 文本和解析结果已存 DB，不再写磁盘文件）
-        ocr_full_text = "\n".join(ocr_texts)
-        doc_type = items[0].get("doc_type") if items else None
-        # 计算平均置信度
-        all_conf = []
-        for item in items:
-            for field_info in item.get("fields", {}).values():
-                if isinstance(field_info, dict):
-                    all_conf.append(field_info.get("confidence", 0.5))
-        confidence_avg = round(sum(all_conf) / len(all_conf), 4) if all_conf else None
-
-        await crud.update_document_result(
-            task_id=task_id,
-            items=items,
-            ocr_text=ocr_full_text,
-            doc_type=doc_type,
-            confidence_avg=confidence_avg,
-            file_path=f"output/{task_id}",
-        )
-
-        _stamp_result(task_id, result_data)
-        _task_status[task_id] = {"status": "done", "progress": "", "error": "", "_finished_ts": time.time()}
-        print(f"[{task_id}] 处理完成: {len(items)} 张证件")
-
-        # A1 优化：批量队列模式带 client_id 上传时，跳过复核直接归档到指定客户
-        if client_id is not None and items:
+        if ext == ".gif":
+            # GIF 只取第一帧转 PNG 再 OCR(与 text_extractor._extract_gif 同口径)
+            from PIL import Image
+            png_path = os.path.join(temp_dir, f"{task_id}_gif_first_frame.png")
             try:
-                written = await crud.archive_to_specific_client(task_id, client_id, items)
-                if written > 0:
-                    print(f"[{task_id}] 已自动归档到客户 ID={client_id}（{written} 项）")
-                else:
-                    print(f"[{task_id}] 自动归档跳过（客户不存在或无字段）")
+                with Image.open(temp_path) as im:
+                    im.seek(0)
+                    im.convert("RGB").save(png_path, "PNG")
+                pages = await asyncio.to_thread(ocr_service.extract_image_file, png_path, task_id)
+            finally:
+                try:
+                    os.remove(png_path)
+                except OSError:
+                    pass
+        elif ext in OCR_PARSE_IMAGE_EXTS:
+            pages = await asyncio.to_thread(ocr_service.extract_image_file, temp_path, task_id)
+        elif ext == ".pdf":
+            # 一律走混合通道 + 数字页也渲染页图,保证左栏每页有图
+            pages = await asyncio.to_thread(
+                ocr_service.extract_mixed_pdf, temp_path, task_id, 0, 0, True)
+        else:
+            # Office: 全文一段文本 + 预览图(转 PDF 渲染)
+            text_result = await text_extractor.extract_text(temp_path)
+            images: list[str] = []
+            try:
+                out_dir = os.path.join(OUTPUT_DIR, task_id)
+                os.makedirs(out_dir, exist_ok=True)
+                pdf_path = await asyncio.to_thread(text_extractor.office_to_pdf, temp_path, out_dir)
+                images = await asyncio.to_thread(ocr_service.render_pdf_images, pdf_path, task_id)
             except Exception as e:
-                print(f"[{task_id}] 自动归档失败（不影响解析）: {e}")
-
-    except Exception as e:
-        print(f"[{task_id}] 处理失败: {e}")
-        _task_status[task_id] = {"status": "error", "progress": "", "error": str(e), "_finished_ts": time.time()}
-        # 更新数据库状态为 error
-        await crud.update_document_status(task_id, "error", str(e))
-    finally:
-        # 清理临时文件
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-
-def _build_result_from_db(doc) -> dict:
-    """从数据库记录构建前端需要的结果格式（与原 JSON 文件格式一致）"""
-    import glob
-    task_id = doc.task_id
-    # 扫描 output/{task_id}/images/ 下的图片文件
-    images_dir = os.path.join(OUTPUT_DIR, task_id, "images")
-    images = []
-    if os.path.isdir(images_dir):
-        for f in sorted(os.listdir(images_dir)):
-            if f.lower().endswith((".png", ".jpg", ".jpeg")):
-                images.append(f"{task_id}/images/{f}")
-
-    # 从 extracted_fields 还原 items
-    items = doc.extracted_fields or []
-
-    # 从 ocr_text 还原 ocr_texts（按页分割）
-    ocr_texts = []
-    if doc.ocr_text:
-        # 按 "=== 第 N 页 ===" 分割
-        import re
-        parts = re.split(r"=== 第 \d+ 页 ===\n?", doc.ocr_text)
-        ocr_texts = [p.strip() for p in parts if p.strip()]
-
-    return {
-        "task_id": task_id,
-        "filename": doc.filename,
-        "items": items,
-        "images": images,
-        "ocr_texts": ocr_texts
-    }
-
-
-@app.get("/api/result/{task_id}")
-async def get_result(task_id: str):
-    """获取解析任务的进度或结果（前端轮询接口）。
-
-    路径参数:
-        task_id - 上传时返回的任务 ID
-
-    返回:
-        - 处理中: {"task_id", "status": "ocr"|"llm", "progress": "...", "error": ""}
-        - 完成:  {"task_id", "status": "done", "filename", "items":[...],
-                 "images":[...], "ocr_texts":[...]}
-        - 失败:  {"task_id", "status": "error", "error": "..."}
-
-    数据源优先级:
-        1. 内存 _task_status / _task_results 缓存
-        2. 数据库 documents 表（进程重启后回落）
-
-    错误:
-        404 - 任务不存在
-    """
-    status = _task_status.get(task_id)
-    if not status:
-        # 内存中没有，尝试从数据库查
-        doc = await crud.get_document(task_id)
-        if doc and doc.status == "done":
-            # 从数据库加载完整结果
-            data = _build_result_from_db(doc)
-            data["status"] = "done"
-            _stamp_result(task_id, data)
-            return data
-        if doc:
+                print(f"[ocr_parse] Office 预览图生成失败(降级为仅文本): {type(e).__name__}: {e}")
             return {
-                "task_id": task_id,
-                "status": doc.status,
-                "progress": "",
-                "error": doc.error_msg or ""
+                "filename": filename,
+                "text": text_result.get("text") or "",
+                "pages": [{"page": i + 1, "image": img} for i, img in enumerate(images)],
             }
-        raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
 
-    # 未完成：返回进度
-    if status["status"] != "done":
+        if len(pages) > 1:
+            text = "\n\n".join(f"—— 第 {p['page']} 页 ——\n{p['text']}" for p in pages)
+        else:
+            text = pages[0]["text"] if pages else ""
         return {
-            "task_id": task_id,
-            "status": status["status"],
-            "progress": status["progress"],
-            "error": status.get("error", "")
+            "filename": filename,
+            "text": text,
+            "pages": [{"page": p["page"], "image": p["image"]} for p in pages],
         }
-
-    # 已完成：返回完整结果
-    if task_id in _task_results:
-        result = _task_results[task_id]
-        result["status"] = "done"
-        return result
-
-    # 从数据库加载
-    doc = await crud.get_document(task_id)
-    if doc and doc.status == "done":
-        data = _build_result_from_db(doc)
-        data["status"] = "done"
-        _stamp_result(task_id, data)
-        return data
-
-    raise HTTPException(status_code=404, detail=f"任务 {task_id} 结果不存在")
-
-@app.put("/api/result/{task_id}")
-async def save_review(task_id: str, payload: dict):
-    """保存人工复核修正结果。
-
-    新增 `archive` 字段（可选）支持新归档路径：
-      payload = {
-        "items": [...],
-        "archive": {
-          "client_id": 1,
-          "entity": "clients" | "family" | "assets",
-          "target_id": null | int,        # family/assets 时给定则更新该行；null=新建
-          "sub_meta": {"relation": "配偶"} 或 {"asset_type": "房产"}
-        }
-      }
-    不带 archive 字段时退化到旧的 archive_to_client_info 行为（兼容）。
-    """
-    # 从内存缓存或数据库加载
-    if task_id in _task_results:
-        result_data = _task_results[task_id]
-    else:
-        doc = await crud.get_document(task_id)
-        if not doc:
-            raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
-        result_data = _build_result_from_db(doc)
-
-    # 更新 items 中的字段
-    archive_result = None
-    if "items" in payload:
-        result_data["items"] = payload["items"]
-        # 重新计算每个item的统计
-        for item in result_data["items"]:
-            item["stats"] = _calc_stats(item.get("fields", {}))
-        result_data["reviewed"] = True
-
-    _stamp_result(task_id, result_data)
-
-    # 同步更新数据库
-    if "items" in payload:
-        await crud.update_document_review(task_id, payload["items"])
-
-        archive_payload = payload.get("archive")
-        if archive_payload and isinstance(archive_payload, dict) and archive_payload.get("client_id"):
-            # 新路径：精准归档
-            try:
-                archive_result = await crud.archive_document(
-                    task_id=task_id,
-                    client_id=int(archive_payload["client_id"]),
-                    entity=archive_payload.get("entity", "clients"),
-                    target_id=archive_payload.get("target_id"),
-                    sub_meta=archive_payload.get("sub_meta"),
-                    items=payload["items"],
-                )
-                print(f"[{task_id}] 归档完成 entity={archive_result['entity']} mapped={archive_result['mapped_count']} unmapped={archive_result['unmapped_count']}")
-            except Exception as e:
-                print(f"[{task_id}] 归档失败: {e}")
-                raise HTTPException(status_code=500, detail=f"归档失败: {e}")
-        else:
-            # 旧路径：保持兼容
-            try:
-                client_id = await crud.archive_to_client_info(task_id, payload["items"])
-                if client_id:
-                    print(f"[{task_id}] 已归档到客户 ID={client_id}（旧路径）")
-            except Exception as e:
-                print(f"[{task_id}] 归档失败（不影响保存）: {e}")
-
-    response = {"message": "复核结果已保存", "task_id": task_id}
-    if archive_result:
-        response["archive"] = archive_result
-    return response
-
-@app.get("/api/history")
-async def get_history():
-    """获取所有解析任务历史记录摘要列表（从 documents 表查询）。
-
-    返回:
-        {"history": [{task_id, filename, doc_types, field_count,
-                      reviewed, status, created_at}, ...]}
-        默认最多 100 条，按创建时间倒序。
-    """
-    history = await crud.list_documents(limit=100, offset=0)
-    return {"history": history}
-
-@app.get("/api/search")
-async def search(keyword: str = Query(..., min_length=1, description="搜索关键词")):
-    """全文模糊搜索 documents 表。
-
-    Query:
-        keyword - 关键词（必填，长度 >= 1）
-
-    搜索范围:
-        filename / doc_type / ocr_text / extracted_fields(JSONB cast text)
-
-    返回:
-        {"keyword": "...", "results": [...], "total": N}
-        最多 50 条，按相关度+时间排序。
-    """
-    results = await crud.search_documents(keyword.strip(), limit=50)
-    return {"keyword": keyword.strip(), "results": results, "total": len(results)}
-
-
-@app.get(
-    "/api/sales/child-age-leads",
-    tags=["销售线索"],
-    summary="子女年龄线索列表",
-    response_model=ChildAgeLeadListResponse,
-)
-async def sales_child_age_leads(
-    keyword: Optional[str] = Query(None, description="客户姓名/客户编码/子女姓名模糊查询"),
-    min_age: Optional[int] = Query(None, ge=0, description="最小年龄(周岁)"),
-    max_age: Optional[int] = Query(None, ge=0, description="最大年龄(周岁)"),
-    limit: int = Query(100, ge=1, le=500, description="返回条数,1-500"),
-    offset: int = Query(0, ge=0, description="分页偏移量"),
-):
-    """销售顾问查看客户子女年龄列表。"""
-    return await sales_crud.list_child_age_leads(
-        keyword=keyword,
-        min_age=min_age,
-        max_age=max_age,
-        limit=limit,
-        offset=offset,
-    )
-
-
-# ==================== 客户资料结构化生成 ====================
-
-@app.get(
-    "/api/client-profile/source-files/{client_id}",
-    tags=["客户档案生成"],
-    summary="客户档案生成 - 查询候选 OCR 文件",
-    response_model=ClientProfileSourceFilesResponse,
-)
-async def client_profile_source_files(
-    client_id: int = Path(..., description="客户 ID"),
-):
-    return await client_profile_service.list_source_files(client_id)
-
-
-@app.post(
-    "/api/client-profile/generate/{client_id}",
-    tags=["客户档案生成"],
-    summary="客户档案生成 - 创建生成任务",
-    response_model=ClientProfileGenerateResponse,
-)
-async def client_profile_generate(
-    payload: ClientProfileGeneratePayload,
-    client_id: int = Path(..., description="客户 ID"),
-):
-    try:
-        return await client_profile_service.submit_generate_profile(
-            client_id,
-            source_file_ids=payload.source_file_ids,
-        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
-
-@app.get(
-    "/api/client-profile/generate/{task_id}",
-    tags=["客户档案生成"],
-    summary="客户档案生成 - 查询任务状态",
-    response_model=ClientProfileTaskResponse,
-)
-async def client_profile_generate_status(
-    task_id: int = Path(..., description="生成任务 ID"),
-):
-    data = await client_profile_service.get_generation_task(task_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"生成任务 {task_id} 不存在")
-    return data
-
-
-@app.get(
-    "/api/client-profile/generate/list/{client_id}",
-    tags=["客户档案生成"],
-    summary="客户档案生成 - 查询客户生成记录",
-    response_model=ClientProfileTaskListResponse,
-)
-async def client_profile_generate_list(
-    client_id: int = Path(..., description="客户 ID"),
-    limit: int = Query(20, ge=1, le=100, description="返回最近多少条生成记录"),
-):
-    return {"items": await client_profile_service.list_generation_tasks(client_id, limit=limit)}
-
-
-@app.get("/api/clients")
-async def get_clients(
-    keyword: Optional[str] = Query(None, description="姓名/证件号/护照号/客户编号 模糊匹配"),
-    visa_type: Optional[str] = Query(None, description="按业务类型筛选"),
-    expiring_soon_days: Optional[int] = Query(None, description="护照在 N 天内到期的客户"),
-    sort_by: str = Query("updated_at", description="updated_at | passport_expiry"),
-):
-    """客户列表（含文档 / 家属 / 资产 数量统计）。
-
-    Query:
-        keyword            可选，按 name/id_number/passport_no/client_code 任一字段模糊匹配
-        visa_type          可选，按业务类型精确筛选
-        expiring_soon_days 可选，仅返回护照在 N 天内到期的客户
-        sort_by            排序字段：updated_at(默认) | passport_expiry
-
-    返回:
-        {"clients": [...], "total": N}
-        最多 200 条，每条含 id/client_code/name/passport_*/doc_count/family_count/asset_count 等
-    """
-    clients = await crud.list_clients(
-        keyword=keyword,
-        visa_type=visa_type,
-        expiring_soon_days=expiring_soon_days,
-        sort_by=sort_by,
-        limit=200,
-        offset=0,
-    )
-    return {"clients": clients, "total": len(clients)}
-
-
-class ClientMatchPayload(BaseModel):
-    id_number: Optional[str] = None
-    passport_no: Optional[str] = None
-    name: Optional[str] = None
-    birth_date: Optional[str] = None
-
-
-@app.post("/api/clients/match")
-async def match_clients_endpoint(payload: ClientMatchPayload):
-    """客户智能匹配：OCR 完成后用证件号 / 护照号 / 姓名+生日 查找已有客户候选。
-
-    Body (任一字段非空即可):
-        id_number   身份证号
-        passport_no 护照号
-        name        姓名
-        birth_date  出生日期 YYYY-MM-DD（与 name 配合判断）
-
-    匹配评分:
-        100 - 身份证号精确命中
-         95 - 护照号精确命中
-         80 - 姓名+出生日期同时命中
-         50 - 仅姓名命中
-
-    返回:
-        {
-          "candidates": [{client_id, name, score, reason}, ...]  按 score 倒序,
-          "best_match_client_id": <int 或 null>  仅当最高分 >= 90 时给出,
-          "total": N
-        }
-    """
-    candidates = await crud.match_clients(
-        id_number=payload.id_number,
-        passport_no=payload.passport_no,
-        name=payload.name,
-        birth_date=payload.birth_date,
-    )
-    best = candidates[0]["client_id"] if candidates and candidates[0]["score"] >= 90 else None
-    return {"candidates": candidates, "best_match_client_id": best, "total": len(candidates)}
-
-
-class ClientCreatePayload(BaseModel):
-    name: str
-    client_code: Optional[str] = None
-    name_en: Optional[str] = None
-    gender: Optional[str] = None
-    birth_date: Optional[str] = None
-    nationality: Optional[str] = None
-    id_number: Optional[str] = None
-    passport_no: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    visa_type: Optional[str] = None
-    notes: Optional[str] = None
-    # 其余字段不在创建期常用，可通过 PUT 编辑
-
-
-@app.post("/api/clients")
-async def create_client_endpoint(payload: ClientCreatePayload):
-    """新建客户档案（前端 ClientListPage 的"+ 新建客户"按钮调用）。
-
-    Body:
-        name 必填；其他字段可选；后端会丢弃 None 值
-        其余完整字段（联系/护照/教育/工作/婚姻）请通过 PUT /api/clients/{id} 补充
-
-    返回:
-        新建的完整客户字典（含 id 与全部字段）
-
-    错误:
-        400 - name 缺失或参数不合法
-    """
-    try:
-        data = payload.model_dump(exclude_none=True)
-        client = await crud.create_client(data)
-        return client
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/api/clients/{client_id}")
-async def get_client(client_id: int):
-    """客户详情（含基本信息 + family_members + assets + client_info KV + 名下 documents）。
-
-    路径参数:
-        client_id - clients 表主键
-
-    返回:
-        完整客户字典:
-          - 主表 ~30 字段（身份/联系/护照/教育/工作/婚姻/业务）
-          - family_members:[]  家庭成员列表
-          - assets:[]          资产列表
-          - infos:[]           client_info KV 记录
-          - documents:[]       名下解析任务文档
-
-    错误:
-        404 - 客户不存在
-    """
-    detail = await crud.get_client_detail(client_id)
-    if not detail:
-        raise HTTPException(status_code=404, detail=f"客户 {client_id} 不存在")
-    return detail
-
-
-@app.put("/api/clients/{client_id}")
-async def update_client_endpoint(client_id: int, payload: dict):
-    """编辑客户主表（支持部分字段更新）。
-
-    路径参数:
-        client_id - clients 表主键
-
-    Body:
-        要更新的字段字典；空字符串 / None 会被忽略；
-        日期/数字字段后端自动类型转换
-
-    返回:
-        更新后的完整客户字典
-
-    错误:
-        404 - 客户不存在
-    """
-    client = await crud.update_client(client_id, payload or {})
-    if not client:
-        raise HTTPException(status_code=404, detail=f"客户 {client_id} 不存在")
-    return client
-
-
-# ============== family_members RESTful ==============
-
-@app.get("/api/clients/{client_id}/family")
-async def list_family(client_id: int):
-    """客户的家庭成员列表（配偶 / 子女 / 父母 / 紧急联系人）。
-
-    路径参数:
-        client_id - clients 表主键
-
-    返回:
-        {"items": [...]}  按 relation 升序、id 升序
-    """
-    return {"items": await family_crud.list_by_client(client_id)}
-
-
-@app.post("/api/clients/{client_id}/family")
-async def create_family(client_id: int, payload: dict):
-    """新建家庭成员。
-
-    路径参数:
-        client_id - 关联客户
-
-    Body:
-        必填 relation（配偶/子/女/父/母/紧急联系人）和 name；
-        其他字段按场景填（配偶教育、子女出生证、POA 表所需的护照/邮箱/公司/职位 等）
-
-    返回:
-        新建的家庭成员记录字典
-
-    错误:
-        400 - relation 或 name 缺失
-    """
-    try:
-        return await family_crud.create(client_id, payload or {})
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.put("/api/family/{member_id}")
-async def update_family(member_id: int, payload: dict):
-    """更新家庭成员（支持部分字段）。
-
-    路径参数:
-        member_id - family_members 表主键
-
-    Body:
-        要更新的字段字典；空字符串 / None 自动忽略
-
-    返回:
-        更新后的完整家庭成员记录
-
-    错误:
-        404 - 该家庭成员不存在
-    """
-    row = await family_crud.update(member_id, payload or {})
-    if not row:
-        raise HTTPException(status_code=404, detail=f"家庭成员 {member_id} 不存在")
-    return row
-
-
-@app.delete("/api/family/{member_id}")
-async def delete_family(member_id: int):
-    """删除家庭成员。
-
-    路径参数:
-        member_id - family_members 表主键
-
-    返回:
-        {"deleted": True}
-
-    错误:
-        404 - 该家庭成员不存在
-    """
-    ok = await family_crud.delete(member_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"家庭成员 {member_id} 不存在")
-    return {"deleted": True}
-
-
-# ============== assets RESTful ==============
-
-@app.get("/api/clients/{client_id}/assets")
-async def list_assets(client_id: int):
-    """客户的资产列表（房产/存款/银行流水/股票/车辆/其他）。
-
-    路径参数:
-        client_id - clients 表主键
-
-    返回:
-        {"items": [...]}  按 asset_type 升序、id 降序
-    """
-    return {"items": await assets_crud.list_by_client(client_id)}
-
-
-@app.post("/api/clients/{client_id}/assets")
-async def create_asset(client_id: int, payload: dict):
-    """新建一笔资产。
-
-    路径参数:
-        client_id - 关联客户
-
-    Body:
-        必填 asset_type（房产/存款/银行流水/股票/车辆/其他）；
-        其余字段按 asset_type 选填（房产用 location_address/area_sqm/... ;
-        银行用 bank_name/account_no/period_*）
-
-    返回:
-        新建的资产记录字典
-
-    错误:
-        400 - asset_type 缺失等参数错误
-    """
-    try:
-        return await assets_crud.create(client_id, payload or {})
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.put("/api/assets/{asset_id}")
-async def update_asset(asset_id: int, payload: dict):
-    """更新一笔资产（部分字段）。
-
-    路径参数:
-        asset_id - assets 表主键
-
-    Body:
-        要更新的字段字典；未传字段保持不变
-
-    返回:
-        更新后的完整资产记录
-
-    错误:
-        404 - 该资产不存在
-    """
-    row = await assets_crud.update(asset_id, payload or {})
-    if not row:
-        raise HTTPException(status_code=404, detail=f"资产 {asset_id} 不存在")
-    return row
-
-
-@app.delete("/api/assets/{asset_id}")
-async def delete_asset(asset_id: int):
-    """删除一笔资产。
-
-    路径参数:
-        asset_id - assets 表主键
-
-    返回:
-        {"deleted": True}
-
-    错误:
-        404 - 该资产不存在
-    """
-    ok = await assets_crud.delete(asset_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"资产 {asset_id} 不存在")
-    return {"deleted": True}
-
-
-# ============== field_router 元数据 ==============
-
-@app.get("/api/field-router/doc-types")
-async def get_doc_types():
-    """获取字段路由器中已知的所有 doc_type 列表（前端 DocTypeSelector 下拉数据源）。
-
-    返回:
-        {"doc_types": [...]}  排序的字符串列表，例如 ["不动产权证", "出生医学证", "存款证明", ...]
-
-    说明:
-        来自 backend/db/field_router.py 中 DOC_TYPE_TO_ENTITY 的键集合。
-        前端在归档审核面板里用作"文件类型"下拉的候选项。
-    """
-    from db import field_router
-    return {"doc_types": field_router.list_doc_types()}
-
-
-class ClientInfoUpsertPayload(BaseModel):
-    """模板填写时反向同步主数据用的 payload。"""
-    key_values: dict  # {info_key: info_value}
-
-
-@app.post("/api/clients/{client_id}/info")
-async def upsert_client_info_endpoint(client_id: int, payload: ClientInfoUpsertPayload):
-    """反向同步主数据（B1）：模板填写界面把可变字段勾选"同步到档案"后调用。
-
-    路径参数:
-        client_id - clients 表主键
-
-    Body:
-        {"key_values": {info_key: info_value, ...}}
-        info_key 通常是中文字段标签（如"地址"、"电话"），info_value 是字符串
-
-    行为:
-        - 复用 crud.upsert_client_info 的 upsert 语义
-        - 锁定字段（id_number/passport_no 等）由前端不发送来保证，本接口对所有传入键平等处理
-        - 同 (client_id, info_key) 的现有记录会被更新；不存在则插入
-
-    返回:
-        {"updated": N}  实际写入条数
-
-    错误:
-        404 - 当 key_values 非空但客户不存在时
-    """
-    if not payload.key_values:
-        return {"updated": 0}
-    written = await crud.upsert_client_info(client_id, payload.key_values)
-    if written == 0:
-        # 客户不存在 or 全部值为空
-        client = await crud.get_client_detail(client_id)
-        if not client:
-            raise HTTPException(status_code=404, detail=f"客户 {client_id} 不存在")
-    return {"updated": written}
-
-
-@app.get("/api/clients/{client_id}/fills")
-async def get_client_fills(client_id: int):
-    """客户详情页"已生成文件"tab（B2）：返回该客户的模板填充历史。
-
-    路径参数:
-        client_id - clients 表主键
-
-    返回:
-        {
-          "client_id": ...,
-          "fills": [{id, template_id, template_name, output_url, output_kind,
-                     placeholder_count, created_at}, ...],
-          "total": N
-        }
-        按时间倒序，最多 100 条；output_url 为 /uploads/... 可直接下载
-    """
-    fills = await template_crud.list_fills_by_client(client_id, limit=100)
-    return {"client_id": client_id, "fills": fills, "total": len(fills)}
-
-@app.get("/api/export/{task_id}")
-async def export_result(task_id: str):
-    """导出解析任务的结构化结果为 JSON 文件下载。
-
-    路径参数:
-        task_id - 解析任务 ID
-
-    返回:
-        Content-Type: application/json 附件下载
-        文件名: {task_id}-解析后.json（中文按 RFC 5987 编码）
-        内容: 完整的解析结果（含 items / images / ocr_texts）
-
-    错误:
-        404 - 任务不存在
-    """
-    # 从内存缓存或数据库加载
-    if task_id in _task_results:
-        data = _task_results[task_id]
-    else:
-        doc = await crud.get_document(task_id)
-        if not doc:
-            raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
-        data = _build_result_from_db(doc)
-
-    # 文件名用 RFC 5987 编码处理中文
-    from urllib.parse import quote
-    filename = f"{task_id}-解析后.json"
-    filename_encoded = quote(filename, safe='')
-
-    from fastapi.responses import Response
-    content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    return Response(
-        content=content,
-        media_type="application/json",
-        headers={
-            "Content-Disposition": f"attachment; filename=\"result.json\"; filename*=UTF-8''{filename_encoded}"
-        }
-    )
-
-@app.delete("/api/history/{task_id}")
-async def delete_history(task_id: str):
-    """删除一条解析历史记录（数据库记录 + 文件系统目录）。
-
-    路径参数:
-        task_id - 解析任务 ID
-
-    行为:
-        - DB: 删除 documents 表对应行 + 关联的 client_info（按 source_doc_id）
-        - FS: 删除 output/{task_id}/ 整个目录（OCR 渲染图、解析 JSON 等）
-        - 内存: 清理 _task_status / _task_results 缓存
-
-    返回:
-        {"message": "已删除", "task_id": "..."}
-
-    错误:
-        404 - DB 与 FS 都找不到该任务
-    """
-    import shutil
-
-    # 删除数据库记录
-    deleted = await crud.delete_document(task_id)
-
-    # 删除文件系统
-    task_dir = os.path.join(OUTPUT_DIR, task_id)
-    if os.path.exists(task_dir):
-        shutil.rmtree(task_dir)
-    elif not deleted:
-        raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
-
-    # 清理内存缓存
-    _task_status.pop(task_id, None)
-    _task_results.pop(task_id, None)
-    _task_results_ts.pop(task_id, None)
-    return {"message": "已删除", "task_id": task_id}
-
-def _calc_stats(fields: dict) -> dict:
-    """计算字段统计信息"""
-    if not fields:
-        return {"total": 0, "avg_confidence": 0, "needs_review": 0}
-
-    total = len(fields)
-    confidences = []
-    needs_review = 0
-    for field_info in fields.values():
-        if isinstance(field_info, dict):
-            conf = field_info.get("confidence", 0.5)
-        else:
-            conf = 0.5
-        confidences.append(conf)
-        if conf < 0.8:
-            needs_review += 1
-
-    avg_confidence = round(sum(confidences) / len(confidences) * 100, 1) if confidences else 0
-
-    return {
-        "total": total,
-        "avg_confidence": avg_confidence,
-        "needs_review": needs_review
-    }
 
 # ====================== Word 模板相关路由 ======================
 
@@ -1667,22 +803,22 @@ async def get_template_preview_pages(template_id: int):
     rel = os.path.relpath(preview_dir, OUTPUT_DIR).replace("\\", "/")
     return {"pages": [f"/uploads/{rel}/page_{i + 1}.png" for i in range(len(abs_paths))]}
 
-class MapClientPayload(BaseModel):
-    client_id: int
+class MapPersonPayload(BaseModel):
+    person_id: int
 
-@app.post("/api/templates/{template_id}/map-client")
-async def map_client_to_template(template_id: int, payload: MapClientPayload):
-    """选客户后做 anchor → 客户字段匹配（field_hint 规则优先 + LLM 兜底，带缓存）。
+@app.post("/api/templates/{template_id}/map-person")
+async def map_person_to_template(template_id: int, payload: MapPersonPayload):
+    """选画像人员后做 anchor → 人员字段匹配（field_hint 规则优先 + LLM 兜底，带缓存）。
 
     路径参数:
         template_id - templates 表主键
 
     Body:
-        {"client_id": 1}
+        {"person_id": 1}        profile_persons 主键
 
     匹配策略:
-        1. 优先查 (template_id, client_id) 历史 fill 缓存（最近一次填充值）
-        2. 若 anchor 有 field_hint，按字段字典从客户档案查值（"主表 → 子表 → KV"三级）
+        1. 优先查 (template_id, person_id) 历史 fill 缓存（最近一次填充值）
+        2. 若 anchor 有 field_hint，按字段字典从画像人员字段(profile_person_fields)查值
         3. 兜底用 LLM 给无 field_hint 的 anchor 推断
 
     返回:
@@ -1699,15 +835,15 @@ async def map_client_to_template(template_id: int, payload: MapClientPayload):
     if not tpl:
         raise HTTPException(status_code=404, detail=f"模板 {template_id} 不存在")
 
-    result = await template_service.match_anchors_to_client(
+    result = await template_service.match_anchors_to_person(
         anchors=tpl.get("placeholders") or [],
-        client_id=payload.client_id,
+        person_id=payload.person_id,
         template_id=template_id,
     )
     return result
 
 class GeneratePayload(BaseModel):
-    client_id: Optional[int] = None
+    person_id: Optional[int] = None
     anchor_values: dict  # v2：{strN: value}
 
 @app.post("/api/templates/{template_id}/generate")
@@ -1719,7 +855,7 @@ async def generate_template_pdf(template_id: int, payload: GeneratePayload):
 
     Body:
         {
-          "client_id": <可选 int>,                 关联客户（仅记录历史用）
+          "person_id": <可选 int>,                 关联画像人员（仅记录历史/缓存用）
           "anchor_values": {"str1": "值", ...}     anchor id → 替换值
         }
 
@@ -1763,7 +899,7 @@ async def generate_template_pdf(template_id: int, payload: GeneratePayload):
     try:
         await template_crud.create_template_fill(
             template_id=template_id,
-            client_id=payload.client_id,
+            person_id=payload.person_id,
             placeholder_values=payload.anchor_values or {},
             output_pdf=output_file,
         )
@@ -2057,37 +1193,17 @@ async def _split_cleanup_once() -> int:
     return len(cleaned_ids)
 
 
-def _inmem_ttl_gc() -> tuple[int, int, int]:
-    """清理 _task_status / _task_results / _split_task_status 中超过 TTL 的终态条目。
+def _inmem_ttl_gc() -> int:
+    """清理 _split_task_status 中超过 TTL 的终态条目。
 
-    数据已在 DB,内存清掉只影响轮询 fast-path。无 _finished_ts(或 _task_results_ts)的旧条目
+    数据已在 DB,内存清掉只影响轮询 fast-path。无 _finished_ts 的旧条目
     lazy 补一个,下一轮 GC 才会被清,保证升级期间不爆毁现有任务。
-    返回 (清理的 _task_status 数, _task_results 数, _split_task_status 数)。
+    返回清理的条目数。(2026-08 起只服务拆分流水线;材料解析已改为同步接口,无内存任务态)
     """
     now = time.time()
     cutoff = now - INMEM_TASK_TTL_SECONDS
-    deleted_status = 0
-    deleted_results = 0
     deleted_split = 0
 
-    # _task_status: 仅清终态(done/error)
-    stale = []
-    for tid, info in _task_status.items():
-        if not isinstance(info, dict):
-            continue
-        if info.get("status") not in ("done", "error"):
-            continue
-        ts = info.get("_finished_ts")
-        if ts is None:
-            info["_finished_ts"] = now
-            continue
-        if ts < cutoff:
-            stale.append(tid)
-    for tid in stale:
-        _task_status.pop(tid, None)
-        deleted_status += 1
-
-    # _split_task_status: 同上
     stale = []
     for tid, info in _split_task_status.items():
         if not isinstance(info, dict):
@@ -2104,21 +1220,7 @@ def _inmem_ttl_gc() -> tuple[int, int, int]:
         _split_task_status.pop(tid, None)
         deleted_split += 1
 
-    # _task_results: 用独立 ts 表(可能含从 DB 重 hydrate 的条目,生命周期独立于 _task_status)
-    stale = []
-    for tid in list(_task_results.keys()):
-        ts = _task_results_ts.get(tid)
-        if ts is None:
-            _task_results_ts[tid] = now
-            continue
-        if ts < cutoff:
-            stale.append(tid)
-    for tid in stale:
-        _task_results.pop(tid, None)
-        _task_results_ts.pop(tid, None)
-        deleted_results += 1
-
-    return deleted_status, deleted_results, deleted_split
+    return deleted_split
 
 
 async def _split_cleanup_loop():
@@ -2142,9 +1244,9 @@ async def _split_cleanup_loop():
         except Exception as e:
             print(f"[split_cleanup] 异常(忽略,下个周期重试): {e}")
         try:
-            ds, dr, dsp = _inmem_ttl_gc()
-            if ds or dr or dsp:
-                print(f"[inmem_gc] 清理 task_status={ds} task_results={dr} split_task_status={dsp}")
+            dsp = _inmem_ttl_gc()
+            if dsp:
+                print(f"[inmem_gc] 清理 split_task_status={dsp}")
         except Exception as e:
             print(f"[inmem_gc] 异常(忽略): {e}")
         # 事件流 GC:30 天保留
@@ -2430,21 +1532,23 @@ class ArchiveDetectBusinessSubmitResponse(BaseModel):
 
 class ArchiveDetectClientInfo(BaseModel):
     """批次关联的客户简要信息。"""
-    id: int = Field(..., description="客户表主键 ID")
-    client_code: str = Field(..., description="客户编码(业务方稳定 ID,upsert key)")
+    id: Optional[int] = Field(None, description="旧客户表主键 ID(2026-08 clients 表已删除,恒 null,仅保留键防消费方 KeyError)")
+    client_code: str = Field(..., description="客户编码(业务方稳定 ID)")
     name: str = Field(..., description="客户姓名")
 
 
 class ArchiveDetectProgressInfo(BaseModel):
     """批次关联的进展包信息(业务字段透传)。"""
     id: int = Field(..., description="进展包数据库 ID")
-    client_id: int = Field(..., description="所属客户 ID")
+    client_id: Optional[int] = Field(None, description="旧客户表外键(2026-08 clients 表已删除,恒 null,仅保留键)")
+    client_code: Optional[str] = Field(None, description="客户编码(冗余在进展包行,migration 027 起)")
+    client_name: Optional[str] = Field(None, description="客户姓名(冗余在进展包行,migration 027 起)")
     handler: Optional[str] = Field(None, description="办理人(进展包属性,同客户不同进展可不同)")
     project_name: Optional[str] = Field(None, description="项目名称(如:新加坡家办)")
     project_code: Optional[str] = Field(None, description="项目编码(如:P001)")
     project_detail_name: Optional[str] = Field(None, description="项目详情名称(如:架构设计)")
     project_detail_code: Optional[str] = Field(None, description="项目详情编码(如:PD001)")
-    progress_oid: str = Field(..., description="进展 OID(业务方稳定标识,(client_id, progress_oid) 唯一)")
+    progress_oid: str = Field(..., description="进展 OID(业务方稳定标识,(client_code, progress_oid) 唯一)")
     progress_name: Optional[str] = Field(None, description="进展名称(如:递交后进展中)")
 
 
@@ -2642,7 +1746,9 @@ class ArchiveDetectDailyReportResponse(BaseModel):
 class ArchiveDetectAdminProgressItem(BaseModel):
     """后台管理进展包列表项。"""
     id: int = Field(..., description="进展包数据库 ID")
-    client_id: int = Field(..., description="所属客户 ID")
+    client_id: Optional[int] = Field(None, description="旧客户表外键(2026-08 clients 表已删除,恒 null,仅保留键)")
+    client_code: Optional[str] = Field(None, description="客户编码(冗余在进展包行,migration 027 起)")
+    client_name: Optional[str] = Field(None, description="客户姓名(冗余在进展包行,migration 027 起)")
     handler: Optional[str] = Field(None, description="办理人")
     project_name: Optional[str] = Field(None, description="项目名称")
     project_code: Optional[str] = Field(None, description="项目编码")
@@ -3092,20 +2198,19 @@ async def profile_import_remote(req: ProfileRemoteImportReq):
         m = profile_import_service.parse_api_manifest(g["customer"])
         if not m["files"]:
             continue
-        # 主客户:老表软关联(不写字段);画像 v2 写独立 profile_* 表
-        client = await crud.find_or_create_client(name)
+        # 画像 v2 只写独立 profile_* 表(2026-08 起旧 clients 软关联已随旧表删除一并摘除)
         household = await profile_crud.get_or_create_household(
-            name, legacy_client_id=client.id,
+            name, legacy_client_id=None,
             customer_code=g["customer_code"] or None, crm_oid=g["crm_oid"] or None)
         if await customer_file_crud.has_running_task(household["id"]):
             skipped_running.append(name)
             continue
         task = await customer_file_crud.create_import_task(
             filename=f"接口导入-{name}", client_name=name,
-            client_id=client.id, total_files=len(m["files"]),
+            client_id=None, total_files=len(m["files"]),
             household_id=household["id"])
         counts = await customer_file_crud.upsert_task_files(
-            task["id"], client.id, m["files"])
+            task["id"], None, m["files"])
         # 项目案件壳同步建好(一个售后项目=一个案件),早于后台任务消除里程碑路由竞态
         await profile_crud.upsert_project_cases(household["id"], m["projects"])
         tasks.append({
@@ -3277,12 +2382,12 @@ async def profile_household_regenerate(household_id: int, task_id: Optional[int]
     if task is None:
         task = await customer_file_crud.create_import_task(
             filename=f"重新生成-{household['name']}", client_name=household["name"],
-            client_id=household.get("legacy_client_id"), total_files=len(files),
+            client_id=None, total_files=len(files),
             household_id=household_id)
     else:
         await customer_file_crud.reset_import_task(task["id"], total_files=len(files))
     counts = await customer_file_crud.upsert_task_files(
-        task["id"], household.get("legacy_client_id"), files)
+        task["id"], None, files)
     asyncio.create_task(profile_import_service.run_import(task["id"]))
     event_service.log_event(
         severity="info",
@@ -3682,6 +2787,22 @@ async def profile_file_list(
 
 
 @app.get(
+    "/api/profile/households",
+    tags=["客户画像"],
+    summary="家庭下拉选项(模板填写等两级选择用)",
+)
+async def household_options(keyword: str = "", limit: int = 20):
+    """按家庭名/customer_code 模糊搜索,返回 [{id,name,customer_code}]。
+
+    Query:
+        keyword - 可选;为空时按 id 倒序返回最近家庭
+        limit   - 返回条数上限(默认 20,上限 100)
+    """
+    from db import profile_crud
+    return await profile_crud.list_household_options(keyword=keyword, limit=limit)
+
+
+@app.get(
     "/api/profile/households/{household_id}/persons",
     tags=["客户画像"],
     summary="家庭成员轻量列表(文件归属下拉用)",
@@ -3828,12 +2949,7 @@ async def profile_task_profile(task_id: int):
     task = await customer_file_crud.get_import_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    client = None
-    members = []
-    if task.get("client_id"):
-        client = await crud.get_client_detail(task["client_id"])
-        members = await family_crud.list_by_client(task["client_id"])
-    # 画像 v2:家庭 + 成员字段档案(新表,主数据源)
+    # 画像 v2:家庭 + 成员字段档案(新表,唯一数据源;旧 clients/family_members 关联已随旧表删除摘除)
     household = None
     persons = []
     assets = []
@@ -3852,8 +2968,6 @@ async def profile_task_profile(task_id: int):
         import_task_id=task_id, limit=500)
     return {
         "task": task,
-        "client": client,
-        "family_members": members,
         "household": household,
         "persons": persons,
         "assets": assets,

@@ -12,6 +12,10 @@
 - POST /api/auth/login    登录接口
 - GET  /api/healthz       健康检查探活
 - /docs, /redoc, /openapi, /swagger  文档
+- /uploads/*              静态产物文件(页图/PDF/DOCX 等)。与生产行为对齐:线上 nginx
+                          location /uploads/ 直发 output/ 静态文件、不经过本中间件,本地
+                          放行避免 <img src="/uploads/..."> 浏览器原生请求(无 Bearer) 401。
+                          注意:output/ 属公开产物目录,敏感文件一律落 temp/ 不进 output/。
 """
 
 import os
@@ -60,7 +64,8 @@ WHITELIST = [
 
 # 业务方集成接口(提交+轮询)按前缀放行:服务器上业务方不带 token,与历史行为一致。
 # 覆盖 POST /api/archive-detect/business/batch(提交) 和 GET .../batch/{id}(轮询)。
-WHITELIST_PREFIXES = ("/api/archive-detect/business/batch",)
+# /uploads 静态产物放行:生产 nginx 直发 output/ 不过本中间件,本地放行与之对齐。
+WHITELIST_PREFIXES = ("/api/archive-detect/business/batch", "/uploads")
 
 DOC_PREFIXES = ("/docs", "/redoc", "/openapi", "/swagger")
 

@@ -22,10 +22,10 @@
         <div class="summary-item"><b>识别完成时间</b><span class="mono">{{ (detail?.status || batch.status) === 'done' ? (detail?.updated_at || batch.updated_at || '-') : '-' }}</span></div>
       </div>
 
-      <div class="criteria-box" v-if="detail?.criteria || detail?.user_prompt">
+      <!-- <div class="criteria-box" v-if="detail?.criteria || detail?.user_prompt">
         <b>判定标准</b>
         <p>{{ detail.criteria || detail.user_prompt }}</p>
-      </div>
+      </div> -->
 
       <div v-if="detail?.overall_reason" class="overall-box">
         <div class="overall-title">{{ verdictLabel(detail.overall_verdict) }} · {{ detail.overall_score }}/100</div>

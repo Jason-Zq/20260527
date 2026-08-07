@@ -240,7 +240,7 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
 
 
 def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0,
-                      render_dpi: int = 0) -> list:
+                      render_dpi: int = 0, render_text_pages: bool = False) -> list:
     """逐页混合提取:含大图的页 → 渲染+OCR;无大图的页 → 直接读文本层。
 
     用于「含扫描页的 PDF」(detect_pdf_type=image 但可能有数字页):
@@ -250,7 +250,9 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0,
 
     max_ocr_pages 语义同 extract_image_pdf(限制处理的页数,文本页同样计入)。
     render_dpi>0 时按该 DPI 渲染扫描页(默认 200;画像管线传 300 提升小字识别)。
-    返回格式同 extract_image_pdf;文本页 image=None, ocr_details=[]。
+    render_text_pages=True 时数字页也渲染页图(不 OCR)——供纯 OCR 工具页左栏预览;
+    默认 False,既有调用方零变化。
+    返回格式同 extract_image_pdf;文本页默认 image=None, ocr_details=[]。
     """
     pdf = pypdfium2.PdfDocument(pdf_path)
     total_pages = len(pdf)
@@ -268,18 +270,29 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0,
         for i in range(page_limit):
             ppage = plumber.pages[i]
             # 数字页:直接读文本层(无大图,文本层是可信内容);
-            # 文本层解析失败(畸形 PDF 触发 pdfminer 内部错误)时降级按扫描页 OCR
+            # 文本层解析失败(畸形 PDF 触发 pdfminer 内部错误)或文本层为空
+            # (文字转曲/缺字体编码的"伪数字页",肉眼有字但文本层无字)时降级按扫描页 OCR
             page_text = None
             if not _page_has_big_image(ppage):
                 try:
                     page_text = (ppage.extract_text() or "").strip()
+                    if not page_text:
+                        page_text = None
                 except Exception as e:
                     print(f"  第 {i + 1} 页文本层解析失败,降级 OCR: {type(e).__name__}: {e}")
             if page_text is not None:
+                # 数字页默认不产图;render_text_pages=True 时(纯 OCR 工具页左栏预览)也渲染页图
+                image_rel = None
+                if render_text_pages:
+                    pil_image = pdf[i].render(scale=scale).to_pil()
+                    pil_image, _shrunk = _downscale_if_too_large(pil_image)
+                    text_img_filename = f"page_{i + 1}.png"
+                    pil_image.save(os.path.join(img_dir, text_img_filename), "PNG")
+                    image_rel = f"{task_id}/images/{text_img_filename}"
                 results.append({
                     "page": i + 1,
                     "text": page_text,
-                    "image": None,
+                    "image": image_rel,
                     "ocr_details": []
                 })
                 continue
@@ -396,3 +409,26 @@ def process_file(file_path: str, task_id: str, max_ocr_pages: int = 0) -> list:
         return extract_image_file(file_path, task_id)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
+
+
+def render_pdf_images(pdf_path: str, task_id: str, max_pages: int = 50) -> list[str]:
+    """把 PDF 每页渲染成 PNG 存 output/{task_id}/images/,只出图不 OCR。
+
+    用于 Office 文档经 soffice 转 PDF 后的左栏预览(纯 OCR 工具页 /api/ocr/parse)。
+    返回相对路径列表 ["{task_id}/images/page_1.png", ...],经 /uploads/ 静态挂载可访问。
+    """
+    pdf = pypdfium2.PdfDocument(pdf_path)
+    img_dir = os.path.join(OUTPUT_DIR, task_id, "images")
+    os.makedirs(img_dir, exist_ok=True)
+    scale = _render_scale(0)
+    out = []
+    try:
+        for i in range(min(len(pdf), max_pages)):
+            pil_image = pdf[i].render(scale=scale).to_pil()
+            pil_image, _shrunk = _downscale_if_too_large(pil_image)
+            img_filename = f"page_{i + 1}.png"
+            pil_image.save(os.path.join(img_dir, img_filename), "PNG")
+            out.append(f"{task_id}/images/{img_filename}")
+    finally:
+        pdf.close()
+    return out

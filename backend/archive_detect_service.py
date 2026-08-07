@@ -701,13 +701,13 @@ async def submit_business_batch(
             raise ValueError(f"重复的 file_id: {fid}")
         seen_ids.add(fid)
 
-    # 2) upsert client / progress
+    # 2) upsert progress(客户编码/姓名冗余存进展包行,2026-08 起不再写 clients 表)
     client_code = client_payload["client_code"].strip()
     client_name = client_payload["name"].strip()
-    client_id = await crud.upsert_client_by_code(client_code, client_name)
 
     progress = await crud.upsert_progress(
-        client_id=client_id,
+        client_code=client_code,
+        client_name=client_name,
         progress_oid=progress_payload["progress_oid"].strip(),
         handler=(progress_payload.get("handler") or None),
         project_name=(progress_payload.get("project_name") or None),

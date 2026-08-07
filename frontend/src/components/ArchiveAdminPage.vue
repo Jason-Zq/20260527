@@ -126,7 +126,7 @@
           <!-- <el-table-column label="来源" width="90" align="center">
             <template #default="{ row }">{{ sourceKindLabel(row.source_kind) }}</template>
           </el-table-column> -->
-          <el-table-column label="客户" min-width="120" show-overflow-tooltip>
+          <el-table-column label="客户" min-width="100" show-overflow-tooltip>
             <template #default="{ row }">{{ row.client?.name || '-' }}</template>
           </el-table-column>
           <el-table-column label="办理人" min-width="100" show-overflow-tooltip align="center">
@@ -163,7 +163,7 @@
           <el-table-column label="识别完成时间" width="160">
             <template #default="{ row }"><span class="dim mono">{{ row.status === 'done' ? row.updated_at : '-' }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="200" align="center" fixed="right">
+          <el-table-column label="操作" width="160" align="center" fixed="right">
             <template #default="{ row }">
               <el-button size="small" type="primary" link @click="selectBatch(row)">详情</el-button>
               <el-button

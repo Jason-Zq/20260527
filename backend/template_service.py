@@ -25,8 +25,8 @@ from sqlalchemy import select
 
 import llm_service
 from db.engine import async_session_maker
-from db.models import Client, ClientInfo
 from db import template_crud
+from db import profile_crud
 
 # ---------- soffice 定位 + docx → PNG 渲染（高保真预览） ----------
 
@@ -549,79 +549,45 @@ def enrich_anchors_with_llm(anchors: list[dict], docx_text: str | None = None) -
 
     return enriched
 
-async def _load_client_sources_v2(client_id: int) -> dict:
-    """v2 客户字段拍平：主表 + client_info + computed。
+async def _load_person_sources_v2(person_id: int) -> dict:
+    """v2 画像人员字段拍平:profile_person_fields + computed。
 
-    返回 {key: value}，key 用 FIELD_DICTIONARY 的 key。
+    返回 {key: value},key 用 FIELD_DICTIONARY 的 key(命名空间不变,
+    存量模板 anchor 的 field_hint 不受影响)。人员不存在返回 {}。
     """
     import field_dictionary as fd
-    from datetime import datetime, date
+    from datetime import date
 
-    async with async_session_maker() as session:
-        res = await session.execute(select(Client).where(Client.id == client_id))
-        client = res.scalar_one_or_none()
-        if not client:
-            return {}
+    field_map = await profile_crud.get_person_field_map(person_id)
+    if field_map is None:
+        return {}
 
-        sources: dict = {}
-        # 主表 6 字段
-        if client.name:
-            sources["name"] = client.name
-        if client.id_number:
-            sources["id_number"] = client.id_number
-        if client.gender:
-            sources["gender"] = client.gender
-        if client.birth_date:
-            sources["birth_date"] = client.birth_date
-        if client.nationality:
-            sources["nationality"] = client.nationality
-        if client.consultant:
-            sources["consultant"] = client.consultant
-        if client.notes:
-            sources["notes"] = client.notes
+    sources: dict = {}
+    for fdef in fd.FIELD_DICTIONARY:
+        src = fdef.source
+        if src.startswith("person."):
+            # 多候选 "|" 连接,依次取第一个非空
+            for key in src.split(".", 1)[1].split("|"):
+                v = field_map.get(key)
+                if v:
+                    sources[fdef.key] = v
+                    break
+        elif src == "computed.today":
+            sources[fdef.key] = date.today()
+        # "none" = 画像无对应数据源,恒 unmatched(模板里手填)
+    return sources
 
-        # client_info KV → 按字典的 source 反查匹配 key
-        info_res = await session.execute(
-            select(ClientInfo).where(ClientInfo.client_id == client_id)
-        )
-        infos = info_res.scalars().all()
-
-        # 建反向索引：info_key → field key
-        info_key_to_fd_key: dict[str, str] = {}
-        for fdef in fd.FIELD_DICTIONARY:
-            if fdef.source.startswith("client_info."):
-                ik = fdef.source.split(".", 1)[1]
-                info_key_to_fd_key[ik] = fdef.key
-
-        for info in infos:
-            if not info.info_value:
-                continue
-            # 优先按字典精确匹配
-            fd_key = info_key_to_fd_key.get(info.info_key)
-            if fd_key:
-                sources[fd_key] = info.info_value
-            else:
-                # 兜底：用 info_key 作 key（业务自定义字段）
-                sources[info.info_key] = info.info_value
-
-        # computed 字段
-        for fdef in fd.FIELD_DICTIONARY:
-            if fdef.source == "computed.today":
-                sources["today"] = date.today()
-
-        return sources
-
-async def match_anchors_to_client(
+async def match_anchors_to_person(
     anchors: list[dict],
-    client_id: int,
+    person_id: int,
     template_id: int | None = None,
 ) -> dict:
-    """按 anchor 列表做客户字段匹配。
+    """按 anchor 列表做画像人员字段匹配。
 
     返回 {"matched": {placeholder_id: value}, "unmatched": [placeholder_id], "from_cache": bool}
 
     策略：
-      1) 缓存（template_id + client_id）命中即返回
+      1) 缓存（template_id + person_id）命中即返回
       2) 规则层：anchor 有 field_hint → 从 sources 直查，命中即返回
       3) LLM 兜底层：剩下没匹配或没 hint 的 anchor 批量送 LLM
     """
@@ -635,14 +601,14 @@ async def match_anchors_to_client(
 
     # 1) 缓存
     if template_id is not None:
-        cached = await template_crud.get_cached_fill(template_id, client_id)
+        cached = await template_crud.get_cached_fill(template_id, person_id)
         if cached:
             matched = {i: str(cached[i]) for i in ids if i in cached and cached[i]}
             unmatched = [i for i in ids if i not in matched]
             return {"matched": matched, "unmatched": unmatched, "from_cache": True}
 
     # 2) 规则层
-    sources = await _load_client_sources_v2(client_id)
+    sources = await _load_person_sources_v2(person_id)
     matched: dict[str, str] = {}
     need_llm: list[int] = []  # idx_in_anchors 待送 LLM
 
@@ -685,7 +651,7 @@ async def match_anchors_to_client(
 
     try:
         from llm_service import _call_llm
-        result_text = await asyncio.to_thread(_call_llm, prompt, operation="match_anchors_to_client", task_id=f"client:{client_id}")
+        result_text = await asyncio.to_thread(_call_llm, prompt, operation="match_anchors_to_person", task_id=f"person:{person_id}")
         data = json.loads(result_text)
         if isinstance(data, dict):
             for ph_id, v in data.items():

@@ -75,6 +75,21 @@ def _make_xlsx(name: str, text: str = "", with_image: bool = False) -> str:
     return p
 
 
+def _make_pptx(name: str, text: str = "", with_image: bool = False) -> str:
+    from pptx import Presentation
+    from pptx.util import Emu
+    p = os.path.join(_TMP, name)
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank 版式
+    if text:
+        tb = slide.shapes.add_textbox(Emu(0), Emu(0), Emu(4000000), Emu(1000000))
+        tb.text_frame.text = text
+    if with_image:
+        slide.shapes.add_picture(_make_png(f"{name}_ppimg.png"), Emu(0), Emu(0))
+    prs.save(p)
+    return p
+
+
 def _reset():
     _ocr_calls.clear()
 
@@ -171,6 +186,25 @@ def test_xlsx_with_text_no_ocr():
     p = _make_xlsx("text.xlsx", text="单元格内容足够长," * 20, with_image=True)
     r = text_extractor._extract_xlsx(p)
     assert r["source"] == "xlsx_text", r["source"]
+    assert len(_ocr_calls) == 0, _ocr_calls
+
+
+def test_pptx_image_only_triggers_ocr():
+    """空文字 pptx + 嵌大图(扫描件贴进 PPT):触发 OCR,source=pptx_img_ocr。"""
+    _reset()
+    p = _make_pptx("scan.pptx", with_image=True)
+    r = text_extractor._extract_pptx(p)
+    assert r["source"] == "pptx_img_ocr", r["source"]
+    assert "模拟识别文字" in r["text"], r["text"]
+    assert len(_ocr_calls) == 1, _ocr_calls
+
+
+def test_pptx_with_text_no_ocr():
+    """有文本的 pptx(≥80 字):不触发嵌图 OCR。"""
+    _reset()
+    p = _make_pptx("text.pptx", text="幻灯片正文内容足够长," * 20, with_image=True)
+    r = text_extractor._extract_pptx(p)
+    assert r["source"] == "pptx_text", r["source"]
     assert len(_ocr_calls) == 0, _ocr_calls
 
 

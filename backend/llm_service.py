@@ -214,96 +214,6 @@ def _call_llm(
     raise last_error
 
 
-def detect_and_extract(ocr_texts: list, **context) -> dict:
-    """
-    一次LLM调用同时完成证件类型检测 + 结构化提取（含置信度）。
-    支持多张证件：返回 items 数组，每项包含 doc_type + fields。
-    字段完全由AI自行判断提取，不预定义固定格式。
-    返回格式: {"items": [{"doc_type": "身份证", "fields": {...}}, ...]}
-    """
-    doc_types = CONFIG.get("document_types", [])
-    if not doc_types:
-        # 兼容旧配置：如果仍使用 document_prompts 格式
-        doc_types = list(CONFIG.get("document_prompts", {}).keys())
-
-    all_text = "\n".join(ocr_texts)
-
-    prompt = (
-        "你是一个专业的证件信息提取助手。请完成以下任务：\n"
-        "1. 判断OCR文字属于哪种证件类型（可能包含多张同类或不同类证件）\n"
-        "2. 分别提取每张证件中所有可识别的重要信息\n\n"
-        f"参考证件类型：{'、'.join(doc_types)}\n\n"
-        "提取要求：\n"
-        "- 字段名由你根据证件内容自行命名，使用简洁的中文（如：姓名、身份证号、签发机关、有效期限等）\n"
-        "- 不要遗漏任何可识别的重要信息，尽可能全面提取\n"
-        "- 如果OCR文字中出现非标准证件类型，也请尽力提取其中的关键信息\n\n"
-        "请返回JSON格式，包含items数组：\n"
-        "- items: 证件信息数组，每个元素包含doc_type和fields\n"
-        "  - doc_type: 证件类型名称（从参考列表中选择最匹配的，如无法匹配则自行命名）\n"
-        "  - fields: 各字段的提取结果，每个字段包含value和confidence（0到1之间的小数表示置信度）\n"
-        "如果只有一张证件，items数组只包含一个元素。\n"
-        '示例：{"items": [{"doc_type": "身份证", "fields": {"姓名": {"value": "张三", "confidence": 0.98}, "签发机关": {"value": "佛山市公安局", "confidence": 0.92}}}]}\n'
-        "只返回JSON，不要包含其他文字。\n\n"
-        f"OCR识别文字：\n{all_text}"
-    )
-
-    print("正在调用大模型（类型检测+结构化提取，支持多证件）...")
-    try:
-        result_text = _call_llm(prompt, operation="detect_and_extract", **context)
-        data = json.loads(result_text)
-
-        # 兼容：如果LLM返回的是单证件格式（doc_type + fields），自动转为items数组
-        if "doc_type" in data and "items" not in data:
-            items = [{"doc_type": data["doc_type"], "fields": data.get("fields", {})}]
-        elif "items" in data:
-            items = data["items"]
-        else:
-            items = [{"doc_type": "未知", "fields": data}]
-
-        # 规范化每个item
-        normalized_items = []
-        for item in items:
-            doc_type = item.get("doc_type", "未知")
-            # 验证类型是否在可选列表中
-            if doc_type not in doc_types:
-                for dt in doc_types:
-                    if dt in str(doc_type):
-                        doc_type = dt
-                        break
-
-            raw_fields = item.get("fields", {})
-            fields = _normalize_fields(raw_fields)
-            normalized_items.append({"doc_type": doc_type, "fields": fields})
-
-        print(f"  识别到 {len(normalized_items)} 张证件: {[it['doc_type'] for it in normalized_items]}")
-        return {"items": normalized_items}
-
-    except json.JSONDecodeError as e:
-        print(f"大模型返回内容解析失败: {e}")
-        print(f"原始返回: {result_text[:200]}")
-        return {"items": []}
-    except Exception as e:
-        print(f"大模型调用失败: {e}")
-        return {"items": []}
-
-
-def _normalize_fields(raw_fields: dict) -> dict:
-    """将字段统一规范化为 {value, confidence} 格式。"""
-    converted = {}
-    for key, val in raw_fields.items():
-        if isinstance(val, dict) and "value" in val:
-            converted[key] = {
-                "value": str(val["value"]),
-                "confidence": float(val.get("confidence", 0.5))
-            }
-        else:
-            converted[key] = {
-                "value": str(val),
-                "confidence": 0.5
-            }
-    return converted
-
-
 def _normalize_doc_type(raw: str) -> str:
     """规范化 LLM 返回的证件类型名,确保相邻同类合并能正确匹配。
 
@@ -456,40 +366,6 @@ def detect_page_ranges(per_page_texts: list, **context) -> list:
     print(f"[detect_page_ranges] 合并后 {len(ranges)} 个范围: "
           f"{[(r['doc_type'], r['page_start'], r['page_end']) for r in ranges]}")
     return ranges
-
-
-def match_bboxes_to_fields(fields: dict, ocr_details: list) -> dict:
-    """
-    将 OCR 坐标框按字段值匹配，关联到对应字段。
-    fields: {"姓名": {"value": "张三", "confidence": 0.98}, ...}
-    ocr_details: [{"text": "张三", "confidence": 0.95, "bbox": [...]}, ...]
-    返回: {"姓名": {"value": "张三", "confidence": 0.98, "bbox": [...]}, ...}
-    """
-    result = {}
-    for field_name, field_info in fields.items():
-        value = field_info.get("value", "")
-        matched_bbox = None
-
-        # 在 OCR 详情中查找包含该值的文字行
-        if value and ocr_details:
-            for detail in ocr_details:
-                if value in detail["text"] or detail["text"] in value:
-                    matched_bbox = detail["bbox"]
-                    break
-
-        result[field_name] = {
-            "value": value,
-            "confidence": field_info.get("confidence", 0.5),
-            "bbox": matched_bbox
-        }
-
-    return result
-
-
-# ====================== 文件摘要（通用） ======================
-
-# 摘要 prompt 输入文本上限。超过会前后截取，避免 LLM 上下文超限。
-SUMMARY_INPUT_LIMIT_CHARS = 30000
 
 
 def _build_summary_prompt(text: str, progress_name: str | None) -> str:
@@ -1238,70 +1114,6 @@ def judge_batch_overall_v2(
 # ==================== 客户资料结构化抽取 ====================
 
 
-def _build_client_profile_prompt(ocr_text: str, filename: str, doc_category: str) -> str:
-    return (
-        "你是移民客户档案结构化助手。请从单个客户文件 OCR 文本中抽取可写入 PostgreSQL 的结构化事实。\n"
-        "只抽取文本中明确出现的信息；不确定不要编造；日期尽量规范为 YYYY-MM-DD；金额只保留数字和币种。\n\n"
-        f"文件名:{filename or ''}\n"
-        f"文件分类:{doc_category or ''}\n\n"
-        "请返回严格 JSON，不要 markdown，结构如下：\n"
-        '{"client_basic":{"name_en":"","gender":"","birth_date":"YYYY-MM-DD","birth_place":"","nationality":"","id_number":"","passport_no":"","passport_expiry_date":"YYYY-MM-DD","marital_status":""},'
-        '"family_members":[{"relation":"child|spouse|parent|other","name":"","gender":"","birth_date":"YYYY-MM-DD","nationality":"","id_number":"","passport_no":"","birth_cert_no":"","birth_place":""}],'
-        '"assets":[{"asset_type":"deposit|bank_statement|property|stock|vehicle|other","asset_name":"","owner_name":"","value_amount":null,"currency":"","bank_name":"","account_no":"","location_address":"","certificate_no":""}],'
-        '"extra_info":[{"key":"","value":""}],"confidence_notes":["..."]}\n\n'
-        "OCR 文本:\n---\n"
-        f"{ocr_text}\n---\n"
-    )
-
-
-def extract_client_profile_facts(ocr_text: str, filename: str = "", doc_category: str = "", **context) -> dict:
-    """从单个文件 OCR 文本中抽取客户档案结构化事实。"""
-    if not ocr_text or not ocr_text.strip():
-        raise ValueError("OCR 文本为空，无法抽取客户档案")
-    src = ocr_text.strip()
-    if len(src) > ARCHIVE_DETECT_INPUT_LIMIT_CHARS:
-        head_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS // 2
-        tail_n = ARCHIVE_DETECT_INPUT_LIMIT_CHARS - head_n
-        src = src[:head_n] + f"\n\n...[省略 {len(ocr_text) - ARCHIVE_DETECT_INPUT_LIMIT_CHARS} 字]...\n\n" + src[-tail_n:]
-
-    raw = _call_llm(_build_client_profile_prompt(src, filename, doc_category), operation="extract_client_profile_facts", **context)
-    try:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        data = json.loads(raw[start:end + 1] if start >= 0 and end > start else raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"LLM 返回非合法客户档案 JSON：{raw[:200]}") from e
-
-    return {
-        "client_basic": data.get("client_basic") or {},
-        "family_members": data.get("family_members") or [],
-        "assets": data.get("assets") or [],
-        "extra_info": data.get("extra_info") or [],
-        "confidence_notes": data.get("confidence_notes") or [],
-    }
-
-
-# ==================== 客户画像:证件类型识别 + 按规则字段提取 + 规则起草 ====================
-
-DOC_EXTRACT_TYPES = ("id_card", "hukou", "degree_cert", "birth_cert", "passport", "kyc_form",
-                     "marriage_cert", "property_cert", "no_crime", "approval",
-                     "submission", "receipt")
-DOC_TYPE_NAMES = {
-    "id_card": "身份证(居民身份证)",
-    "hukou": "居民户口簿",
-    "degree_cert": "学位证书",
-    "birth_cert": "出生医学证明",
-    "passport": "护照",
-    "kyc_form": "KYC 信息收集表(客户尽职调查表)",
-    "marriage_cert": "结婚证",
-    "property_cert": "房产证/不动产权证(含不动产登记查册)",
-    "no_crime": "无犯罪记录证明",
-    "approval": "批复/获批文件(永居卡/批复函等)",
-    "submission": "递交申请包(签证申请表+附材料合订)",
-    "receipt": "签收回执(重要文件签收函)",
-}
-
-
 def _load_llm_json(raw: str) -> dict:
     """容错解析 LLM 返回的 JSON 对象:截取首个 { 到末个 } 再 json.loads。"""
     raw = (raw or "").strip()
@@ -1369,6 +1181,23 @@ def recognize_doc_type(text_head: str, **context) -> dict:
     except Exception as e:
         print(f"[recognize_doc_type] LLM 调用/解析失败,按 other 处理: {e}")
         return fallback
+
+
+# 画像提取 prompt 用的证件类型中文名(12 类;原老材料解析管线共用,老管线删除后保留给画像)
+DOC_TYPE_NAMES = {
+    "id_card": "身份证(居民身份证)",
+    "hukou": "居民户口簿",
+    "degree_cert": "学位证书",
+    "birth_cert": "出生医学证明",
+    "passport": "护照",
+    "kyc_form": "KYC 信息收集表(客户尽职调查表)",
+    "marriage_cert": "结婚证",
+    "property_cert": "房产证/不动产权证(含不动产登记查册)",
+    "no_crime": "无犯罪记录证明",
+    "approval": "批复/获批文件(永居卡/批复函等)",
+    "submission": "递交申请包(签证申请表+附材料合订)",
+    "receipt": "签收回执(重要文件签收函)",
+}
 
 
 def _build_field_lines(rule: dict) -> str:

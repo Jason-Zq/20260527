@@ -599,9 +599,11 @@ def _extract_pptx(file_path: str) -> dict:
             parts.extend(slide_lines)
 
     text = "\n".join(parts).strip()
+    # 纯文本过短:疑扫描件贴图 PPT,对 ppt/media/ 嵌图 OCR(与 docx/xlsx 同口径)
+    text, source = _merge_office_img_ocr(file_path, text, "pptx_text", "ppt/media/")
     return {
         "text": text,
-        "source": "pptx_text",
+        "source": source,
         "page_count": len(prs.slides),
         "char_count": len(text),
     }
@@ -631,11 +633,13 @@ def _ocr_single_page(file_path: str, task_id: str, page_index_0based: int,
     import pdfplumber
     import pypdfium2
 
-    # 数字页:无大图 → 文本层直接返回
+    # 数字页:无大图 → 文本层直接返回;文本层为空(文字转曲/伪数字页)继续走 OCR
     with pdfplumber.open(file_path) as plumber:
         ppage = plumber.pages[page_index_0based]
         if not ocr_service._page_has_big_image(ppage):
-            return (ppage.extract_text() or "").strip()
+            text = (ppage.extract_text() or "").strip()
+            if text:
+                return text
 
     # 扫描页:渲染 + OCR
     img_dir = os.path.join(ocr_service.OUTPUT_DIR, task_id, "images")
@@ -688,10 +692,25 @@ def _extract_pdf(file_path: str, render_dpi: int = 0) -> dict:
         if pdf_type == "text":
             try:
                 pages = ocr_service.extract_text_pdf(file_path)
+                # 文字型判定是文档级的,逐页补漏:文本层为空的页(文字转曲伪数字页/
+                # 追加的无文本层扫描页)单页 OCR 兜底,不静默吞内容
+                ocr_filled = False
+                for i, p in enumerate(pages):
+                    if (p.get("text") or "").strip():
+                        continue
+                    try:
+                        ocr_text = _ocr_single_page(file_path, task_id, i,
+                                                    render_dpi=render_dpi)
+                    except Exception as e:
+                        print(f"[text_extractor] 第 {i + 1} 页兜底 OCR 失败(留空): {e}")
+                        continue
+                    if ocr_text.strip():
+                        p["text"] = ocr_text
+                        ocr_filled = True
                 text = "\n\n".join(p.get("text", "") for p in pages).strip()
                 return {
                     "text": text,
-                    "source": "pdf_text",
+                    "source": "pdf_text+ocr" if ocr_filled else "pdf_text",
                     "page_count": len(pages),
                     "char_count": len(text),
                 }

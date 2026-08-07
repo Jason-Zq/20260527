@@ -1,10 +1,6 @@
 <template>
   <div class="template-list-page">
     <div class="page-header">
-      <el-button class="back-btn" @click="emit('back')" size="default">
-        <el-icon style="margin-right: 4px"><ArrowLeft /></el-icon>
-        返回
-      </el-button>
       <div class="page-title">
         <span class="title-indicator"></span>
         模板管理
@@ -73,12 +69,12 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { ArrowLeft, Upload, Document, Edit, Delete, Loading } from '@element-plus/icons-vue'
+import { Upload, Document, Edit, Delete, Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listTemplates, deleteTemplate } from '../api.js'
 import TemplateUploadDialog from './TemplateUploadDialog.vue'
 
-const emit = defineEmits(['back', 'fill'])
+const emit = defineEmits(['fill'])
 
 const templates = ref([])
 const loading = ref(false)
@@ -151,8 +147,6 @@ onMounted(loadTemplates)
   flex-shrink: 0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
-
-.back-btn { flex-shrink: 0; }
 
 .page-title {
   font-size: 16px;

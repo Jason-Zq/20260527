@@ -118,6 +118,9 @@ function onLogout() {
 
 html, body {
   height: 100%;
+  /* 应用是固定视口布局(所有面板自管滚动),页面级滚动条不该出现;
+     不锁死的话,任何瞬时超高都会让 body 滚动条闪现,把整个界面推晃 */
+  overflow: hidden;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: #f0f2f8;
 }

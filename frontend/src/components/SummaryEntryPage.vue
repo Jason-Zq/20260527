@@ -2,10 +2,6 @@
   <div class="summary-entry-page">
     <!-- 顶栏 -->
     <div class="entry-header">
-      <el-button class="back-btn" @click="emit('back')" size="default">
-        <el-icon style="margin-right: 4px"><ArrowLeft /></el-icon>
-        返回首页
-      </el-button>
       <div class="entry-title">
         <span class="title-indicator"></span>
         文件解析
@@ -229,18 +225,12 @@
 defineOptions({ name: 'SummaryEntryPage' })
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import {
-  ArrowLeft, Link, MagicStick, Reading, Document, Star,
+  Link, MagicStick, Reading, Document, Star,
   CopyDocument, Download, RefreshRight, Clock, Flag,
   CircleCheck, CircleClose, Warning,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { summarizeFile, listSummaries, getSummary, deleteSummary } from '../api.js'
-import { useRouter } from 'vue-router'
-
-const router = useRouter()
-function emit(evt) {
-  if (evt === 'back') router.push('/')
-}
 
 const url = ref('')
 const progressName = ref('')
@@ -466,13 +456,6 @@ onUnmounted(stopElapsed)
   flex-shrink: 0;
   border-bottom: 1px solid #e8ebf5;
 }
-.back-btn {
-  background: #f1f5f9 !important;
-  border: 1px solid #e2e8f0 !important;
-  color: #475569 !important;
-  border-radius: 8px !important;
-}
-.back-btn:hover { background: #e2e8f0 !important; color: #f59e0b !important; }
 .entry-title { font-size: 16px; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 10px; }
 .title-indicator {
   width: 3px; height: 16px;

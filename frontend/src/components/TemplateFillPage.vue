@@ -30,28 +30,47 @@
       </div>
 
       <div v-else class="fill-layout">
-        <!-- 左：客户选择 + 模板信息 -->
+        <!-- 左：画像家庭/人员选择 + 模板信息 -->
         <div class="left-side">
           <div class="card">
             <div class="card-header">
               <el-icon><User /></el-icon>
-              <span>选择已有客户（可选）</span>
+              <span>选择画像人员（可选）</span>
             </div>
             <div class="card-body">
               <el-select
-                v-model="selectedClientId"
+                v-model="selectedHouseholdId"
+                filterable
+                remote
+                clearable
+                placeholder="搜索家庭名或客户编码"
+                :remote-method="searchHouseholds"
+                :loading="householdsLoading"
+                @change="onHouseholdChange"
+                style="width: 100%; margin-bottom: 8px;"
+              >
+                <el-option
+                  v-for="h in households"
+                  :key="h.id"
+                  :label="`${h.name}${h.customer_code ? ' [' + h.customer_code + ']' : ''}`"
+                  :value="h.id"
+                />
+              </el-select>
+              <el-select
+                v-model="selectedPersonId"
                 filterable
                 clearable
-                placeholder="输入姓名或证件号搜索"
-                @change="onClientChange"
-                :loading="matching"
+                placeholder="选择人员"
+                :disabled="!selectedHouseholdId"
+                :loading="matching || personsLoading"
+                @change="onPersonChange"
                 style="width: 100%;"
               >
                 <el-option
-                  v-for="c in clients"
-                  :key="c.id"
-                  :label="`${c.name}${c.id_number ? ' · ' + c.id_number : ''}`"
-                  :value="c.id"
+                  v-for="p in persons"
+                  :key="p.id"
+                  :label="`${p.name}${p.is_main ? ' · 主申请人' : (p.relation_to_main && p.relation_to_main !== '待确认' ? ' · ' + p.relation_to_main : '')}`"
+                  :value="p.id"
                 />
               </el-select>
               <div v-if="fromCache" class="cache-tip">
@@ -131,7 +150,7 @@
                 <el-tag v-if="ph.field_hint" size="small" effect="plain" type="success" :title="'字段：' + ph.field_hint">
                   {{ fieldHintLabel(ph.field_hint) }}
                 </el-tag>
-                <el-tag v-if="isLocked(ph)" size="small" effect="dark" type="info" title="该字段为法定核心信息，请到客户档案修改">
+                <el-tag v-if="isLocked(ph)" size="small" effect="dark" type="info" title="该字段为法定核心信息，请到客户画像修改">
                   <el-icon style="vertical-align: -2px; margin-right: 2px"><Lock /></el-icon>
                   锁定
                 </el-tag>
@@ -149,16 +168,6 @@
               此模板无占位符
             </div>
           </div>
-          <!-- B1：反向同步主数据 -->
-          <div v-if="selectedClientId" class="form-footer">
-            <el-checkbox v-model="syncToClient" size="small">
-              生成后把可变字段同步到客户档案
-            </el-checkbox>
-            <div class="footer-tip">
-              <el-icon><InfoFilled /></el-icon>
-              锁定字段（{{ lockedFieldsCount }} 项）不会同步，仅未锁定字段会写回。
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -172,8 +181,8 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getTemplatePreviewHtml, getTemplatePreviewPages, listClients, mapClientToTemplate,
-  generateTemplatePdf, FIELD_DICTIONARY_OPTIONS, LOCKED_FIELD_HINTS, upsertClientInfo,
+  getTemplatePreviewHtml, getTemplatePreviewPages, listHouseholdOptions, listHouseholdPersons,
+  mapPersonToTemplate, generateTemplatePdf, FIELD_DICTIONARY_OPTIONS, LOCKED_FIELD_HINTS,
 } from '../api.js'
 
 const props = defineProps({
@@ -194,12 +203,13 @@ const placeholders = ref([])
 const values = reactive({})              // {strN: value}
 const unmatchedIds = ref(new Set())
 
-const clients = ref([])
-const selectedClientId = ref(null)
-const matchedHints = ref(new Set())  // 客户匹配命中的 field_hint 集合（用于绿标）
-
-// B1：是否把可变字段反向同步到客户档案（生成时一并提交）
-const syncToClient = ref(true)
+const households = ref([])
+const householdsLoading = ref(false)
+const persons = ref([])
+const personsLoading = ref(false)
+const selectedHouseholdId = ref(null)
+const selectedPersonId = ref(null)
+const matchedHints = ref(new Set())  // 人员匹配命中的 field_hint 集合（用于绿标）
 
 const fieldHintMap = Object.fromEntries(
   FIELD_DICTIONARY_OPTIONS.map(o => [o.value, o.label])
@@ -209,7 +219,7 @@ function fieldHintLabel(h) {
   return fieldHintMap[h] || h
 }
 
-/** B1：判断 anchor 是否锁定（field_hint 在 LOCKED_FIELD_HINTS 中）。 */
+/** 判断 anchor 是否锁定（field_hint 在 LOCKED_FIELD_HINTS 中）。 */
 function isLocked(ph) {
   return !!ph?.field_hint && LOCKED_FIELD_HINTS.has(ph.field_hint)
 }
@@ -231,11 +241,6 @@ function kindTagType(ph) {
 
 const filledCount = computed(() =>
   placeholders.value.filter(p => values[p.id]).length
-)
-
-/** B1：模板里有 field_hint 命中锁定字段的数量。 */
-const lockedFieldsCount = computed(() =>
-  placeholders.value.filter(isLocked).length
 )
 
 // 预览 HTML：把每个占位符的 original_text 替换为值或高亮未填
@@ -309,27 +314,51 @@ async function loadPages() {
   }
 }
 
-async function loadClients() {
+async function loadHouseholds(keyword = '') {
+  householdsLoading.value = true
   try {
-    const data = await listClients()
-    clients.value = data.clients || []
+    households.value = await listHouseholdOptions(keyword)
   } catch (err) {
-    console.warn('客户列表加载失败', err)
+    console.warn('家庭列表加载失败', err)
+  } finally {
+    householdsLoading.value = false
   }
 }
 
-async function onClientChange(clientId) {
+function searchHouseholds(keyword) {
+  loadHouseholds(keyword || '')
+}
+
+async function onHouseholdChange(householdId) {
+  selectedPersonId.value = null
+  persons.value = []
   unmatchedIds.value = new Set()
   matchedHints.value = new Set()
   fromCache.value = false
-  if (!clientId) {
+  for (const p of placeholders.value) values[p.id] = ''
+  if (!householdId) return
+  personsLoading.value = true
+  try {
+    persons.value = await listHouseholdPersons(householdId)
+  } catch (err) {
+    ElMessage.error('人员列表加载失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    personsLoading.value = false
+  }
+}
+
+async function onPersonChange(personId) {
+  unmatchedIds.value = new Set()
+  matchedHints.value = new Set()
+  fromCache.value = false
+  if (!personId) {
     // 清空所有值
     for (const p of placeholders.value) values[p.id] = ''
     return
   }
   matching.value = true
   try {
-    const result = await mapClientToTemplate(props.templateId, clientId)
+    const result = await mapPersonToTemplate(props.templateId, personId)
     const matched = result.matched || {}
     const unmatched = result.unmatched || []
     for (const p of placeholders.value) {
@@ -346,10 +375,10 @@ async function onClientChange(clientId) {
     if (Object.keys(matched).length) {
       ElMessage.success(`已自动填充 ${Object.keys(matched).length} 个占位符`)
     } else {
-      ElMessage.info('未匹配到任何客户信息')
+      ElMessage.info('未匹配到任何人员信息')
     }
   } catch (err) {
-    ElMessage.error('客户匹配失败：' + (err.response?.data?.detail || err.message))
+    ElMessage.error('人员匹配失败：' + (err.response?.data?.detail || err.message))
   } finally {
     matching.value = false
   }
@@ -381,37 +410,13 @@ async function handleGenerate() {
   generating.value = true
   try {
     const { filename, isFallback } = await generateTemplatePdf(props.templateId, {
-      client_id: selectedClientId.value,
+      person_id: selectedPersonId.value,
       anchor_values,
     })
     if (isFallback) {
       ElMessage.warning('PDF 转换失败，已降级下载 docx 文件')
     } else {
       ElMessage.success(`已下载：${filename}`)
-    }
-
-    // B1：把未锁定字段反向同步到客户档案
-    if (selectedClientId.value && syncToClient.value) {
-      const keyValues = {}
-      for (const p of placeholders.value) {
-        if (isLocked(p)) continue                     // 锁定字段不同步
-        if (!p.field_hint) continue                   // 没有明确字段映射的不同步（避免乱写）
-        const v = values[p.id]
-        if (!v || !String(v).trim()) continue
-        // 用字段字典中的中文 label 作为 info_key，与人工复核归档保持一致
-        const label = fieldHintMap[p.field_hint] || p.field_hint
-        keyValues[label] = String(v).trim()
-      }
-      if (Object.keys(keyValues).length) {
-        try {
-          const res = await upsertClientInfo(selectedClientId.value, keyValues)
-          if (res.updated > 0) {
-            ElMessage.success(`已同步 ${res.updated} 项到客户档案`)
-          }
-        } catch (err) {
-          ElMessage.warning('档案同步失败：' + (err.response?.data?.detail || err.message))
-        }
-      }
     }
   } catch (err) {
     ElMessage.error('生成失败：' + (err.response?.data?.detail || err.message))
@@ -423,7 +428,7 @@ async function handleGenerate() {
 onMounted(() => {
   loadTemplate()
   loadPages()
-  loadClients()
+  loadHouseholds()
 })
 </script>
 
@@ -721,20 +726,6 @@ onMounted(() => {
   gap: 4px;
   flex-wrap: wrap;
   margin-top: 2px;
-}
-.form-footer {
-  flex-shrink: 0;
-  border-top: 1px solid #e2e8f0;
-  padding: 12px 14px;
-  background: #f8fafc;
-}
-.footer-tip {
-  font-size: 11px;
-  color: #94a3b8;
-  margin-top: 4px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 .form-id {
   font-family: 'JetBrains Mono', monospace;

@@ -13,12 +13,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 核心业务线：
 
 1. **文件留底检测 / 业务审核**：业务方传入客户+项目+进展+文件列表（OSS URL）；后端 OCR/文本抽取 + LLM 按公司留底分类体系判定，持久化单文件结果、OCR 脱敏文本、批次总体报告，支持同 `(progress_id, file_id)` 的历史结果复用。**快速检测（upload/urls）已移除，业务审核是唯一入口**。
-2. **AI 材料解析**：上传 PDF/图片 → OCR + LLM 提取结构化字段 → 人工复核 → 归档到客户档案。
-3. **客户档案结构化生成**：从文件留底检测完成的 OCR 文件中，批量抽取客户/家庭成员/资产事实，自动写入客户档案结构化表；策略：**只补空字段，不覆盖已有非空人工数据**，避免误改。
-4. **客户画像（接口导入）**：从业务方接口 `getAfterCustomerAllFiles` 拉客户文件清单（预览勾选）→ 全量 OCR 入客户文件库（fresh 存原文）→ 关键词+LLM 分类 12 类证件 → 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 画像域（简体/繁体/间隔号/拼音去重不重复建人 + 同名自动合并）、按售后项目多案件。方案见 [docs/09-客户画像-Excel导入方案.md](docs/09-客户画像-Excel导入方案.md)。
-5. **Word 模板填写**：上传 docx 模板 → 扫描占位符/锚点 → 选择客户 → 从客户档案填值 → 输出 docx/PDF。
-6. **PDF 拆分**：上传多证件合并 PDF → 全页 OCR + LLM 判断页边界 → 按证件类型拆为独立 PDF。
-7. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
+2. **材料解析（纯 OCR 工具）**：上传 PDF/Office/图片 → 同步返回每页图片 + OCR/抽取文字（`POST /api/ocr/parse`）。不写库、不调 LLM、无归档——旧「AI 材料解析」的 LLM 字段提取与归档链路已随旧客户档案体系（2026-08, migration 027）整体删除。
+3. **客户画像（接口导入）**：从业务方接口 `getAfterCustomerAllFiles` 拉客户文件清单（预览勾选）→ 全量 OCR 入客户文件库（fresh 存原文）→ 关键词+LLM 分类 12 类证件 → 按代码规则（`backend/extract_rules.py` 常量）提取 → 归因写独立 profile_* 画像域（简体/繁体/间隔号/拼音去重不重复建人 + 同名自动合并）、按售后项目多案件。方案见 [docs/09-客户画像-Excel导入方案.md](docs/09-客户画像-Excel导入方案.md)。
+4. **Word 模板填写**：上传 docx 模板 → 扫描占位符/锚点 → 选「画像家庭→人员」两级 → 从画像 person_fields 填值 → 输出 docx/PDF（无反写）。
+5. **PDF 拆分**：上传多证件合并 PDF → 全页 OCR + LLM 判断页边界 → 按证件类型拆为独立 PDF。
+6. **URL 文件摘要**：输入文件 URL + 进展名 → 下载/OCR/抽文本 → LLM 摘要和相关性判断。
 
 ## 环境准备
 
@@ -122,7 +121,6 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_ocr
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_doc_type_matcher.py        # 证件关键词分类器(纯函数)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_profile_api_manifest.py   # 接口清单适配(扁平/嵌套形态,纯函数)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_extract_rules.py       # 提取规则常量(纯函数,不依赖 DB)
-PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_doc_extract_mapping.py     # 归因+只补空写库(依赖 DB)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_review_scoring.py          # 质量评级打分(纯函数)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_profile_crud.py             # 画像 v2 归因/字段写入语义(依赖 DB)
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_extract_multi.py            # 多人模式提取(parse_persons_payload/prompt/重试,纯函数+mock)
@@ -162,9 +160,9 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 ```
 
 - LLM 走 OpenAI 兼容接口，模型 ID 完全由 `config.json` 驱动。
-- `max_ocr_pages` 仅影响 AI 材料解析 `/api/upload`；文件留底检测当前走全页 OCR。
+- `max_ocr_pages` 仅影响老的 `/api/upload`（已随旧材料解析删除）；文件留底检测当前走全页 OCR。
 - OCR 相关键：`ocr_preprocess`(图像前处理开关,默认 true)、`ocr_max_side_len`(检测输入长边上限,默认 2560,调大更准更慢)、`profile_ocr_render_dpi`(画像管线 PDF 扫描页渲染 DPI,默认 300;业务审核 worker 保持 200)。
-- `document_types` 仍用于证件解析和 PDF 拆分页分类；文件留底检测已改用 `llm_service.py` 中硬编码的公司售后留底分类体系。
+- `document_types` 仍用于 PDF 拆分页分类；文件留底检测已改用 `llm_service.py` 中硬编码的公司售后留底分类体系。
 - `auth` 段（`admin_user`/`admin_password`/`biz_api_key`）驱动统一 Bearer 鉴权，见下节；`config.json.example` 未含该段，不配 = 本地开发放行。
 - Windows 控制台运行后端时务必带 `PYTHONIOENCODING=utf-8 PYTHONUTF8=1`，否则中文 task_id / 文件名的 `print()` 可能触发 GBK 编码错误。
 
@@ -173,7 +171,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 `backend/middleware/auth_middleware.py`（纯 ASGI，与 request_log 同模式，不能用 `BaseHTTPMiddleware`）。凭证只有一套：`config.json.auth.biz_api_key`。
 
 - 员工前端：`POST /api/auth/login` 校验 `admin_user`/`admin_password`，通过返回 biz_api_key 当会话 token；前端存 localStorage，axios 自动带 `Authorization: Bearer`，401 清 token 跳 `/login`。业务方直接拿 biz_api_key 走 Bearer。
-- 白名单（免鉴权）：`POST /api/auth/login`、`GET /api/healthz`、文档（`/docs /redoc /openapi* /swagger*`）、**业务方集成接口前缀 `/api/archive-detect/business/batch`**（提交+轮询，业务方不带 token，与历史行为一致）。除此之外的所有 `/api/*` 都要 Bearer。
+- 白名单（免鉴权）：`POST /api/auth/login`、`GET /api/healthz`、文档（`/docs /redoc /openapi* /swagger*`）、**业务方集成接口前缀 `/api/archive-detect/business/batch`**（提交+轮询，业务方不带 token，与历史行为一致）、**`/uploads` 前缀**（静态产物文件；生产 nginx `location /uploads/` 直发 output/ 不过后端，本地放行与之对齐，避免浏览器原生 `<img src>` 无 Bearer 401。output/ 是公开产物目录，敏感文件一律落 temp/ 不进 output/）。除此之外的所有 `/api/*` 都要 Bearer。
 - 未配置 `biz_api_key` 时全部放行（本地开发）；`main.py` startup 调 `reset_auth_cache()` 让配置改动即时生效。
 - 中间件顺序：Auth 比 RequestLog 后注册 = 先执行（Starlette 后注册先执行），被 401 挡掉的请求不进外部请求日志。
 
@@ -181,11 +179,11 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 
 ```text
 前端: Vue 3 + Element Plus + Vite + vue-router(hash)
-  frontend/src/router.js                 路由: /login, /, /clients, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /archive-daily-report, /archive-prompts, /file-info, /profile, /expiry-reminders, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls, /child-age-leads;全局守卫:无 token 一律跳 /login
+  frontend/src/router.js                 路由: /login, /, /parse, /template, /split, /summary, /archive-detect, /archive-admin, /archive-daily-report, /archive-prompts, /file-info, /profile, /expiry-reminders, /file-assign, /events, /request-logs, /external-api-logs, /ai-api-calls;全局守卫:无 token 一律跳 /login
   frontend/src/api.js                    axios API 封装(token 存 localStorage,请求拦截器自动带 Bearer,401 清 token 跳登录)
   frontend/src/menu.js                   侧边栏菜单配置(与路由分离;App.vue 渲染左侧分组 el-sub-menu,点击展开/收缩,可折叠;新增页面=router.js 加路由+这里加项)
   frontend/src/tabs.js + components/TagsView.vue   多页签(tags-view):keep-alive 保活已访问页面,右键菜单 + 右侧固定下拉(同一 teleported 浮层,刷新/关闭其他/关闭全部);**新增页面还需:路由 meta 加 title/cache + 页面组件 defineOptions name**(异步组件拿不到 name,keep-alive include 走 meta.cache)
-  frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ExternalApiLogsPage / ChildAgeLeadsPage)
+  frontend/src/components/*.vue          各业务页面(含 ArchiveAdminPage / EventsPage / RequestLogsPage / ExternalApiLogsPage)
 
 后端: FastAPI + SQLAlchemy 2 async + Alembic
   backend/main.py                        FastAPI 入口 + 路由聚合 + startup/shutdown + 内存态轮询缓存
@@ -195,12 +193,11 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
   backend/ocr_service.py                 RapidOCR 3.x(PP-OCRv6) 引擎封装 + PDF/图片 OCR(run_ocr 统一入口)
   backend/image_preprocess.py            OCR 图像前处理(纯函数:纠偏/小图放大/低对比度 CLAHE,全自适应)
   backend/field_validators.py            提取字段校验(纯函数:身份证校验位修复/字段派生/日期合理性)
-  backend/text_extractor.py              PDF/图片/docx/doc/xls/pptx 统一文本抽取(文件留底检测复用;PDF 逐页混合:含大图页 OCR、数字页读文本层;**docx/xlsx 纯文本<80 字时触发嵌图 OCR**——证件扫描件贴进 Word/Excel 的场景,`_ocr_zip_media` 解 zip 内 word/media/、xl/media/ 光栅图,≥150px 短边、≤10 张,阈值/上限常量 OFFICE_IMG_OCR_*;.doc 短文本时优先走 soffice→docx 复用嵌图 OCR;.xls 嵌图不做;另提供 `office_to_pdf` 给 preview-pdf 端点)
+  backend/text_extractor.py              PDF/图片/docx/doc/xls/pptx 统一文本抽取(文件留底检测复用;PDF 逐页混合:含大图页 OCR、数字页读文本层,**文本层为空(文字转曲/伪数字页)同样降级 OCR**,文字型快车道 detect_pdf_type=text 也逐页兜底空文本层页,source 标 pdf_text+ocr;**docx/xlsx/pptx 纯文本<80 字时触发嵌图 OCR**——证件扫描件贴进 Word/Excel/PPT 的场景,`_ocr_zip_media` 解 zip 内 word/media/、xl/media/、ppt/media/ 光栅图,≥150px 短边、≤10 张,阈值/上限常量 OFFICE_IMG_OCR_*;.doc 短文本时优先走 soffice→docx 复用嵌图 OCR;.xls 嵌图不做;另提供 `office_to_pdf` 给 preview-pdf 端点)
   backend/file_fetcher.py                httpx 下载 URL/OSS 临时签名地址到临时文件 + 延迟清理
   backend/event_service.py + db/event_crud.py        业务事件流(批次/OCR/worker 崩溃等)写 system_events
   backend/middleware/auth_middleware.py          纯 ASGI Bearer 鉴权(config.json.auth 驱动,白名单见「鉴权」节)
   backend/middleware/request_log_middleware.py       纯 ASGI 中间件,只记 POST /business/batch 请求体到 api_request_logs
-  backend/client_profile_service.py      客户档案结构化生成编排(后台任务,只补空不覆盖)
   backend/profile_import_service.py      客户画像编排(接口清单适配 parse_api_manifest/远程拉取/run_import:取 OCR→分类→提取)
   backend/doc_type_matcher.py            证件类型关键词分类器(纯函数,12 类证件正负关键词评分)
   backend/extract_rules.py               证件字段提取规则(代码常量 + get_rule,原 doc_extract_rules 表迁来)
@@ -214,7 +211,7 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/smoke/e2
 config.json                              DB + LLM + OCR/文档类型配置
 output/                                  静态挂载为 /uploads/，保存 PNG/PDF/DOCX 等产物
 temp/                                    上传/下载/模板解析临时文件
-migrations/versions/                     Alembic 迁移(当前到 026_archive_detect_prompts;023/024 同名折叠键,生产须 023→合并存量→024 分步执行)
+migrations/versions/                     Alembic 迁移(当前到 027_drop_legacy_client_archive;023/024 同名折叠键,生产须 023→合并存量→024 分步执行;**027 物理删除旧客户档案体系 6 表,不可逆**)
 docs/                                    重构参考开发文档(01-系统概览 ~ 07-重构规划 + 客户数据库-PRD)
 frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后端不是前端,见下节)
 ```
@@ -230,17 +227,15 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 
 主要表：
 
-- `clients`：客户主表，`client_code` 是业务方稳定客户编码。
-- `documents` / `client_info`：材料解析记录和 KV 兜底字段。
-- `templates` / `template_fills`：Word 模板和填充历史。
+- ~~`clients` / `family_members` / `assets` / `client_info` / `documents` / `client_profile_generation_tasks`~~：**旧客户档案体系 6 表已随 migration 027 物理删除(数据不迁移不备份)**。客户域数据全部归客户画像 v2 的 `profile_*` 表；`profile_import_tasks.client_id`/`customer_files.client_id`/`profile_households.legacy_client_id`/`template_fills.client_id` 只去 FK 留列作历史软关联。
+- `templates` / `template_fills`：Word 模板和填充历史；`template_fills.person_id`(FK→profile_persons)记当次填充选用的画像人员。
 - `split_tasks`：PDF 拆分任务，持久化状态和 ranges；7 天后清理磁盘文件但保留 DB 记录。
 - `summaries`：URL 文件摘要历史。
 - `archive_detect_batches`：文件留底检测批次；包含 `overall_verdict/overall_score/overall_reason` 当次总体判断、`stage(pre_submit/post_submit)`;另有 `overall_verdict2/overall_score2/overall_reason2` 总体判定2(提示词库项目标准驱动,best-effort,失败留 NULL)。
 - `archive_detect_prompts`：提示词库(migration 026)。业务键=(project_name+project_code+project_detail_name+project_detail_code+progress_name)五元组(全 NOT NULL DEFAULT '',归一化 None→''+strip,唯一索引 ux_archive_detect_prompts_key);`prompt1`=批次总判模板(占位 token `{name_header}/{user_prompt}/{stage_hint}/{files_detail}/{n_files}`,改即生效)、`prompt2`=AI 按五元组生成的项目留底标准(空=缺失,批次 finalize 时自动生成补齐)。CRUD 在 `db/prompt_library_crud.py`,页面「文件留底→提示词库」。
 - `archive_detect_files`：单文件检测结果；含 `verdict/match_score/is_archival/confidence/reason/key_points/doc_category`、脱敏后的 `ocr_text`，业务模式下还有 `progress_id/file_id/version/deleted`；DB 队列字段 `status(pending/leased/fetching/ocr/llm/done/error)`、`worker_lease_until`、`retry_count`、`local_path`(upload 模式残留,现已停用)、`reuse_ocr_text`(重审入队预填的源 OCR 文本,非空则 worker 跳过下载+OCR)。`verdict` 除 match/partial/mismatch 外还有 **`no_text`**(OCR/抽取后无有效文字,标 done 不算失败、不参与总体判定)。
-- `archive_detect_progress`：业务审核的进展包实体，`(client_id, progress_oid)` 唯一；存办理人、项目、项目详情、进展名称等。
+- `archive_detect_progress`：业务审核的进展包实体，`(client_code, progress_oid)` 唯一；存办理人、项目、项目详情、进展名称等。**客户编码/姓名冗余在本表**(`client_code`/`client_name`,migration 027,进展包级快照:改名后仅该进展包再次提交才更新),留底检测不再依赖 clients 表。
 - `archive_detect_folder_summaries`：进展包维度滚动总报告（多版本，后续阶段使用）。
-- `client_profile_generation_tasks`：客户档案结构化生成任务；记录源文件、抽取结果、写入统计、状态。
 - `system_events`：业务事件流(severity/category/message/context),前端 `/events` 页查看,GC 保留 30 天。
 - `api_request_logs`：API 外部请求日志,中间件只记 `POST /api/archive-detect/business/batch` 的请求体,前端 `/request-logs` 页查看,GC 保留 30 天。
 - `external_api_logs`：出站调用外部接口(`service=refresh_url`),记地址/请求参数/返回全文/耗时/成败,前端 `/external-api-logs` 页,GC 保留 30 天。URL 刷新在 `file_fetcher.refresh_download_url` 埋点(async create_task)。
@@ -249,7 +244,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - `customer_files`：客户文件库,`file_code` 全局唯一(重复导入只 re-link 不重复下载/OCR);存全量 OCR——**fresh=未脱敏原文**(与 ai_api_calls 存原文的既定决策一致)、reused=archive_detect 脱敏文本,`ocr_source` 区分;分类结果 `doc_type`(12 类:id_card/hukou/degree_cert/birth_cert/passport/kyc_form/marriage_cert/property_cert/no_crime/approval/submission/receipt + other) + `classify_by(keyword/llm/none)`;`local_path` 原件落盘 output/customer_files/(30 天 GC,DB/OCR 永留);`review_status/review_reason/quality_score` 复核与质量评级;`person_id` 手动归属人(migration 021,文件↔人关联权威载体,与 write_stats 归因并集使用);`affter_entryoid` 售后项目OID + `project_name` 项目显示名(migration 022,项目案件路由键/反范式展示列,来自接口嵌套 list[] 项目外壳);`content_sha256` 原件内容 hash(migration 025,同家庭跨项目同内容文件去重键,下载后计算,命中兄弟行复用 OCR/分类)。`profile_households` 另有 `customer_code/crm_oid`(接口属性,只补空)。
 - ~~`doc_extract_rules`~~：**已废弃并 drop(migration 020)**。证件字段提取规则改为代码常量 `backend/extract_rules.py`(仅被 profile_import_service 引用,画像提取跑在主进程——改规则=改该文件+**重启后端 uvicorn**,与 worker 无关);`fields` 结构不变:带 `target:{entity:'person',column}`(column 解读为 profile 字段名),column=null 只抽不写,entity=asset/case 走资产/案件表。原 draft→activate→disable 生命周期已移除。
 - `doc_extract_results`：一次提取一行;记用的规则版本、extracted(未脱敏原始抽取)、mapped(逐字段 written/updated/skipped_*)、write_stats;复核字段 `review_status(pending/confirmed/corrected/dismissed)/corrected/reviewed_by/at`。
-- `profile_households` / `profile_persons` / `profile_person_fields` / `profile_assets` / `profile_cases`：**画像 v2 独立领域模型(migration 019),画像流水线只写这些表,不再写 clients/family_members**(老表留给 POA 模板等老流程,仅 `legacy_client_id` 软关联)。`profile_person_fields` 是字段级档案+证据链:`(person_id, field)` 唯一,带 `layer(verified官方证件/declared自报)` 与 `status(ai/confirmed/corrected)`;写入语义:人工字段不覆盖、declared 与 verified 同等对待(不区分来源层,layer 列仅作信息留存不参与覆盖决策)、同值跳过、复核修正永远覆盖。方案见 [docs/10-客户画像v2-复核与领域模型.md](docs/10-客户画像v2-复核与领域模型.md)。
+- `profile_households` / `profile_persons` / `profile_person_fields` / `profile_assets` / `profile_cases`：**画像 v2 独立领域模型(migration 019),画像流水线只写这些表**(老 clients/family_members 等 6 表已随 migration 027 删除,`legacy_client_id` 仅作历史软关联列保留)。`profile_person_fields` 是字段级档案+证据链:`(person_id, field)` 唯一,带 `layer(verified官方证件/declared自报)` 与 `status(ai/confirmed/corrected)`;写入语义:人工字段不覆盖、declared 与 verified 同等对待(不区分来源层,layer 列仅作信息留存不参与覆盖决策)、同值跳过、复核修正永远覆盖。方案见 [docs/10-客户画像v2-复核与领域模型.md](docs/10-客户画像v2-复核与领域模型.md)。
 
 ## 文件留底检测 / 业务审核
 
@@ -259,7 +254,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 
 - `POST /api/archive-detect/business/batch`：JSON + OSS URL。接口阶段只校验 + 写 DB(pending) + 秒回 `batch_id`,不下载、不 OCR;真正下载/OCR/LLM 由 worker 串行处理。URL 过期时 worker 用 `file_id` 调 `file_fetcher.fetch_url_to_temp_with_refresh` 刷新地址。前台本地上传入口已废弃（主进程瞬间写盘洪峰 4C/8G 扛不住），业务方先传 OSS 再提交 URL。
 - `GET /api/archive-detect/business/batch/{batch_id}`：轮询完整结果，返回 client/progress/files/overall。
-- 前端 `ArchiveDetectEntryPage.vue` 只接受 OSS URL;criteria 会根据客户/项目/进展/阶段自动预填(PSD 标准:服务启动即留底、软证据有效),用户手改后不再覆盖。**客户姓名/办理人由后端从 DB(`clients.name`/`archive_detect_progress.handler`)显式注入检测/总判 prompt**(含拼音/英文转写规则),不依赖前端 criteria 是否包含姓名。
+- 前端 `ArchiveDetectEntryPage.vue` 只接受 OSS URL;criteria 会根据客户/项目/进展/阶段自动预填(PSD 标准:服务启动即留底、软证据有效),用户手改后不再覆盖。**客户姓名/办理人由后端从 `archive_detect_progress`(client_name/handler 冗余列)显式注入检测/总判 prompt**(含拼音/英文转写规则),不依赖前端 criteria 是否包含姓名。
 
 关键逻辑：
 
@@ -277,36 +272,22 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - 公司售后留底分类体系硬编码在 `llm_service.py` 的 `ARCHIVE_CATEGORIES_FULL/SIMPLE`，业务模式会传 `stage=pre_submit|post_submit` 让 LLM 感知递交前/后分类。
 - **总体判定2(2026-08-06)**：批次 finalize(`_generate_batch_overall`)在 overall1 落库后追加 best-effort `_generate_batch_overall_v2`——按进展五元组(项目名称/编码/项目详情/详情编码/进展名称)查提示词库行(没有则 get-or-create 建行,prompt1=`DEFAULT_JUDGE_OVERALL_TEMPLATE` 默认模板);prompt2 为空先调 `generate_archive_prompt_standard`(operation=`generate_archive_prompt2`)生成项目留底标准入库;再用 `judge_batch_overall_v2`(operation=`judge_batch_overall_2`,prompt=行.prompt1 渲染+prompt2 当判定标准+文件明细)判定,写 `overall_verdict2/score2/reason2`(reason2 过 redactor)。**全 try/except 隔离,失败只留 NULL + WARN 事件(batch.overall2),不触碰 overall1/批次状态**;历史 quick 批次(无进展或五字段全空)跳过不判。模板渲染走 `render_judge_overall_template`(单遍正则替换 5 token,**禁用 .format**——模板含 JSON 花括号字面量;缺 `{user_prompt}`/`{files_detail}` 兜底追加);`_parse_overall_json` 为判定1/2 共用的 verdict 白名单+score 档位归一解析。提示词库页面可「重新生成提示词2」(`POST /admin/prompts/{id}/regenerate-prompt2`)。
 
-## 客户档案结构化生成
-
-入口路由在 `/api/client-profile/*`，Swagger 已用 `tags=["客户档案生成"]` 分组：
-
-流程：
-1. 用户在前端选择客户，系统从该客户的 `archive_detect_files` 中列出所有 `done` 且有 `ocr_text` 的文件作为候选
-2. 用户勾选候选文件 → 提交生成任务，后台异步处理
-3. 对每个选中文献：`llm_service.extract_client_profile_facts` 抽取客户基本信息、家庭成员、资产等结构化事实
-4. 按 **只补空，不覆盖** 策略写入数据库：已有非空值保持人工修改不变，仅当字段为空时写入 AI 抽取结果
-5. 写入目标：`clients`（客户基本信息）→ `family_members`（家庭成员）→ `assets`（资产）→ `client_info`（Extra 兜底）
-
-关键逻辑：
-- 后台异步任务：`asyncio.create_task(_generate_background)`，前端可轮询任务状态
-- 写入策略保证人工数据主权：AI 只做补充，不覆盖已有内容
-- 任务完成后可在前端查看抽取结果和写入统计
-
 ## 其他流水线要点
 
-### AI 材料解析
+### 材料解析（纯 OCR 工具）
 
-`POST /api/upload` → `asyncio.create_task(_process_file_background)`：
-1. `ocr_service.process_file` OCR；图片型 PDF 受 `config.json.max_ocr_pages` 限制。
-2. `llm_service.detect_and_extract` 一次完成类型检测 + 字段提取。
-3. 内存 `_task_status` 供轮询，DB `documents` 存最终结果。
-4. `PUT /api/result/{task_id}` 人工复核后归档到 `clients` / `family_members` / `assets` / `client_info`。
+`POST /api/ocr/parse`（tag「材料解析」，同步接口，不写 DB、不调 LLM）：校验扩展名（与文件留底检测同口径：pdf/doc/docx/xls/xlsx/pptx/png/jpg/jpeg/bmp/tiff/webp/gif）→ 落 temp → `asyncio.to_thread` 分派：
+
+1. 图片 → `ocr_service.extract_image_file`；PDF → `ocr_service.extract_mixed_pdf(..., render_text_pages=True)`（数字页也渲染页图，保证左栏有图）。
+2. Office → `text_extractor.extract_text` 拿全文（含嵌图 OCR）+ `office_to_pdf` 转 PDF → `ocr_service.render_pdf_images` 渲染预览图（soffice 缺失降级为无图只返文本）。
+3. 响应 `{"filename", "text", "pages":[{"page","image"}]}`；页图经 `/uploads/` 挂载（`output/{task_id}/` 由既有 30 天 GC 回收）。
+
+前端 `ParseEntryPage.vue`（`/parse`，菜单名「材料解析」）：单一上传按钮，结果区左栏逐页图片（可点击放大）、右栏 OCR 文本。旧「AI 材料解析」的 LLM 字段提取/复核归档链路（`/api/upload`、`/api/result/*`、`documents` 表等）已随旧客户档案体系（migration 027）整体删除。
 
 ### Word 模板填写
 
 - `template_service` 负责 mammoth HTML 预览、anchor 扫描、marker 注入和 docx 渲染。
-- v2 分阶段接口：`POST /api/templates/parse`(解析+暂存 `temp_token`) → `POST /api/templates/quick-save` → `POST /api/templates/{id}/map-client` → `POST /api/templates/{id}/generate`；端到端冒烟 `tests/smoke/e2e_v2_smoke.py`。
+- v2 分阶段接口：`POST /api/templates/parse`(解析+暂存 `temp_token`) → `POST /api/templates/quick-save` → `POST /api/templates/{id}/map-person`（按画像人员匹配填值，数据源 `profile_person_fields`）→ `POST /api/templates/{id}/generate`（payload `person_id`）；端到端冒烟 `tests/smoke/e2e_v2_smoke.py`。旧 `map-client`(clients/client_info 数据源)与生成后「同步到客户档案」反写已随旧客户档案体系删除。
 - docx 预览走 `soffice → PDF → pypdfium2 PNG`；LibreOffice 缺失时 `pages=[]`，前端降级到 HTML。
 - `docx2pdf` 强依赖 Windows + Word；线程内必须 COM 初始化。
 
@@ -340,16 +321,11 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - **AI/LLM 调用记录**：所有 LLM 调用记 `ai_api_calls`,前端 `/ai-api-calls`(AiApiCallsPage.vue),支持按 operation/model/batch_id/file_id/client_code/task_id 筛选。见「数据库重点」里的埋点说明。
 - 四张表(system_events / api_request_logs / external_api_logs / ai_api_calls)都在 `_split_cleanup_loop` 里 GC 30 天。
 
-### 销售线索：子女年龄
-
-- 路由 `/api/sales/child-age-leads`，逻辑在 `backend/db/sales_crud.py`。
-- 从 `family_members` 表中 `relation in ('child','子女','子','女','儿子','女儿','son','daughter',...)` 的记录算年龄；带 `min_age/max_age` 筛选时在 Python 层过滤（避免复杂 SQL），`total` 可能略有偏差是当前的可接受 MVP。
-
 ## 客户画像（接口导入）
 
 入口路由 `/api/profile/*`（tag「客户画像」）+ `/api/doc-extract/*`（tag「信息提取」），前端 `/profile`(ProfilePage.vue)。方案细节见 [docs/09-客户画像-Excel导入方案.md](docs/09-客户画像-Excel导入方案.md)（流水线,Excel 入口已退役）与 [docs/10-客户画像v2-复核与领域模型.md](docs/10-客户画像v2-复核与领域模型.md)（**v2 领域模型与复核,当前实现**）。
 
-流程：前端「导入客户文件清单」弹窗（客户编号/操作人默认 Jason邹启/条数 100 仅展示——接口固定返回最近 100 条不支持条数参数）→ `POST /api/profile/import-remote/preview` 拉业务方 `getAfterCustomerAllFiles`（`profile_import_service.fetch_after_customer_files`，URL 取 `config.json.file_url_service.customer_files_url`、缺省从 base_url 推导；同名客户多条目按姓名 `group_api_customers` 合并，记 `external_api_logs` service=`customer_files` 只存小摘要）→ 勾选客户 → `POST /api/profile/import-remote` 每户 `parse_api_manifest` 适配（**兼容扁平 `files[]` 与按项目嵌套 `list[].files[]` 两种返回形态**；过滤 `._` 垃圾文件/无编号行/按编号去重）→ 建/联 `profile_households` 家庭（老 clients 仅软关联）→ 落 `customer_files` → 主进程 `asyncio.create_task(run_imports_sequential)` **多户串行**、**任务内文件级并发**(`_IMPORT_CONCURRENCY=3`,LLM 网络等待与后续文件下载+OCR 重叠;OCR 引擎有全局锁推理天然串行,CPU 不叠加;**归因+画像写库段用 `_ATTR_WRITE_LOCK` 串行化**,防并发文件共享家庭域的 person/case get-or-create 竞态与字段写冲突)处理每个文件：
+流程：前端「导入客户文件清单」弹窗（客户编号/操作人默认 Jason邹启/条数 100 仅展示——接口固定返回最近 100 条不支持条数参数）→ `POST /api/profile/import-remote/preview` 拉业务方 `getAfterCustomerAllFiles`（`profile_import_service.fetch_after_customer_files`，URL 取 `config.json.file_url_service.customer_files_url`、缺省从 base_url 推导；同名客户多条目按姓名 `group_api_customers` 合并，记 `external_api_logs` service=`customer_files` 只存小摘要）→ 勾选客户 → `POST /api/profile/import-remote` 每户 `parse_api_manifest` 适配（**兼容扁平 `files[]` 与按项目嵌套 `list[].files[]` 两种返回形态**；过滤 `._` 垃圾文件/无编号行/按编号去重）→ 建/联 `profile_households` 家庭 → 落 `customer_files` → 主进程 `asyncio.create_task(run_imports_sequential)` **多户串行**、**任务内文件级并发**(`_IMPORT_CONCURRENCY=3`,LLM 网络等待与后续文件下载+OCR 重叠;OCR 引擎有全局锁推理天然串行,CPU 不叠加;**归因+画像写库段用 `_ATTR_WRITE_LOCK` 串行化**,防并发文件共享家庭域的 person/case get-or-create 竞态与字段写冲突)处理每个文件：
 
 1. **取 OCR**：先 `customer_file_crud.find_reusable_ocr(file_code)` 全局查 `archive_detect_files` 同 file_id 最新 done 且有 ocr_text 行（复用脱敏文本）；没有再 `file_fetcher.refresh_download_url(file_code)` 刷新地址 → 下载 → **算内容 sha256 查同家庭兄弟行 `find_household_dup_ocr`(内容级去重:同一文件跨售后项目 file_code 不同,编号去重拦不住;命中则跳过 OCR 复用文本+分类,ocr_source 沿用兄弟行保持脱敏性质可溯源)** → 未命中才 `text_extractor.extract_text`。fresh 存**未脱敏原文**;**原件移存 output/customer_files/ 留存 30 天**(GC 挂 `_split_cleanup_loop`,DB/OCR 永留;`GET /api/profile/files/{id}/raw` 在线查看,已清理则按需重下顺延)。
 2. **分类**：`doc_type_matcher.classify`（纯函数：strong/positive/negative 关键词评分 + 文件夹/相对路径线索，≥60 且领先 ≥10 定类）→ 置信不足才 `llm_service.recognize_doc_type` 兜底（2000 字头,失败→other 不抛）。
@@ -387,7 +363,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - **英文证件建人 + 家属准证关系边 + 证件到期提醒（2026-07-30,RULES_VERSION=4）**：
   - **name_en 建人**：此前建人只认中文 `name`，纯英文证件(新加坡 EP/DP 卡、英文批复)提取到人却落不了卡(LIU SONGHAO 案例)。现 `apply_extracted_fields_v2` 建人回退到 name_en，门槛 `plausible_latin_name`(字母/空格/.'-、2-4 词、每词≥2 字母，防 "SGWORKPASS" 类 OCR 噪声建人);`_extract_one` 的 no_person 跳过守卫同步改为 `can_create = 中文名 or 合法拉丁名`。拉丁卡名先以英文为显示名，后续中文证件经 find_person_match 拼音路归并同卡(刘松昊↔LIU SONGHAO 实测归并)。非家庭成员的英文证件(如本地董事)也会建卡(relation 待确认),人工在画像弹窗处置——这是有意放宽。
   - **sponsor_name 关系边**：approval 规则 v3 新增 `sponsor_name`(家属/受抚养人准证 DP/LTVP 卡面 MAIN PASS HOLDER 姓名;主签本人或证件无此栏输出 None);`_clean_field_items` 丢弃 sponsor==本人 的值(`_is_self_sponsor`：拉丁词序无关/繁简折叠/拼音连写三口径);`infer_family_relations` 新增 `_infer_from_sponsor` 分支(在出生证/结婚证之后、纯启发式之前):sponsor 命中户主 + 户主年长>15 岁 + 性别已知 → 写「子/女」(basis=sponsor:main_pass_holder,证据链挂 sponsor 字段的 source_result_id;DP 区分不了配偶与同龄亲属,年龄差不足不猜)。
-  - **到期日入库 + 全库提醒**：`approval_expiry_date`(approval 规则 expiry_date 此前 column=null 只抽不写,EP 到期 2026-11-14 曾读到即丢)、`id_card_expiry_date`(id_card v2,LLM 直接解析有效期限止日期,「长期」→None)两个新 PROFILE_FIELDS 键(verified 层,均入 DATE_FIELDS 校验);`profile_crud.list_expiry_reminders` 扫全库 `EXPIRY_FIELD_TYPES` 字段(护照/准证批复/身份证)算 expired/expiring(≤days,默认180)/ok,按剩余天数升序、支持 keyword/include_ok 过滤(Python 层,同 sales_crud 模式);端点 `GET /api/profile/expiry-reminders`,前端 `/expiry-reminders` 页(ExpiryRemindersPage,导航「到期提醒」)——续签/换证商机入口。字段值冲突(AI 后写赢,如 IPA 期限覆盖准证有效期)交给可信度徽标+人工确认,不做写时仲裁。
+  - **到期日入库 + 全库提醒**：`approval_expiry_date`(approval 规则 expiry_date 此前 column=null 只抽不写,EP 到期 2026-11-14 曾读到即丢)、`id_card_expiry_date`(id_card v2,LLM 直接解析有效期限止日期,「长期」→None)两个新 PROFILE_FIELDS 键(verified 层,均入 DATE_FIELDS 校验);`profile_crud.list_expiry_reminders` 扫全库 `EXPIRY_FIELD_TYPES` 字段(护照/准证批复/身份证)算 expired/expiring(≤days,默认180)/ok,按剩余天数升序、支持 keyword/include_ok 过滤(Python 层过滤,避免复杂 SQL);端点 `GET /api/profile/expiry-reminders`,前端 `/expiry-reminders` 页(ExpiryRemindersPage,导航「到期提醒」)——续签/换证商机入口。字段值冲突(AI 后写赢,如 IPA 期限覆盖准证有效期)交给可信度徽标+人工确认,不做写时仲裁。
   - **LLM 占位字符串清洗**：`_clean_field_items` 把精确匹配 `none/null/n/a/nil` 的值按空值丢弃(实测 LLM 把 sponsor_name 输出成字符串 "None" 落库;中文「无」不受影响,房产证他项权利等 legit 值保留)。存量脏行直接 SQL 删(status='ai' 可安全删)。
   - 存量家庭要生效需「重新生成画像」(规则重跑才提 sponsor/到期字段并建英文卡);测试 `tests/test_name_en_expiry.py`。
 - **家庭关系交叉推导**：`profile_crud.infer_family_relations(household_id)`——出生证父/母一方命中户主本人→另一方（已建档）写「配偶」；结婚证持证人与配偶一方为户主→另一方写「配偶」；启发式（同姓 + 户主年长>15 岁 + 双方户籍地址不冲突）→ 按性别写「子/女」。只写 `relation_to_main='待确认'` 的人（走 `_relation` 通道），人工已确认永不回改；**只匹配已有 person，绝不因推导建人**；幂等（二次跑全被 skipped_filled 挡掉）。`run_import` 收尾自动跑（异常不杀任务）+ 手动 `POST /api/profile/households/{id}/infer-relations`（刷历史已导入家庭）；事件 `profile.relation.inferred`。
@@ -414,7 +390,7 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 | `temp/fetched/` 下载临时文件 | 用完即删；失败进 60s 延迟队列；>1h 残留日级扫 | 60s 循环 + 日级门 |
 | 拆分任务 `output/{task_id}/` | 7 天（DB 保留 + `files_cleaned`） | 日级门 |
 | 留底原件预览缓存 `temp/archive_preview_cache/` | 20 天（按 mtime） | 小时级循环内 |
-| `output/` 解析任务目录（YYMMDDHHmmss_ 前缀） | 30 天 | 启动 + 日级门 |
+| `output/`(= /uploads 公开目录)全量清扫：顶层除 templates/customer_files 外所有条目(任务目录/杂散/散文件)；`templates/{id}/{preview,fills}/` 缓存与生成文档；`customer_files/previews/` 预览 PDF | 30 天（按 mtime） | 启动 + 日级门（`_cleanup_expired_output`；**templates `{id}/` 目录本体与 *.docx 模板原件永不删**——模板库是业务资产；customer_files 原件由下行 DB GC 管） |
 | `temp/templates/` + `output/templates/_parse/` | 60 分钟 | 启动 + 日级门 |
 | 画像原件 `output/customer_files/` | 30 天（`file_keep_until`，DB/OCR 永留） | 小时级循环内 |
 | 4 张日志表（system_events / api_request_logs / external_api_logs / ai_api_calls） | 30 天 | 小时级循环内 |
@@ -433,12 +409,10 @@ frontend2/DocReview.ArchiveDetect/       .NET 重构 PoC(目录名误导,是后�
 - `archive_detect_folder_summaries` 表已建，进展包维度滚动总报告是后续阶段，不要误以为当前已写入。
 - `pdf_ocr.py` 单文件 CLI 若存在，不属于 web 流程，改 web 流水线时不需要同步改它。
 - **鉴权只豁免业务方提交/轮询**：配置了 `auth.biz_api_key` 后，除 `/api/archive-detect/business/batch` 前缀外的所有 `/api/*` 都要 Bearer（见「鉴权」节）；老文案"业务接口不加鉴权"已过时。
-- **客户档案生成的候选列表不携带 `ocr_text`**：`client_profile_crud.list_source_files_for_client` 只返回元数据，生成阶段 `client_profile_service._generate_background` 再按 `id` 重查 `ocr_text` 喂给 LLM，避免大文本反复传输。
-- **`/api/client-profile/generate/{client_id}` (POST) 与 `/api/client-profile/generate/{task_id}` (GET) 共用同一前缀**：FastAPI 按 method 区分，但任何新增 GET 子路径必须放在 `/generate/list/{client_id}` 这类更具体的路由之前，否则会被 `{task_id}` 抢匹配。
 - **`frontend2/` 目录名有误导性**：内容是 .NET 业务后端重写 PoC，不是前端（见「重构进行时」）。
 - **`backend/backfill_done_files.py` 是一次性脚本**：回填历史批次 `done_files` 计数，非常驻流程。
 - **独立脚本调 LLM 必须先 `llm_service.load_config()`**：`CONFIG` 是模块级 `{}`，由 main.py/worker_runner 启动时加载；脚本不调用则所有 LLM 调用报"未配置大模型 API Key"并**静默降级**（分类落 other、不提取），极易误判成模型故障。
 - **`tests/test_profile_api_import.py` 是一次性参考脚本（非单元测试）**：业务方 `getAfterCustomerAllFiles` 接口 → 复用生产适配 `profile_import_service.parse_api_manifest`（过滤 `._` 开头 macOS 垃圾文件、按文件编号去重）→ 复用 `run_import` 逐户串行跑，是「业务方接口作为文件来源」的早期验证脚本（生产入口已上线为 `POST /api/profile/import-remote`，脚本保留白名单/心跳等批处理特性）。`--dry-run` 只拉清单不写库，`--only 姓名1,姓名2` 补跑指定客户。实测注意：接口全量约百个客户且动态变化，同一客户可能多条目（不同 affter_entryoid），条目可能后续返回 0 文件（affter_entryoid 变 null）。
 - **线程上下文写库必须走 psycopg2 同步引擎，跨 loop 用 asyncpg 是致命的（2026-07-29 实锤修复）**：IOD 生产 uvicorn 两次无声死亡（各在画像任务恢复跑批 ~40 分钟后），内核日志显示均为 asyncpg `protocol.so` 同一指令偏移段错误——根因是 `event_service.log_event` 同步分支在 worker 线程里 `asyncio.run(async 写)`，临时 loop 跨用绑在主 loop 的 asyncpg 连接池。修复：同步分支改走 `event_crud.insert_event_sync`（psycopg2，与 `insert_ai_api_call_sync` 同模式）；同时 `ai_api_call_crud._build_row` 对所有短 varchar 字段按列宽硬截断（`_clean_short`，不加截断标记——`_clean_text` 的标记会超出列宽），`detect_large_table_doc` 的 task_id 从临时全路径改传短 id（此前 107 次 StringDataRightTruncation）。**教训：跨 loop 用 asyncpg 不是"丢日志"级别，是杀整个进程级别，且无任何 Python traceback。**
 - **根目录一次性产物勿当流程依赖**：`gen_ceo_report.py`、`o2.txt`、`*.docx` 汇报文档是临时汇报产物；`tests/test_archive_detect_queue.py.deprecated` 是退役测试留档。
-- **导航为左侧分组侧边栏(2026-08-03 由顶栏改造)**：菜单配置在 `frontend/src/menu.js`(与路由分离,加页面=router.js 加路由+menu.js 加项),App.vue 渲染可折叠 el-menu 分组侧边栏(业务审核/客户画像/日志监控/工具箱 4 组)。「客户档案」(/clients)、「子女年龄线索」(/child-age-leads) 不在菜单(路由仍在,可直接输 URL 访问)。原「复核中心」页已改造为「文件归属」页（`/file-assign`，见客户画像节）；复核入口从画像页红色横幅进。
+- **导航为左侧分组侧边栏(2026-08-03 由顶栏改造)**：菜单配置在 `frontend/src/menu.js`(与路由分离,加页面=router.js 加路由+menu.js 加项),App.vue 渲染可折叠 el-menu 分组侧边栏(业务审核/客户画像/日志监控/工具箱 4 组)。原「复核中心」页已改造为「文件归属」页（`/file-assign`，见客户画像节）；复核入口从画像页红色横幅进。旧「客户档案」页（/clients）与「子女年龄线索」页已随旧客户档案体系（migration 027）整体删除，路由不复存在。

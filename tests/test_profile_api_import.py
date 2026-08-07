@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import profile_import_service
 from profile_import_service import parse_api_manifest
-from db import crud, customer_file_crud, profile_crud
+from db import customer_file_crud, profile_crud
 
 # llm_service.CONFIG 是模块级 {},由 main.py/worker_runner 启动时显式 load_config;
 # 独立脚本必须自己加载,否则所有 LLM 调用报"未配置大模型 API Key"并静默降级
@@ -112,16 +112,15 @@ async def main() -> None:
         if dry_run or not m["files"]:
             continue
 
-        # 与 /api/profile/import-remote 端点相同的落库链路
-        client = await crud.find_or_create_client(name)
+        # 与 /api/profile/import-remote 端点相同的落库链路(2026-08 起不再建旧 clients 软关联)
         household = await profile_crud.get_or_create_household(
-            name, legacy_client_id=client.id)
+            name, legacy_client_id=None)
         task = await customer_file_crud.create_import_task(
             filename=f"接口导入-{name}", client_name=name,
-            client_id=client.id, total_files=len(m["files"]),
+            client_id=None, total_files=len(m["files"]),
             household_id=household["id"])
         counts = await customer_file_crud.upsert_task_files(
-            task["id"], client.id, m["files"])
+            task["id"], None, m["files"])
         print(f"  任务#{task['id']} 家庭#{household['id']}"
               f" 新建{counts['new']} 重链{counts['relinked']},开始导入", flush=True)
 

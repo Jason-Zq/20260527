@@ -1,9 +1,11 @@
-"""端到端 v2 后端流程测试：parse → quick-save → map-client → generate"""
+"""端到端 v2 后端流程测试：parse → quick-save → map-person → generate"""
 import sys, os, json, requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 BASE = "http://127.0.0.1:8765"
+# 画像人员 id(2026-08 起模板填值走画像 person;按需改成库里的 profile_persons.id)
+PERSON_ID = int(os.environ.get("SMOKE_PERSON_ID", "1"))
 
 # 1) parse
 print("=== 1) parse ===")
@@ -41,9 +43,9 @@ print(f"placeholders: {len(phs)}")
 print(f"first: id={phs[0]['id']} kind={phs[0]['anchor']['kind']} field_hint={phs[0].get('field_hint')}")
 assert phs[0].get("anchor", {}).get("kind") in ("cell", "run", "paragraph"), "anchor 格式错"
 
-# 4) map-client（用客户 id=1：王余来）
-print("\n=== 4) map-client ===")
-r = requests.post(BASE + f"/api/templates/{tpl_id}/map-client", json={"client_id": 1}, timeout=120)
+# 4) map-person（用画像人员 PERSON_ID,可用 SMOKE_PERSON_ID 环境变量覆盖）
+print("\n=== 4) map-person ===")
+r = requests.post(BASE + f"/api/templates/{tpl_id}/map-person", json={"person_id": PERSON_ID}, timeout=120)
 r.raise_for_status()
 mc = r.json()
 print("matched:", json.dumps(mc.get("matched", {}), ensure_ascii=False)[:200])
@@ -56,7 +58,7 @@ print("\n=== 5) generate ===")
 values = {ph["id"]: mc["matched"].get(ph["id"], "") for ph in phs}
 # 留空未匹配项
 r = requests.post(BASE + f"/api/templates/{tpl_id}/generate", json={
-    "client_id": 1,
+    "person_id": PERSON_ID,
     "anchor_values": values,
 }, timeout=180)
 print("status:", r.status_code)

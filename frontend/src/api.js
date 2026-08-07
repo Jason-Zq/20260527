@@ -50,185 +50,17 @@ export async function login(username, password) {
 }
 
 /**
- * 上传文件（PDF/图片），返回 task_id（异步模式）
- * @param {File} file
- * @param {number|null} [clientId] 可选：A1 批量队列模式下绑定到指定客户，
- *   解析完成后会自动归档（跳过人工复核）
+ * 材料解析(纯 OCR 工具):上传文件,同步返回 {filename, text, pages:[{page,image}]}
+ * 不写库、不调 LLM;大文件 OCR 耗时较长,超时 300s
  */
-export async function uploadFile(file, clientId = null) {
+export async function ocrParse(file) {
   const formData = new FormData()
   formData.append('file', file)
-  if (clientId != null) {
-    formData.append('client_id', String(clientId))
-  }
-  const response = await axios.post(`${API_BASE}/upload`, formData, {
+  const response = await axios.post(`${API_BASE}/ocr/parse`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 30000
+    timeout: 300000
   })
   return response.data
-}
-
-/**
- * 轮询获取任务结果/进度
- */
-export async function pollResult(taskId) {
-  const response = await axios.get(`${API_BASE}/result/${taskId}`)
-  return response.data
-}
-
-/**
- * 保存人工复核修正结果
- *
- * 第二个参数支持两种形态：
- *   1) 旧：array — items 数组（向后兼容）
- *   2) 新：object — { items, archive: {client_id, entity, target_id, sub_meta} }
- *
- * 新归档 payload 走 backend 的 archive_document 路径，把字段精准路由到
- * clients/family/assets 表（未映射的进 client_info KV）。
- */
-export async function saveReview(taskId, itemsOrPayload) {
-  let body
-  if (Array.isArray(itemsOrPayload)) {
-    body = { task_id: taskId, items: itemsOrPayload }
-  } else {
-    body = { task_id: taskId, ...itemsOrPayload }
-  }
-  const response = await axios.put(`${API_BASE}/result/${taskId}`, body)
-  return response.data
-}
-
-/**
- * 获取历史记录列表
- */
-export async function getHistory() {
-  const response = await axios.get(`${API_BASE}/history`)
-  return response.data
-}
-
-/**
- * 导出解析结果 JSON
- */
-export function exportResult(taskId) {
-  window.open(`${API_BASE}/export/${taskId}`, '_blank')
-}
-
-/**
- * 删除一条历史记录
- */
-export async function deleteHistory(taskId) {
-  const response = await axios.delete(`${API_BASE}/history/${taskId}`)
-  return response.data
-}
-
-/**
- * 全文搜索文档
- */
-export async function searchDocuments(keyword) {
-  const response = await axios.get(`${API_BASE}/search`, {
-    params: { keyword }
-  })
-  return response.data
-}
-
-/**
- * 客户列表
- */
-export async function listClients(keyword, options = {}) {
-  const params = {}
-  if (keyword) params.keyword = keyword
-  if (options.visa_type) params.visa_type = options.visa_type
-  if (options.expiring_soon_days != null) params.expiring_soon_days = options.expiring_soon_days
-  if (options.sort_by) params.sort_by = options.sort_by
-  const response = await axios.get(`${API_BASE}/clients`, { params })
-  return response.data
-}
-
-/**
- * 客户详情（含 family / assets / infos / documents）
- */
-export async function getClientDetail(clientId) {
-  const response = await axios.get(`${API_BASE}/clients/${clientId}`)
-  return response.data
-}
-
-/**
- * 新建客户（"+新建"按钮触发）
- */
-export async function createClient(payload) {
-  const response = await axios.post(`${API_BASE}/clients`, payload)
-  return response.data
-}
-
-/**
- * 更新客户主表（部分字段）
- */
-export async function updateClient(clientId, payload) {
-  const response = await axios.put(`${API_BASE}/clients/${clientId}`, payload)
-  return response.data
-}
-
-/**
- * 客户智能匹配（OCR 后查找现有客户候选）
- * @param {Object} criteria { id_number?, passport_no?, name?, birth_date? }
- * @returns {Promise<{candidates, best_match_client_id, total}>}
- */
-export async function matchClients(criteria) {
-  const response = await axios.post(`${API_BASE}/clients/match`, criteria)
-  return response.data
-}
-
-// ==================== 家庭成员 ====================
-
-export async function listFamily(clientId) {
-  const r = await axios.get(`${API_BASE}/clients/${clientId}/family`)
-  return r.data
-}
-
-export async function createFamily(clientId, payload) {
-  const r = await axios.post(`${API_BASE}/clients/${clientId}/family`, payload)
-  return r.data
-}
-
-export async function updateFamily(memberId, payload) {
-  const r = await axios.put(`${API_BASE}/family/${memberId}`, payload)
-  return r.data
-}
-
-export async function deleteFamily(memberId) {
-  const r = await axios.delete(`${API_BASE}/family/${memberId}`)
-  return r.data
-}
-
-// ==================== 资产 ====================
-
-export async function listAssets(clientId) {
-  const r = await axios.get(`${API_BASE}/clients/${clientId}/assets`)
-  return r.data
-}
-
-export async function createAsset(clientId, payload) {
-  const r = await axios.post(`${API_BASE}/clients/${clientId}/assets`, payload)
-  return r.data
-}
-
-export async function updateAsset(assetId, payload) {
-  const r = await axios.put(`${API_BASE}/assets/${assetId}`, payload)
-  return r.data
-}
-
-export async function deleteAsset(assetId) {
-  const r = await axios.delete(`${API_BASE}/assets/${assetId}`)
-  return r.data
-}
-
-// ==================== 字段路由器元数据 ====================
-
-/**
- * 获取已知 doc_type 列表（DocTypeSelector 下拉数据源）
- */
-export async function getDocTypes() {
-  const r = await axios.get(`${API_BASE}/field-router/doc-types`)
-  return r.data
 }
 
 // ==================== 文件解析（URL → 摘要） ====================
@@ -374,37 +206,6 @@ export async function startRerunFilesBatch({ verdicts = ['partial', 'mismatch'],
 /** 查询批量重新检测进度 */
 export async function getRerunFilesProgress() {
   const r = await axios.get(`${API_BASE}/archive-detect/admin/rerun-files-batch/progress`)
-  return r.data
-}
-
-// ==================== 客户档案结构化生成 ====================
-
-export async function listClientProfileSourceFiles(clientId) {
-  const r = await axios.get(`${API_BASE}/client-profile/source-files/${clientId}`)
-  return r.data
-}
-
-export async function generateClientProfile(clientId, sourceFileIds) {
-  const r = await axios.post(`${API_BASE}/client-profile/generate/${clientId}`, {
-    source_file_ids: sourceFileIds,
-  })
-  return r.data
-}
-
-export async function getClientProfileGenerationTask(taskId) {
-  const r = await axios.get(`${API_BASE}/client-profile/generate/${taskId}`)
-  return r.data
-}
-
-export async function listClientProfileGenerationTasks(clientId, limit = 20) {
-  const r = await axios.get(`${API_BASE}/client-profile/generate/list/${clientId}`, { params: { limit } })
-  return r.data
-}
-
-// ==================== 销售线索 ====================
-
-export async function listChildAgeLeads(params = {}) {
-  const r = await axios.get(`${API_BASE}/sales/child-age-leads`, { params })
   return r.data
 }
 
@@ -560,12 +361,12 @@ export async function deleteTemplate(id) {
 }
 
 /**
- * v2：选客户 → anchor 字段匹配（field_hint 规则优先 + LLM 兜底，带缓存）
+ * v2：选画像人员 → anchor 字段匹配（field_hint 规则优先 + LLM 兜底，带缓存）
  * 返回：{matched: {strN: value}, unmatched: [strN], from_cache}
  */
-export async function mapClientToTemplate(id, clientId) {
-  const response = await axios.post(`${API_BASE}/templates/${id}/map-client`, {
-    client_id: clientId
+export async function mapPersonToTemplate(id, personId) {
+  const response = await axios.post(`${API_BASE}/templates/${id}/map-person`, {
+    person_id: personId
   }, {
     timeout: 120000
   })
@@ -574,7 +375,7 @@ export async function mapClientToTemplate(id, clientId) {
 
 /**
  * v2：生成 PDF（基于 anchor + apply_value 渲染）
- * payload: {client_id?, anchor_values: {strN: value}}
+ * payload: {person_id?, anchor_values: {strN: value}}
  */
 export async function generateTemplatePdf(id, payload) {
   const response = await axios.post(`${API_BASE}/templates/${id}/generate`, payload, {
@@ -647,23 +448,12 @@ export const LOCKED_FIELD_HINTS = new Set(
 )
 
 /**
- * 反向同步主数据（B1）。
- * @param {number} clientId
- * @param {Record<string, string>} keyValues  键为字典 label（例如 "地址"）或 anchor description
+ * 画像家庭下拉选项(模板填写两级选择用)。
+ * @returns {Promise<Array<{id:number, name:string, customer_code:string|null}>>}
  */
-export async function upsertClientInfo(clientId, keyValues) {
-  const response = await axios.post(`${API_BASE}/clients/${clientId}/info`, {
-    key_values: keyValues,
-  })
-  return response.data
-}
-
-/**
- * 客户的模板生成历史（B2）。
- */
-export async function getClientFills(clientId) {
-  const response = await axios.get(`${API_BASE}/clients/${clientId}/fills`)
-  return response.data
+export async function listHouseholdOptions(keyword = '', limit = 20) {
+  const r = await axios.get(`${API_BASE}/profile/households`, { params: { keyword, limit } })
+  return r.data
 }
 
 // ==================== 处理超长PDF文件（自动按证件拆分） ====================
