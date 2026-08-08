@@ -756,7 +756,7 @@ async def submit_business_batch(
         "overall_verdict": None,
         "overall_score": None,
         "overall_reason": None,
-        "client": {"id": client_id, "client_code": client_code, "name": client_name},
+        "client": {"client_code": client_code, "name": client_name},
         "progress": progress,
         "reused_count": counts["reused_count"],
         "new_count": counts["new_count"],
