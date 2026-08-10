@@ -24,6 +24,11 @@
           <el-input v-model="filters.project_name" clearable placeholder="项目名称模糊查" size="small" />
           <el-input v-model="filters.project_detail_name" clearable placeholder="项目详情模糊查" size="small" />
           <el-input v-model="filters.progress_name" clearable placeholder="进展名称模糊查" size="small" />
+          <el-select v-model="filters.apply_to_overall1" size="small" style="width: 140px">
+            <el-option label="总体1: 全部" value="" />
+            <el-option label="总体1: 生效中" value="1" />
+            <el-option label="总体1: 未生效" value="0" />
+          </el-select>
           <el-button type="primary" size="small" @click="handleSearch">查询</el-button>
           <el-button size="small" @click="resetFilters">重置</el-button>
         </div>
@@ -193,7 +198,7 @@ const generatingPrompt2 = ref(false)
 const applyingId = ref(null)
 
 function _defaultFilters() {
-  return { project_name: '', project_detail_name: '', progress_name: '' }
+  return { project_name: '', project_detail_name: '', progress_name: '', apply_to_overall1: '' }
 }
 const filters = ref(_defaultFilters())
 
@@ -216,6 +221,7 @@ function buildParams() {
     const v = filters.value[k].trim()
     if (v) out[k] = v
   }
+  if (filters.value.apply_to_overall1 !== '') out.apply_to_overall1 = filters.value.apply_to_overall1 === '1'
   return out
 }
 

@@ -59,10 +59,11 @@ async def list_prompts(
     project_name: Optional[str] = None,
     project_detail_name: Optional[str] = None,
     progress_name: Optional[str] = None,
+    apply_to_overall1: Optional[bool] = None,
     limit: int = 20,
     offset: int = 0,
 ) -> dict:
-    """提示词库列表:项目名/项目详情/进展名模糊筛选 + 分页,按 id 倒序(新建在前)。"""
+    """提示词库列表:项目名/项目详情/进展名模糊筛选 + apply_to_overall1 三态筛选 + 分页,按 id 倒序(新建在前)。"""
     async with async_session_maker() as session:
         stmt = select(ArchiveDetectPrompt)
         count_stmt = select(func.count()).select_from(ArchiveDetectPrompt)
@@ -73,6 +74,8 @@ async def list_prompts(
             conditions.append(ArchiveDetectPrompt.project_detail_name.ilike(f"%{project_detail_name}%"))
         if progress_name:
             conditions.append(ArchiveDetectPrompt.progress_name.ilike(f"%{progress_name}%"))
+        if apply_to_overall1 is not None:
+            conditions.append(ArchiveDetectPrompt.apply_to_overall1.is_(apply_to_overall1))
         for cond in conditions:
             stmt = stmt.where(cond)
             count_stmt = count_stmt.where(cond)

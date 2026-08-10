@@ -3,7 +3,8 @@
 覆盖:create/get/list/update/set_prompt2/delete 全路径、五元组唯一冲突(409 映射依据)、
 get_or_create 幂等(同键两次同 id 且不覆盖已有 prompt1)、update 撞他人键 IntegrityError、
 update_batch_overall2 写 archive_detect_batches.overall_*2 三列、
-apply_to_overall1 开关(set/查询回读)与总体1 适用行查询 _get_applicable_prompt_row 的门控语义。
+apply_to_overall1 开关(set/查询回读)与总体1 适用行查询 _get_applicable_prompt_row 的门控语义、
+list_prompts 按 apply_to_overall1 三态筛选。
 
   cd e:/qoderproject/20260527
   PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_archive_detect_prompts_crud.py
@@ -104,6 +105,17 @@ async def main():
         ids = {p["id"] for p in lst2["items"]}
         assert {row["id"], r2["id"]} <= ids
         assert (await plc.list_prompts(project_name=f"不存在-{suffix}"))["total"] == 0
+
+        # ---- apply_to_overall1 三态列表筛选(row=开, r2=关) ----
+        await plc.set_apply_to_overall1(row["id"], True)
+        on_ids = {p["id"] for p in (await plc.list_prompts(
+            progress_name="进展", apply_to_overall1=True, limit=200))["items"]}
+        assert row["id"] in on_ids and r2["id"] not in on_ids, "True 应只含生效中行"
+        off_ids = {p["id"] for p in (await plc.list_prompts(
+            progress_name="进展", apply_to_overall1=False, limit=200))["items"]}
+        assert r2["id"] in off_ids and row["id"] not in off_ids, "False 应只含未生效行"
+        # 不传 = 全部(上行 lst2 已覆盖两行都在)
+        await plc.set_apply_to_overall1(row["id"], False)
 
         # ---- update_batch_overall2 写列 ----
         async with async_session_maker() as s:

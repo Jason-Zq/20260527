@@ -3118,6 +3118,7 @@ async def archive_detect_admin_prompts_list(
     project_name: Optional[str] = Query(None, description="项目名称模糊查询"),
     project_detail_name: Optional[str] = Query(None, description="项目详情名称模糊查询"),
     progress_name: Optional[str] = Query(None, description="进展名称模糊查询"),
+    apply_to_overall1: Optional[bool] = Query(None, description="总体1 走库开关筛选:true=仅生效中,false=仅未生效,缺省=全部"),
     limit: int = Query(20, ge=1, le=200, description="返回条数,1-200"),
     offset: int = Query(0, ge=0, description="分页偏移量"),
 ):
@@ -3125,6 +3126,7 @@ async def archive_detect_admin_prompts_list(
         project_name=project_name,
         project_detail_name=project_detail_name,
         progress_name=progress_name,
+        apply_to_overall1=apply_to_overall1,
         limit=limit,
         offset=offset,
     )
