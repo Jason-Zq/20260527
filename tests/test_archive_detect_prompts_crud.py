@@ -2,7 +2,8 @@
 
 覆盖:create/get/list/update/set_prompt2/delete 全路径、五元组唯一冲突(409 映射依据)、
 get_or_create 幂等(同键两次同 id 且不覆盖已有 prompt1)、update 撞他人键 IntegrityError、
-update_batch_overall2 写 archive_detect_batches.overall_*2 三列。
+update_batch_overall2 写 archive_detect_batches.overall_*2 三列、
+apply_to_overall1 开关(set/查询回读)与总体1 适用行查询 _get_applicable_prompt_row 的门控语义。
 
   cd e:/qoderproject/20260527
   PYTHONIOENCODING=utf-8 PYTHONUTF8=1 ./.venv312/Scripts/python.exe tests/test_archive_detect_prompts_crud.py
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.exc import IntegrityError
 
+import archive_detect_service as ads
 from db import archive_detect_crud, prompt_library_crud as plc
 from db.engine import async_session_maker
 from db.models import ArchiveDetectBatch, ArchiveDetectPrompt
@@ -72,9 +74,32 @@ async def main():
         assert clash, "update 撞他人五元组应抛 IntegrityError"
         assert await plc.update_prompt(99999999, key2) is None
 
+        # ---- apply_to_overall1 开关 + 总体1 适用行查询门控 ----
+        assert row["apply_to_overall1"] is False, "新建行开关默认 False"
+        ctx = {"project_name": key[0], "project_code": key[1], "project_detail_name": key[2],
+               "project_detail_code": key[3], "progress_name": key[4], "progress_id": "prog-1"}
+        # 开关关 → 不适用
+        assert await ads._get_applicable_prompt_row(ctx) is None
+        # 开关开 + prompt2 非空 → 适用
+        assert await plc.set_apply_to_overall1(row["id"], True) is True
+        app = await ads._get_applicable_prompt_row(ctx)
+        assert app and app["id"] == row["id"], "开启开关且有 prompt2 应命中"
+        # prompt2 置空 → 不适用(空标准不能驱动总体1)
+        await plc.set_prompt2(row["id"], "")
+        assert await ads._get_applicable_prompt_row(ctx) is None
+        await plc.set_prompt2(row["id"], "标准2")
+        # 无 progress_id(历史 quick 批次) / 五元组全空 → 不适用
+        assert await ads._get_applicable_prompt_row({**ctx, "progress_id": None}) is None
+        assert await ads._get_applicable_prompt_row({"progress_id": "prog-1"}) is None
+        # 不存在行 → False;取消开关 → 回到不适用
+        assert await plc.set_apply_to_overall1(99999999, True) is False
+        assert await plc.set_apply_to_overall1(row["id"], False) is True
+        assert await ads._get_applicable_prompt_row(ctx) is None
+
         # ---- list 筛选 + 分页 ----
         lst = await plc.list_prompts(project_name=f"项目A-{suffix}")
         assert lst["total"] == 1 and lst["items"][0]["id"] == row["id"]
+        assert lst["items"][0]["apply_to_overall1"] is False, "list 序列化应带开关字段"
         lst2 = await plc.list_prompts(progress_name="进展", limit=100)
         ids = {p["id"] for p in lst2["items"]}
         assert {row["id"], r2["id"]} <= ids

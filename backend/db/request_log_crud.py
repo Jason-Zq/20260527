@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select, delete as sa_delete, func, and_
+from sqlalchemy import select, delete as sa_delete, func, and_, cast, Text
 
 from db.engine import async_session_maker
 from db.models import ApiRequestLog
@@ -41,7 +41,7 @@ async def list_request_logs(
     *,
     source: Optional[str] = None,
     method: Optional[str] = None,
-    path_contains: Optional[str] = None,
+    body_contains: Optional[str] = None,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     limit: int = 50,
@@ -52,8 +52,9 @@ async def list_request_logs(
         filters.append(ApiRequestLog.source == source)
     if method:
         filters.append(ApiRequestLog.method == method.upper())
-    if path_contains:
-        filters.append(ApiRequestLog.path.ilike(f"%{path_contains}%"))
+    if body_contains:
+        # request_body 是 JSONB,cast 成 text 做内容模糊匹配(PG jsonb 序列化不转义中文)
+        filters.append(cast(ApiRequestLog.request_body, Text).ilike(f"%{body_contains}%"))
     if since is not None:
         filters.append(ApiRequestLog.created_at >= since)
     if until is not None:

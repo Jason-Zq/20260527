@@ -1698,6 +1698,7 @@ class ArchiveDetectPromptItem(BaseModel):
     progress_name: str = Field("", description="进展名称")
     prompt1: Optional[str] = Field(None, description="提示词1:批次总体判定模板(可编辑,判定2 实时生效)")
     prompt2: Optional[str] = Field(None, description="提示词2:项目专属留底标准(AI 生成,可手改)")
+    apply_to_overall1: bool = Field(False, description="应用到总体1:TRUE 时该五元组批次的总体判定1 改用提示词库驱动")
     created_at: str = Field("", description="创建时间")
     updated_at: str = Field("", description="更新时间")
 
@@ -1717,6 +1718,11 @@ class ArchiveDetectPromptUpsertPayload(BaseModel):
     progress_name: Optional[str] = Field(None, description="进展名称")
     prompt1: Optional[str] = Field(None, description="提示词1:批次总体判定模板;空=用代码默认模板")
     prompt2: Optional[str] = Field(None, description="提示词2:项目专属留底标准;空=首次批次判定时自动生成")
+
+
+class ArchiveDetectPromptApplyPayload(BaseModel):
+    """提示词库「应用到总体1」开关请求体。"""
+    apply: bool = Field(..., description="TRUE=该五元组批次总体判定1 改用 prompt1 模板+prompt2 标准驱动")
 
 
 class ArchiveDetectDailyReportBucket(BaseModel):
@@ -2001,7 +2007,7 @@ async def admin_event_categories():
 async def admin_list_request_logs(
     source: Optional[str] = Query(None, description="business/admin/poll/other"),
     method: Optional[str] = Query(None, description="GET/POST"),
-    path: Optional[str] = Query(None, description="路径片段模糊匹配"),
+    body: Optional[str] = Query(None, description="请求体内容模糊匹配"),
     since: Optional[str] = Query(None, description="起始时间 YYYY-MM-DD HH:MM:SS"),
     until: Optional[str] = Query(None, description="结束时间"),
     limit: int = Query(50, ge=1, le=200),
@@ -2023,7 +2029,7 @@ async def admin_list_request_logs(
     items, total = await _rlc.list_request_logs(
         source=source,
         method=method,
-        path_contains=path,
+        body_contains=body,
         since=_parse_dt(since),
         until=_parse_dt(until),
         limit=limit,
@@ -3177,21 +3183,37 @@ async def archive_detect_admin_prompts_delete(row_id: int):
 
 
 @app.post(
-    "/api/archive-detect/admin/prompts/{row_id}/regenerate-prompt2",
+    "/api/archive-detect/admin/prompts/generate-prompt2-preview",
     tags=["文件留底检测"],
-    summary="提示词库 - 重新生成提示词2(按五元组调 LLM 生成项目留底标准)",
+    summary="提示词库 - 生成提示词2预览(按五元组调 LLM 生成项目留底标准,只返回不入库)",
 )
-async def archive_detect_admin_prompts_regenerate_prompt2(row_id: int):
+async def archive_detect_admin_prompts_generate_prompt2_preview(payload: ArchiveDetectPromptUpsertPayload):
+    key = prompt_library_crud.normalize_prompt_key(
+        payload.project_name, payload.project_code, payload.project_detail_name,
+        payload.project_detail_code, payload.progress_name,
+    )
+    standard = await asyncio.to_thread(
+        llm_service.generate_archive_prompt_standard,
+        key[0], key[1], key[2], key[3], key[4],
+    )
+    return {"prompt2": standard}
+
+
+@app.post(
+    "/api/archive-detect/admin/prompts/{row_id}/apply-to-overall1",
+    tags=["文件留底检测"],
+    summary="提示词库 - 应用到总体1 开关(开启后该五元组批次总体判定1 用提示词库驱动)",
+)
+async def archive_detect_admin_prompts_apply_to_overall1(
+    row_id: int, payload: ArchiveDetectPromptApplyPayload
+):
     row = await prompt_library_crud.get_prompt_by_id(row_id)
     if not row:
         raise HTTPException(status_code=404, detail="提示词库记录不存在")
-    standard = await asyncio.to_thread(
-        llm_service.generate_archive_prompt_standard,
-        row["project_name"], row["project_code"], row["project_detail_name"],
-        row["project_detail_code"], row["progress_name"],
-    )
-    await prompt_library_crud.set_prompt2(row_id, standard)
-    return {"id": row_id, "prompt2": standard}
+    if payload.apply and not (row.get("prompt2") or "").strip():
+        raise HTTPException(status_code=400, detail="提示词2 为空,请先生成或填写提示词2 再应用到总体1")
+    await prompt_library_crud.set_apply_to_overall1(row_id, payload.apply)
+    return {"id": row_id, "apply_to_overall1": payload.apply}
 
 
 @app.get(

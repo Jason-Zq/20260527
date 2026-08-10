@@ -70,10 +70,8 @@
 │   └── src/components/*.vue         # 各业务页面组件
 ├── migrations/                      # Alembic 迁移
 │   ├── env.py
-│   └── versions/001_initial.py … 027_drop_legacy_client_archive.py
+│   └── versions/001_initial.py … 028_prompts_apply_overall1.py
 ├── docs/                            # 重构参考开发文档(01-系统概览 ~ 07-重构规划 + 客户数据库-PRD)
-├── frontend2/DocReview.ArchiveDetect/ # .NET(net10.0) 业务后端重写 PoC(目录名误导,不是前端);
-│                                      #   对标 /api/archive-detect/* 契约,EF Core 连同一 PG,RapidOcrNet 内置 OCR
 ├── tests/                           # 单元测试 + 冒烟脚本
 ├── deploy/                          # 部署脚本
 │   ├── linux/                       # 生产部署（Alibaba Cloud Linux 3 / CentOS 8+）
@@ -302,5 +300,5 @@ sudo systemctl reload nginx                    # 前端 dist 变化
 
 - `README.md`：面向人类用户的快速入门与四大功能说明。
 - `CLAUDE.md`：更详细的 Claude Code 专用说明，含各流水线设计决策与遗留注意事项。
-- `docs/`：系统重构参考文档（01-系统概览 ~ 07-重构规划）；重构决策：OCR 留 Python 收敛为独立微服务（ocrapi，:8001，JWT 鉴权，源码暂不在本仓库，仅 tests/test_ocrapi_auth.py + tests/smoke/test_ocrapi_ocr.py），业务系统用 .NET 重写（frontend2/DocReview.ArchiveDetect PoC，`dotnet run` 起在 :5001），PostgreSQL 保留，前端不动。
+- `docs/`：系统重构参考文档（01-系统概览 ~ 07-重构规划）；重构决策：OCR 留 Python 收敛为独立微服务（ocrapi，:8001，JWT 鉴权，源码暂不在本仓库，仅 tests/test_ocrapi_auth.py + tests/smoke/test_ocrapi_ocr.py），业务系统用 .NET 重写（frontend2/DocReview.ArchiveDetect PoC 已随 0325eeb9 退役删除），PostgreSQL 保留，前端不动。
 - `deploy/linux/README.md`：生产部署完整手册。

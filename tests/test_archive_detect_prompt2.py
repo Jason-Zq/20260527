@@ -136,6 +136,16 @@ def test_judge_v2_operation_wiring():
     assert captured["operation"] == "judge_batch_overall_2"
     assert captured["prompt"].startswith("TPL ") and "项目标准条文" in captured["prompt"] and "a.pdf" in captured["prompt"]
     assert r == {"verdict": "match", "score": 88, "reason": "ok"}
+
+    # 总体1 走提示词库(apply_to_overall1)路径:调用方显式传 operation,应透传覆盖默认值
+    llm_service._call_llm = fake
+    try:
+        llm_service.judge_batch_overall_v2(
+            _FILES_1, "项目标准条文", judge_template="TPL {user_prompt}",
+            operation="judge_batch_overall_std")
+    finally:
+        llm_service._call_llm = orig
+    assert captured["operation"] == "judge_batch_overall_std"
     print("  OK   test_judge_v2_operation_wiring")
 
 

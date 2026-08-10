@@ -52,19 +52,34 @@
               <span v-else class="dim">(空) 首次批次判定时自动生成</span>
             </template>
           </el-table-column>
+          <el-table-column label="总体1" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.apply_to_overall1" type="success" size="small">生效中</el-tag>
+              <span v-else class="dim">-</span>
+            </template>
+          </el-table-column>
           <el-table-column label="更新时间" width="160">
             <template #default="{ row }"><span class="mono dim">{{ row.updated_at }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="220" align="center" fixed="right">
+          <el-table-column label="操作" width="200" align="center" fixed="right">
             <template #default="{ row }">
               <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
-              <el-button
-                size="small"
-                type="warning"
-                link
-                :loading="regeneratingId === row.id"
-                @click="onRegenerate(row)"
-              >重新生成提示词2</el-button>
+              <el-tooltip
+                :disabled="row.apply_to_overall1 || !!row.prompt2"
+                content="提示词2 为空,请先生成或填写提示词2"
+                placement="top"
+              >
+                <span>
+                  <el-button
+                    size="small"
+                    :type="row.apply_to_overall1 ? 'danger' : 'success'"
+                    link
+                    :loading="applyingId === row.id"
+                    :disabled="!row.apply_to_overall1 && !row.prompt2"
+                    @click="onToggleApply(row)"
+                  >{{ row.apply_to_overall1 ? '取消应用总体1' : '应用到总体1' }}</el-button>
+                </span>
+              </el-tooltip>
               <el-button size="small" type="danger" link @click="onDelete(row)">删除</el-button>
             </template>
           </el-table-column>
@@ -126,7 +141,18 @@
             placeholder="留空保存时自动填入默认模板；支持占位符 {user_prompt} {files_detail} {name_header} {stage_hint} {n_files}"
           />
         </el-form-item>
-        <el-form-item label="提示词2（该项目留底标准）">
+        <el-form-item>
+          <template #label>
+            <span>提示词2（该项目留底标准）</span>
+            <el-button
+              size="small"
+              link
+              type="warning"
+              style="margin-left: 8px"
+              :loading="generatingPrompt2"
+              @click="onGeneratePrompt2"
+            >AI 重新生成</el-button>
+          </template>
           <el-input
             v-model="form.prompt2"
             type="textarea"
@@ -150,7 +176,8 @@ import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listArchivePrompts, createArchivePrompt, updateArchivePrompt,
-  deleteArchivePrompt, regenerateArchivePrompt2, getArchivePromptDefaultTemplate,
+  deleteArchivePrompt, generateArchivePrompt2Preview, getArchivePromptDefaultTemplate,
+  applyArchivePromptToOverall1,
 } from '../api.js'
 
 const loading = ref(false)
@@ -162,7 +189,8 @@ const pageSize = ref(10)
 const dialogVisible = ref(false)
 const editingId = ref(null)
 const saving = ref(false)
-const regeneratingId = ref(null)
+const generatingPrompt2 = ref(false)
+const applyingId = ref(null)
 
 function _defaultFilters() {
   return { project_name: '', project_detail_name: '', progress_name: '' }
@@ -276,25 +304,63 @@ async function onDelete(row) {
   }
 }
 
-async function onRegenerate(row) {
+async function onGeneratePrompt2() {
+  const keyFields = ['project_name', 'project_code', 'project_detail_name', 'project_detail_code', 'progress_name']
+  if (keyFields.every((k) => !(form.value[k] || '').trim())) {
+    ElMessage.warning('请先填写五元组字段再生成')
+    return
+  }
+  if ((form.value.prompt2 || '').trim()) {
+    try {
+      await ElMessageBox.confirm(
+        '将按当前五字段调用大模型生成新的留底标准并覆盖文本框现有内容（保存后才生效），确认继续？',
+        'AI 重新生成提示词2',
+        { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
+  generatingPrompt2.value = true
+  try {
+    const resp = await generateArchivePrompt2Preview({
+      project_name: form.value.project_name,
+      project_code: form.value.project_code,
+      project_detail_name: form.value.project_detail_name,
+      project_detail_code: form.value.project_detail_code,
+      progress_name: form.value.progress_name,
+    })
+    form.value.prompt2 = resp.prompt2 || ''
+    ElMessage.success('已生成，保存后生效')
+  } catch (err) {
+    ElMessage.error('生成失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    generatingPrompt2.value = false
+  }
+}
+
+async function onToggleApply(row) {
+  const enabling = !row.apply_to_overall1
   try {
     await ElMessageBox.confirm(
-      '将按五字段调用大模型重新生成提示词2并覆盖现有内容，确认继续？',
-      '重新生成提示词2',
-      { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' },
+      enabling
+        ? '开启后，该项目+进展后续批次的【总体判定1】将改用 提示词1模板+提示词2标准 判定（不再使用业务方提交时带的判定标准）；历史批次可用「按新规则批量重判」刷新。确认开启？'
+        : '取消后，该项目+进展后续批次的【总体判定1】回到默认判定口径（业务方判定标准）。确认取消？',
+      enabling ? '应用到总体1' : '取消应用总体1',
+      { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消' },
     )
   } catch {
     return
   }
-  regeneratingId.value = row.id
+  applyingId.value = row.id
   try {
-    const resp = await regenerateArchivePrompt2(row.id)
-    row.prompt2 = resp.prompt2
-    ElMessage.success('提示词2 已重新生成')
+    const resp = await applyArchivePromptToOverall1(row.id, enabling)
+    row.apply_to_overall1 = resp.apply_to_overall1
+    ElMessage.success(enabling ? '已应用到总体1，后续同项目+进展批次生效' : '已取消应用')
   } catch (err) {
-    ElMessage.error('生成失败：' + (err.response?.data?.detail || err.message))
+    ElMessage.error('操作失败：' + (err.response?.data?.detail || err.message))
   } finally {
-    regeneratingId.value = null
+    applyingId.value = null
   }
 }
 

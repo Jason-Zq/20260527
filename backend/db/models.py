@@ -668,6 +668,8 @@ class ArchiveDetectPrompt(Base):
     progress_name = Column(String(200), nullable=False, default="", comment="进展名称")
     prompt1 = Column(Text, nullable=True, comment="提示词1：批次总体判定模板（含 {user_prompt}/{files_detail} 等占位 token）")
     prompt2 = Column(Text, nullable=True, comment="提示词2：项目专属留底标准（AI 生成，可手改）")
+    apply_to_overall1 = Column(Boolean, nullable=False, default=False, server_default="false",
+                               comment="应用到总体1：TRUE 时该五元组批次的总体判定1 改用 prompt1 模板+prompt2 标准驱动")
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间")
 

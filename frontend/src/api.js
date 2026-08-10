@@ -264,8 +264,13 @@ export async function deleteArchivePrompt(rowId) {
   return r.data
 }
 
-export async function regenerateArchivePrompt2(rowId) {
-  const r = await axios.post(`${API_BASE}/archive-detect/admin/prompts/${rowId}/regenerate-prompt2`)
+export async function generateArchivePrompt2Preview(payload) {
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/prompts/generate-prompt2-preview`, payload)
+  return r.data
+}
+
+export async function applyArchivePromptToOverall1(rowId, apply) {
+  const r = await axios.post(`${API_BASE}/archive-detect/admin/prompts/${rowId}/apply-to-overall1`, { apply })
   return r.data
 }
 

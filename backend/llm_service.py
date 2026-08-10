@@ -1093,11 +1093,14 @@ def judge_batch_overall_v2(
     stage: Optional[str] = None,
     client_name: Optional[str] = None,
     handler: Optional[str] = None,
+    operation: str = "judge_batch_overall_2",
     **context,
 ) -> dict:
     """总体判定2:提示词库 prompt1(判定模板,可编辑生效) + prompt2(项目专属留底标准) 驱动。
 
     返回 {verdict, score, reason};解析失败抛 ValueError,由调用方(best-effort)兜底。
+    operation: ai_api_calls 记录用的操作名——总体判定2 默认 judge_batch_overall_2;
+    总体1 走提示词库(apply_to_overall1)时调用方传 judge_batch_overall_std 以便区分。
     """
     prompt = render_judge_overall_template(
         judge_template,
@@ -1107,7 +1110,7 @@ def judge_batch_overall_v2(
         client_name=client_name,
         handler=handler,
     )
-    raw = _call_llm(prompt, operation="judge_batch_overall_2", **context)
+    raw = _call_llm(prompt, operation=operation, **context)
     return _parse_overall_json(raw)
 
 

@@ -305,6 +305,27 @@ async def _batch_finalize_poll(batch_id: str) -> None:
         _finalize_tasks.pop(batch_id, None)
 
 
+async def _get_applicable_prompt_row(ctx: dict) -> Optional[dict]:
+    """总体1 用:按五元组查提示词库行,仅当开启「应用到总体1」且 prompt2 非空时返回该行。
+
+    只读查询,不建行/不生成 prompt2(那是总体2 路径 `_generate_batch_overall_v2` 的职责);
+    任何异常都返回 None,总体1 回退默认判定路径。
+    """
+    try:
+        key = prompt_lib.normalize_prompt_key(
+            ctx.get("project_name"), ctx.get("project_code"), ctx.get("project_detail_name"),
+            ctx.get("project_detail_code"), ctx.get("progress_name"),
+        )
+        if not ctx.get("progress_id") or not any(key):
+            return None
+        row = await prompt_lib.get_prompt_by_key(key)
+        if row and row.get("apply_to_overall1") and (row.get("prompt2") or "").strip():
+            return row
+    except Exception as e:
+        print(f"[finalize] 提示词库查询失败(总体1 回退默认判定): {e}")
+    return None
+
+
 async def _generate_batch_overall(batch_id: str) -> None:
     """所有 file 终态后,根据 file 结果合成 overall_verdict/score/reason,update batch。"""
     ctx = await crud.get_batch_context(batch_id)
@@ -349,19 +370,35 @@ async def _generate_batch_overall(batch_id: str) -> None:
 
     overall_verdict = overall_score = None
     overall_reason = ""
+    # 提示词库「应用到总体1」:该五元组行开启开关且有 prompt2 时,
+    # 总体1 改用 prompt1 模板+prompt2 项目留底标准驱动(不再用业务方 criteria)
+    prompt_row = await _get_applicable_prompt_row(ctx)
     if done_items:
         # 优先 LLM 综合判定(理解关键件 vs 附件);失败回退规则平均分 + summarize_batch 文本
         try:
             async with _LLM_SEMAPHORE:
-                judged = await asyncio.to_thread(
-                    llm_service.judge_batch_overall,
-                    files_brief,
-                    criteria,
-                    stage,
-                    client_name=client_name,
-                    handler=handler,
-                    batch_id=batch_id,
-                )
+                if prompt_row:
+                    judged = await asyncio.to_thread(
+                        llm_service.judge_batch_overall_v2,
+                        files_brief,
+                        prompt_row["prompt2"].strip(),
+                        judge_template=prompt_row.get("prompt1"),
+                        stage=stage,
+                        client_name=client_name,
+                        handler=handler,
+                        operation="judge_batch_overall_std",
+                        batch_id=batch_id,
+                    )
+                else:
+                    judged = await asyncio.to_thread(
+                        llm_service.judge_batch_overall,
+                        files_brief,
+                        criteria,
+                        stage,
+                        client_name=client_name,
+                        handler=handler,
+                        batch_id=batch_id,
+                    )
             overall_verdict = judged["verdict"]
             overall_score = judged["score"]
             overall_reason = redactor.redact(judged.get("reason") or "")
@@ -448,6 +485,7 @@ async def _generate_batch_overall(batch_id: str) -> None:
                 "batch_id": batch_id,
                 "overall_verdict": overall_verdict,
                 "overall_score": overall_score,
+                "overall1_source": "prompt_library" if prompt_row else "default",
                 "total_files": total_files,
                 "done_count": done_count,
                 "error_count": error_count,

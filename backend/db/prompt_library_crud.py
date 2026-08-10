@@ -41,6 +41,7 @@ def _prompt_to_dict(p: ArchiveDetectPrompt) -> dict:
         "progress_name": p.progress_name,
         "prompt1": p.prompt1,
         "prompt2": p.prompt2,
+        "apply_to_overall1": bool(p.apply_to_overall1),
         "created_at": p.created_at.strftime("%Y-%m-%d %H:%M:%S") if p.created_at else "",
         "updated_at": p.updated_at.strftime("%Y-%m-%d %H:%M:%S") if p.updated_at else "",
     }
@@ -187,3 +188,15 @@ async def set_prompt2(row_id: int, prompt2: str) -> None:
         p.prompt2 = prompt2 or None
         p.updated_at = datetime.now()
         await session.commit()
+
+
+async def set_apply_to_overall1(row_id: int, apply: bool) -> bool:
+    """设置「应用到总体1」开关。行不存在返回 False。"""
+    async with async_session_maker() as session:
+        p = await session.get(ArchiveDetectPrompt, row_id)
+        if not p:
+            return False
+        p.apply_to_overall1 = bool(apply)
+        p.updated_at = datetime.now()
+        await session.commit()
+        return True

@@ -48,7 +48,7 @@
               <el-tag size="small">other</el-tag>
             </el-option>
           </el-select>
-          <el-input v-model="filters.path" clearable placeholder="路径片段模糊查" size="small" />
+          <el-input v-model="filters.body" clearable placeholder="请求体内容模糊查" size="small" />
           <el-button type="primary" size="small" @click="handleSearch">查询</el-button>
           <el-button size="small" @click="resetFilters">重置</el-button>
         </div>
@@ -142,7 +142,7 @@ function _defaultFilters() {
     const z = (n) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`
   }
-  return { dateRange: [fmt(start), fmt(now)], method: '', path: '', source: '' }
+  return { dateRange: [fmt(start), fmt(now)], method: '', body: '', source: '' }
 }
 
 const filters = ref(_defaultFilters())
@@ -151,7 +151,7 @@ function buildParams() {
   const out = { limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value }
   if (filters.value.source) out.source = filters.value.source
   if (filters.value.method) out.method = filters.value.method
-  if (filters.value.path) out.path = filters.value.path.trim()
+  if (filters.value.body) out.body = filters.value.body.trim()
   if (filters.value.dateRange?.length === 2) {
     out.since = filters.value.dateRange[0]
     out.until = filters.value.dateRange[1]
