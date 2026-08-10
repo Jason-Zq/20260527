@@ -180,15 +180,18 @@ def extract_text_pdf(pdf_path: str) -> list:
     return results
 
 
-def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> list:
+def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0,
+                      render_dpi: int = 0) -> list:
     """
     从图片型 PDF 中通过 OCR 识别文字，并保留坐标框信息。
     每页渲染为图片保存到 output/{task_id}/images/ 目录。
     max_ocr_pages: 最多OCR的页数，0表示全部OCR。超出的页面不渲染、不保存、不OCR(降低写盘峰值)。
+    render_dpi 语义同 extract_mixed_pdf(默认 200;画像管线传 300)。
     返回格式: [{"page": 1, "text": "...", "image": "xxx/page_1.png", "ocr_details": [...]}]
     """
     pdf = pypdfium2.PdfDocument(pdf_path)
     total_pages = len(pdf)
+    scale = _render_scale(render_dpi)
 
     # 创建任务图片目录: output/{task_id}/images/
     img_dir = os.path.join(OUTPUT_DIR, task_id, "images")
@@ -202,7 +205,7 @@ def extract_image_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0) -> li
     results = []
     for i in range(ocr_page_limit):
         page = pdf[i]
-        bitmap = page.render(scale=OCR_RENDER_SCALE)
+        bitmap = page.render(scale=scale)
         pil_image = bitmap.to_pil()
         pil_image, _shrunk = _downscale_if_too_large(pil_image)
 
@@ -265,6 +268,15 @@ def extract_mixed_pdf(pdf_path: str, task_id: str, max_ocr_pages: int = 0,
 
     results = []
     with pdfplumber.open(pdf_path) as plumber:
+        if not plumber.pages:
+            # pdfminer 完全解析不了页树(实测:非标 xref 表起始号写成 1 且首条仍是
+            # 惯用的 0000000000 free 条目 → 所有对象偏移整体错位 1,Root Catalog
+            # 解析失败 → pdfplumber 报 0 页,而 pypdfium2 自愈正常)
+            # → 按纯扫描件兜底,extract_image_pdf 不依赖 pdfplumber
+            print(f"  pdfplumber 解析到 0 页(pypdfium2 有 {total_pages} 页),按纯扫描件全 OCR 兜底")
+            pdf.close()
+            return extract_image_pdf(pdf_path, task_id, max_ocr_pages=max_ocr_pages,
+                                     render_dpi=render_dpi)
         # pypdfium2 与 pdfplumber 对畸形 PDF 的页数判断可能不一致,取小值防 pages 越界
         page_limit = min(page_limit, len(plumber.pages))
         for i in range(page_limit):
